@@ -180,6 +180,18 @@ fn extract_into_rejects_a_short_buffer() {
 }
 
 #[test]
+fn extract_only_writes_the_digest_width() {
+    let suite = HkdfSuite::new(MessageDigest::sha256());
+    let mut out = [0xa5; 47];
+    let prk = suite.extract(b"salt", b"ikm").unwrap();
+    let len = suite.extract_into(b"salt", b"ikm", &mut out).unwrap();
+    assert_eq!(len, 32);
+    assert_eq!(&out[..len], prk.as_ref());
+    assert_eq!(&out[len..], &[0xa5; 15]);
+    assert_eq!(format!("{prk:?}"), "HkdfPrk { len: 32, .. }");
+}
+
+#[test]
 fn extract_accepts_empty_ikm_with_a_nonempty_salt() {
     let suite = HkdfSuite::new(MessageDigest::sha256());
     let prk = suite.extract(b"salt", &[]).unwrap();

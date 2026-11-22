@@ -1,16 +1,26 @@
 use crate::ffi;
-use std::ffi::c_int;
 use std::ptr;
 
+use crate::cvt;
 use crate::error::ErrorStack;
 use crate::hash::MessageDigest;
 use crate::symm::Cipher;
-use crate::{cvt, cvt_nz, try_int};
+use std::fmt;
 
-#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+/// Key and optional IV derived for a legacy cipher.
+#[derive(Eq, PartialEq)]
 pub struct KeyIvPair {
     pub key: Vec<u8>,
     pub iv: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for KeyIvPair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeyIvPair")
+            .field("key_len", &self.key.len())
+            .field("iv_len", &self.iv.as_ref().map(Vec::len))
+            .finish_non_exhaustive()
+    }
 }
 
 /// Derives a key and an IV from various parameters.
@@ -23,80 +33,96 @@ pub struct KeyIvPair {
 ///
 /// New applications should not use this and instead use
 /// `pbkdf2_hmac` or another more modern key derivation algorithm.
+///
+/// # Errors
+///
+/// Returns an error for zero iterations, an unsupported cipher or digest,
+/// or native derivation failure.
 pub fn bytes_to_key(
     cipher: Cipher,
     digest: MessageDigest,
     data: &[u8],
-    salt: Option<&[u8]>,
+    salt: Option<&[u8; 8]>,
     count: u32,
 ) -> Result<KeyIvPair, ErrorStack> {
-    unsafe {
-        assert!(data.len() <= c_int::MAX as usize);
-        let salt_ptr = match salt {
-            Some(salt) => {
-                pub const PKCS5_SALT_LEN: c_int = 8;
-                assert_eq!(salt.len(), PKCS5_SALT_LEN as usize);
-                salt.as_ptr()
-            }
-            None => ptr::null(),
-        };
-
-        ffi::init();
-
-        let mut iv = cipher.iv_len().map(|l| vec![0; l]);
-
-        let cipher = cipher.as_ptr();
-        let digest = digest.as_ptr();
-
-        let len = cvt_nz(ffi::EVP_BytesToKey(
-            cipher,
-            digest,
-            salt_ptr,
-            ptr::null(),
-            data.len(),
-            count,
-            ptr::null_mut(),
-            ptr::null_mut(),
-        ))?;
-
-        let mut key = vec![0; len.get()];
-        let iv_ptr = iv
-            .as_mut()
-            .map(|v| v.as_mut_ptr())
-            .unwrap_or(ptr::null_mut());
-
-        cvt(ffi::EVP_BytesToKey(
-            cipher,
-            digest,
+    if count == 0 {
+        return Err(ErrorStack::internal_error_str(
+            "key derivation requires at least one iteration",
+        ));
+    }
+    let salt_ptr = salt.map_or(ptr::null(), |salt| salt.as_ptr());
+    let key_len = cipher.key_len();
+    let iv_len = cipher.iv_len();
+    if key_len == 0
+        || key_len > ffi::EVP_MAX_KEY_LENGTH as usize
+        || iv_len.is_some_and(|len| len > ffi::EVP_MAX_IV_LENGTH as usize)
+        || digest.size() == 0
+        || digest.size() > ffi::EVP_MAX_MD_SIZE as usize
+    {
+        return Err(ErrorStack::internal_error_str(
+            "unsupported cipher or digest width",
+        ));
+    }
+    ffi::init();
+    let mut key = vec![0; key_len];
+    let mut iv = iv_len.map(|len| vec![0; len]);
+    let iv_ptr = iv.as_mut().map_or(ptr::null_mut(), Vec::as_mut_ptr);
+    // SAFETY: the salt is null or exactly eight bytes; key and IV allocations
+    // match the native cipher widths. The descriptors and input stay live.
+    let result = unsafe {
+        ffi::EVP_BytesToKey(
+            cipher.as_ptr(),
+            digest.as_ptr(),
             salt_ptr,
             data.as_ptr(),
             data.len(),
             count,
             key.as_mut_ptr(),
             iv_ptr,
-        ))?;
-
-        Ok(KeyIvPair { key, iv })
+        )
+    };
+    if usize::try_from(result).ok() != Some(key_len) {
+        // SAFETY: each allocated output remains exclusively writable.
+        unsafe { ffi::OPENSSL_cleanse(key.as_mut_ptr().cast(), key.len()) };
+        if let Some(iv) = &mut iv {
+            // SAFETY: this allocated IV is exclusively writable.
+            unsafe { ffi::OPENSSL_cleanse(iv.as_mut_ptr().cast(), iv.len()) };
+        }
+        if result <= 0 {
+            return Err(ErrorStack::get());
+        }
+        return Err(ErrorStack::internal_error_str("invalid native key length"));
     }
+    Ok(KeyIvPair { key, iv })
 }
 
 /// Derives a key from a password and salt using the PBKDF2-HMAC algorithm with a digest function.
+///
+/// # Errors
+///
+/// Returns an error for zero iterations, an unsupported digest, or native failure.
 pub fn pbkdf2_hmac(
     pass: &[u8],
     salt: &[u8],
-    iter: usize,
+    iter: u32,
     hash: MessageDigest,
     key: &mut [u8],
 ) -> Result<(), ErrorStack> {
+    if iter == 0 {
+        return Err(ErrorStack::internal_error_str(
+            "PBKDF2 requires at least one iteration",
+        ));
+    }
+    ffi::init();
+    // SAFETY: the inputs and digest remain live; native receives the exact
+    // capacity of the exclusive output buffer and validates digest support.
     unsafe {
-        ffi::init();
-
         cvt(ffi::PKCS5_PBKDF2_HMAC(
             pass.as_ptr().cast(),
             pass.len(),
             salt.as_ptr(),
             salt.len(),
-            try_int(iter)?,
+            iter,
             hash.as_ptr(),
             key.len(),
             key.as_mut_ptr(),
@@ -105,6 +131,11 @@ pub fn pbkdf2_hmac(
 }
 
 /// Derives a key from a password and salt using the scrypt algorithm.
+///
+/// # Errors
+///
+/// Returns an error for invalid cost parameters, memory-limit exhaustion,
+/// or native derivation failure.
 pub fn scrypt(
     pass: &[u8],
     salt: &[u8],
@@ -114,8 +145,10 @@ pub fn scrypt(
     maxmem: usize,
     key: &mut [u8],
 ) -> Result<(), ErrorStack> {
+    ffi::init();
+    // SAFETY: input and exclusive output slices provide their exact lengths;
+    // native validates the scrypt cost and allocation parameters.
     unsafe {
-        ffi::init();
         cvt(ffi::EVP_PBE_scrypt(
             pass.as_ptr().cast(),
             pass.len(),
@@ -268,6 +301,21 @@ mod tests {
                 iv: Some(expected_iv),
             }
         );
+    }
+
+    #[test]
+    fn zero_iterations_are_rejected_without_writing_output() {
+        assert!(super::bytes_to_key(
+            Cipher::aes_128_cbc(),
+            MessageDigest::sha256(),
+            b"password",
+            None,
+            0,
+        )
+        .is_err());
+        let mut out = [0xa5; 32];
+        assert!(super::pbkdf2_hmac(b"p", b"s", 0, MessageDigest::sha256(), &mut out).is_err());
+        assert_eq!(out, [0xa5; 32]);
     }
 
     #[test]
