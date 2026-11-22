@@ -168,7 +168,7 @@ impl<T: Stackable> Drop for IntoIter<T> {
 }
 
 impl<T: Stackable> IntoIter<T> {
-    fn take(&mut self, next: fn(&mut Range<usize>) -> Option<usize>) -> Option<T> {
+    fn take_element(&mut self, next: impl FnOnce(&mut Range<usize>) -> Option<usize>) -> Option<T> {
         let index = next(&mut self.idxs)?;
         // SAFETY: the iterator exclusively owns the container, and both call
         // sites advance the disjoint shrinking range exactly once per index.
@@ -181,7 +181,7 @@ impl<T: Stackable> Iterator for IntoIter<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<T> {
-        self.take(Iterator::next)
+        self.take_element(Iterator::next)
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -191,8 +191,7 @@ impl<T: Stackable> Iterator for IntoIter<T> {
 
 impl<T: Stackable> DoubleEndedIterator for IntoIter<T> {
     fn next_back(&mut self) -> Option<T> {
-        let index = self.idxs.next_back()?;
-        Some(self.take(index))
+        self.take_element(DoubleEndedIterator::next_back)
     }
 }
 
