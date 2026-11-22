@@ -187,7 +187,7 @@ impl Error {
         unsafe {
             ffi::ERR_put_error(
                 ffi::ERR_GET_LIB(self.code),
-                ffi::ERR_GET_FUNC(self.code),
+                0,
                 ffi::ERR_GET_REASON(self.code),
                 self.file,
                 self.line,
@@ -323,7 +323,7 @@ impl Error {
 
     fn new_internal(msg: Data) -> Self {
         Self {
-            code: ffi::ERR_PACK(ffi::ERR_LIB_NONE.0 as _, 0, 0) as _,
+            code: ffi::ERR_PACK(ffi::ERR_LIB_NONE.0, 0),
             file: BORING_INTERNAL.as_ptr(),
             line: 0,
             data: msg,
