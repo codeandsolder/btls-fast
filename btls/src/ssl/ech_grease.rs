@@ -20,10 +20,12 @@ const NSS_TICKET_EARLY_DATA_INFO: ExtensionType = ExtensionType(46);
 pub struct EchGreaseAead(u16);
 
 impl EchGreaseAead {
-    /// AES-128-GCM.
-    pub const AES_128_GCM: Self = Self(ffi::EVP_HPKE_AES_128_GCM as u16);
-    /// ChaCha20-Poly1305.
-    pub const CHACHA20_POLY1305: Self = Self(ffi::EVP_HPKE_CHACHA20_POLY1305 as u16);
+    native_constants! {
+        /// AES-128-GCM.
+        AES_128_GCM = crate::native_u16(ffi::EVP_HPKE_AES_128_GCM);
+        /// ChaCha20-Poly1305.
+        CHACHA20_POLY1305 = crate::native_u16(ffi::EVP_HPKE_CHACHA20_POLY1305);
+    }
 
     /// Returns the HPKE AEAD identifier encoded in the extension.
     pub const fn id(self) -> u16 {

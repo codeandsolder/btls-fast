@@ -118,89 +118,91 @@ impl fmt::Display for Asn1GeneralizedTimeRef {
 pub struct Asn1Type(c_int);
 
 impl Asn1Type {
-    /// End-of-contents marker.
-    pub const EOC: Self = Self(ffi::V_ASN1_EOC);
+    native_constants! {
+        /// End-of-contents marker.
+        EOC = ffi::V_ASN1_EOC;
 
-    /// Boolean value.
-    pub const BOOLEAN: Self = Self(ffi::V_ASN1_BOOLEAN);
+        /// Boolean value.
+        BOOLEAN = ffi::V_ASN1_BOOLEAN;
 
-    /// Integer value.
-    pub const INTEGER: Self = Self(ffi::V_ASN1_INTEGER);
+        /// Integer value.
+        INTEGER = ffi::V_ASN1_INTEGER;
 
-    /// Bit string.
-    pub const BIT_STRING: Self = Self(ffi::V_ASN1_BIT_STRING);
+        /// Bit string.
+        BIT_STRING = ffi::V_ASN1_BIT_STRING;
 
-    /// Octet string.
-    pub const OCTET_STRING: Self = Self(ffi::V_ASN1_OCTET_STRING);
+        /// Octet string.
+        OCTET_STRING = ffi::V_ASN1_OCTET_STRING;
 
-    /// Null value.
-    pub const NULL: Self = Self(ffi::V_ASN1_NULL);
+        /// Null value.
+        NULL = ffi::V_ASN1_NULL;
 
-    /// Object identifier.
-    pub const OBJECT: Self = Self(ffi::V_ASN1_OBJECT);
+        /// Object identifier.
+        OBJECT = ffi::V_ASN1_OBJECT;
 
-    /// Object descriptor.
-    pub const OBJECT_DESCRIPTOR: Self = Self(ffi::V_ASN1_OBJECT_DESCRIPTOR);
+        /// Object descriptor.
+        OBJECT_DESCRIPTOR = ffi::V_ASN1_OBJECT_DESCRIPTOR;
 
-    /// External value.
-    pub const EXTERNAL: Self = Self(ffi::V_ASN1_EXTERNAL);
+        /// External value.
+        EXTERNAL = ffi::V_ASN1_EXTERNAL;
 
-    /// Real number.
-    pub const REAL: Self = Self(ffi::V_ASN1_REAL);
+        /// Real number.
+        REAL = ffi::V_ASN1_REAL;
 
-    /// Enumerated value.
-    pub const ENUMERATED: Self = Self(ffi::V_ASN1_ENUMERATED);
+        /// Enumerated value.
+        ENUMERATED = ffi::V_ASN1_ENUMERATED;
 
-    /// UTF-8 string.
-    pub const UTF8STRING: Self = Self(ffi::V_ASN1_UTF8STRING);
+        /// UTF-8 string.
+        UTF8STRING = ffi::V_ASN1_UTF8STRING;
 
-    /// Ordered sequence.
-    pub const SEQUENCE: Self = Self(ffi::V_ASN1_SEQUENCE);
+        /// Ordered sequence.
+        SEQUENCE = ffi::V_ASN1_SEQUENCE;
 
-    /// Set of values.
-    pub const SET: Self = Self(ffi::V_ASN1_SET);
+        /// Set of values.
+        SET = ffi::V_ASN1_SET;
 
-    /// Numeric string.
-    pub const NUMERICSTRING: Self = Self(ffi::V_ASN1_NUMERICSTRING);
+        /// Numeric string.
+        NUMERICSTRING = ffi::V_ASN1_NUMERICSTRING;
 
-    /// Printable string.
-    pub const PRINTABLESTRING: Self = Self(ffi::V_ASN1_PRINTABLESTRING);
+        /// Printable string.
+        PRINTABLESTRING = ffi::V_ASN1_PRINTABLESTRING;
 
-    /// T.61 string.
-    pub const T61STRING: Self = Self(ffi::V_ASN1_T61STRING);
+        /// T.61 string.
+        T61STRING = ffi::V_ASN1_T61STRING;
 
-    /// Teletex string.
-    pub const TELETEXSTRING: Self = Self(ffi::V_ASN1_TELETEXSTRING);
+        /// Teletex string.
+        TELETEXSTRING = ffi::V_ASN1_TELETEXSTRING;
 
-    /// Videotex string.
-    pub const VIDEOTEXSTRING: Self = Self(ffi::V_ASN1_VIDEOTEXSTRING);
+        /// Videotex string.
+        VIDEOTEXSTRING = ffi::V_ASN1_VIDEOTEXSTRING;
 
-    /// IA5 string.
-    pub const IA5STRING: Self = Self(ffi::V_ASN1_IA5STRING);
+        /// IA5 string.
+        IA5STRING = ffi::V_ASN1_IA5STRING;
 
-    /// UTC time.
-    pub const UTCTIME: Self = Self(ffi::V_ASN1_UTCTIME);
+        /// UTC time.
+        UTCTIME = ffi::V_ASN1_UTCTIME;
 
-    /// Generalized time.
-    pub const GENERALIZEDTIME: Self = Self(ffi::V_ASN1_GENERALIZEDTIME);
+        /// Generalized time.
+        GENERALIZEDTIME = ffi::V_ASN1_GENERALIZEDTIME;
 
-    /// Graphic string.
-    pub const GRAPHICSTRING: Self = Self(ffi::V_ASN1_GRAPHICSTRING);
+        /// Graphic string.
+        GRAPHICSTRING = ffi::V_ASN1_GRAPHICSTRING;
 
-    /// ISO 64 string.
-    pub const ISO64STRING: Self = Self(ffi::V_ASN1_ISO64STRING);
+        /// ISO 64 string.
+        ISO64STRING = ffi::V_ASN1_ISO64STRING;
 
-    /// Visible string.
-    pub const VISIBLESTRING: Self = Self(ffi::V_ASN1_VISIBLESTRING);
+        /// Visible string.
+        VISIBLESTRING = ffi::V_ASN1_VISIBLESTRING;
 
-    /// General string.
-    pub const GENERALSTRING: Self = Self(ffi::V_ASN1_GENERALSTRING);
+        /// General string.
+        GENERALSTRING = ffi::V_ASN1_GENERALSTRING;
 
-    /// Universal string.
-    pub const UNIVERSALSTRING: Self = Self(ffi::V_ASN1_UNIVERSALSTRING);
+        /// Universal string.
+        UNIVERSALSTRING = ffi::V_ASN1_UNIVERSALSTRING;
 
-    /// Basic multilingual plane string.
-    pub const BMPSTRING: Self = Self(ffi::V_ASN1_BMPSTRING);
+        /// Basic multilingual plane string.
+        BMPSTRING = ffi::V_ASN1_BMPSTRING;
+    }
 
     /// Constructs an `Asn1Type` from a raw OpenSSL value.
     #[must_use]

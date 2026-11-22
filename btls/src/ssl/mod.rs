@@ -556,41 +556,42 @@ impl SniError {
 pub struct SslAlert(c_int);
 
 impl SslAlert {
-    pub const CLOSE_NOTIFY: Self = Self(ffi::SSL_AD_CLOSE_NOTIFY);
-    pub const UNEXPECTED_MESSAGE: Self = Self(ffi::SSL_AD_UNEXPECTED_MESSAGE);
-    pub const BAD_RECORD_MAC: Self = Self(ffi::SSL_AD_BAD_RECORD_MAC);
-    pub const DECRYPTION_FAILED: Self = Self(ffi::SSL_AD_DECRYPTION_FAILED);
-    pub const RECORD_OVERFLOW: Self = Self(ffi::SSL_AD_RECORD_OVERFLOW);
-    pub const DECOMPRESSION_FAILURE: Self = Self(ffi::SSL_AD_DECOMPRESSION_FAILURE);
-    pub const HANDSHAKE_FAILURE: Self = Self(ffi::SSL_AD_HANDSHAKE_FAILURE);
-    pub const NO_CERTIFICATE: Self = Self(ffi::SSL_AD_NO_CERTIFICATE);
-    pub const BAD_CERTIFICATE: Self = Self(ffi::SSL_AD_BAD_CERTIFICATE);
-    pub const UNSUPPORTED_CERTIFICATE: Self = Self(ffi::SSL_AD_UNSUPPORTED_CERTIFICATE);
-    pub const CERTIFICATE_REVOKED: Self = Self(ffi::SSL_AD_CERTIFICATE_REVOKED);
-    pub const CERTIFICATE_EXPIRED: Self = Self(ffi::SSL_AD_CERTIFICATE_EXPIRED);
-    pub const CERTIFICATE_UNKNOWN: Self = Self(ffi::SSL_AD_CERTIFICATE_UNKNOWN);
-    pub const ILLEGAL_PARAMETER: Self = Self(ffi::SSL_AD_ILLEGAL_PARAMETER);
-    pub const UNKNOWN_CA: Self = Self(ffi::SSL_AD_UNKNOWN_CA);
-    pub const ACCESS_DENIED: Self = Self(ffi::SSL_AD_ACCESS_DENIED);
-    pub const DECODE_ERROR: Self = Self(ffi::SSL_AD_DECODE_ERROR);
-    pub const DECRYPT_ERROR: Self = Self(ffi::SSL_AD_DECRYPT_ERROR);
-    pub const EXPORT_RESTRICTION: Self = Self(ffi::SSL_AD_EXPORT_RESTRICTION);
-    pub const PROTOCOL_VERSION: Self = Self(ffi::SSL_AD_PROTOCOL_VERSION);
-    pub const INSUFFICIENT_SECURITY: Self = Self(ffi::SSL_AD_INSUFFICIENT_SECURITY);
-    pub const INTERNAL_ERROR: Self = Self(ffi::SSL_AD_INTERNAL_ERROR);
-    pub const INAPPROPRIATE_FALLBACK: Self = Self(ffi::SSL_AD_INAPPROPRIATE_FALLBACK);
-    pub const USER_CANCELLED: Self = Self(ffi::SSL_AD_USER_CANCELLED);
-    pub const NO_RENEGOTIATION: Self = Self(ffi::SSL_AD_NO_RENEGOTIATION);
-    pub const MISSING_EXTENSION: Self = Self(ffi::SSL_AD_MISSING_EXTENSION);
-    pub const UNSUPPORTED_EXTENSION: Self = Self(ffi::SSL_AD_UNSUPPORTED_EXTENSION);
-    pub const CERTIFICATE_UNOBTAINABLE: Self = Self(ffi::SSL_AD_CERTIFICATE_UNOBTAINABLE);
-    pub const UNRECOGNIZED_NAME: Self = Self(ffi::SSL_AD_UNRECOGNIZED_NAME);
-    pub const BAD_CERTIFICATE_STATUS_RESPONSE: Self =
-        Self(ffi::SSL_AD_BAD_CERTIFICATE_STATUS_RESPONSE);
-    pub const BAD_CERTIFICATE_HASH_VALUE: Self = Self(ffi::SSL_AD_BAD_CERTIFICATE_HASH_VALUE);
-    pub const UNKNOWN_PSK_IDENTITY: Self = Self(ffi::SSL_AD_UNKNOWN_PSK_IDENTITY);
-    pub const CERTIFICATE_REQUIRED: Self = Self(ffi::SSL_AD_CERTIFICATE_REQUIRED);
-    pub const NO_APPLICATION_PROTOCOL: Self = Self(ffi::SSL_AD_NO_APPLICATION_PROTOCOL);
+    native_constants! {
+        CLOSE_NOTIFY = ffi::SSL_AD_CLOSE_NOTIFY;
+        UNEXPECTED_MESSAGE = ffi::SSL_AD_UNEXPECTED_MESSAGE;
+        BAD_RECORD_MAC = ffi::SSL_AD_BAD_RECORD_MAC;
+        DECRYPTION_FAILED = ffi::SSL_AD_DECRYPTION_FAILED;
+        RECORD_OVERFLOW = ffi::SSL_AD_RECORD_OVERFLOW;
+        DECOMPRESSION_FAILURE = ffi::SSL_AD_DECOMPRESSION_FAILURE;
+        HANDSHAKE_FAILURE = ffi::SSL_AD_HANDSHAKE_FAILURE;
+        NO_CERTIFICATE = ffi::SSL_AD_NO_CERTIFICATE;
+        BAD_CERTIFICATE = ffi::SSL_AD_BAD_CERTIFICATE;
+        UNSUPPORTED_CERTIFICATE = ffi::SSL_AD_UNSUPPORTED_CERTIFICATE;
+        CERTIFICATE_REVOKED = ffi::SSL_AD_CERTIFICATE_REVOKED;
+        CERTIFICATE_EXPIRED = ffi::SSL_AD_CERTIFICATE_EXPIRED;
+        CERTIFICATE_UNKNOWN = ffi::SSL_AD_CERTIFICATE_UNKNOWN;
+        ILLEGAL_PARAMETER = ffi::SSL_AD_ILLEGAL_PARAMETER;
+        UNKNOWN_CA = ffi::SSL_AD_UNKNOWN_CA;
+        ACCESS_DENIED = ffi::SSL_AD_ACCESS_DENIED;
+        DECODE_ERROR = ffi::SSL_AD_DECODE_ERROR;
+        DECRYPT_ERROR = ffi::SSL_AD_DECRYPT_ERROR;
+        EXPORT_RESTRICTION = ffi::SSL_AD_EXPORT_RESTRICTION;
+        PROTOCOL_VERSION = ffi::SSL_AD_PROTOCOL_VERSION;
+        INSUFFICIENT_SECURITY = ffi::SSL_AD_INSUFFICIENT_SECURITY;
+        INTERNAL_ERROR = ffi::SSL_AD_INTERNAL_ERROR;
+        INAPPROPRIATE_FALLBACK = ffi::SSL_AD_INAPPROPRIATE_FALLBACK;
+        USER_CANCELLED = ffi::SSL_AD_USER_CANCELLED;
+        NO_RENEGOTIATION = ffi::SSL_AD_NO_RENEGOTIATION;
+        MISSING_EXTENSION = ffi::SSL_AD_MISSING_EXTENSION;
+        UNSUPPORTED_EXTENSION = ffi::SSL_AD_UNSUPPORTED_EXTENSION;
+        CERTIFICATE_UNOBTAINABLE = ffi::SSL_AD_CERTIFICATE_UNOBTAINABLE;
+        UNRECOGNIZED_NAME = ffi::SSL_AD_UNRECOGNIZED_NAME;
+        BAD_CERTIFICATE_STATUS_RESPONSE = ffi::SSL_AD_BAD_CERTIFICATE_STATUS_RESPONSE;
+        BAD_CERTIFICATE_HASH_VALUE = ffi::SSL_AD_BAD_CERTIFICATE_HASH_VALUE;
+        UNKNOWN_PSK_IDENTITY = ffi::SSL_AD_UNKNOWN_PSK_IDENTITY;
+        CERTIFICATE_REQUIRED = ffi::SSL_AD_CERTIFICATE_REQUIRED;
+        NO_APPLICATION_PROTOCOL = ffi::SSL_AD_NO_APPLICATION_PROTOCOL;
+    }
 
     /// Returns the alert's description code.
     #[must_use]
@@ -652,52 +653,47 @@ pub enum SelectCertAction {
 
 /// Extension types, to be used with `ClientHello::get_extension`.
 ///
-/// **WARNING**: The current implementation of `From` is unsound, as it's possible to create an
-/// ExtensionType that is not defined by the impl. `From` will be deprecated in favor of `TryFrom`
-/// in the next major bump of the library.
+/// Unrecognized wire identifiers are represented without loss.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct ExtensionType(u16);
 
 impl ExtensionType {
-    pub const SERVER_NAME: Self = Self(ffi::TLSEXT_TYPE_server_name as u16);
-    pub const STATUS_REQUEST: Self = Self(ffi::TLSEXT_TYPE_status_request as u16);
-    pub const EC_POINT_FORMATS: Self = Self(ffi::TLSEXT_TYPE_ec_point_formats as u16);
-    pub const SIGNATURE_ALGORITHMS: Self = Self(ffi::TLSEXT_TYPE_signature_algorithms as u16);
-    pub const TRUST_ANCHORS: Self = Self(ffi::TLSEXT_TYPE_trust_anchors as u16);
-    pub const SRTP: Self = Self(ffi::TLSEXT_TYPE_srtp as u16);
-    pub const APPLICATION_LAYER_PROTOCOL_NEGOTIATION: Self =
-        Self(ffi::TLSEXT_TYPE_application_layer_protocol_negotiation as u16);
-    pub const PADDING: Self = Self(ffi::TLSEXT_TYPE_padding as u16);
-    pub const EXTENDED_MASTER_SECRET: Self = Self(ffi::TLSEXT_TYPE_extended_master_secret as u16);
-    pub const QUIC_TRANSPORT_PARAMETERS_LEGACY: Self =
-        Self(ffi::TLSEXT_TYPE_quic_transport_parameters_legacy as u16);
-    pub const QUIC_TRANSPORT_PARAMETERS_STANDARD: Self =
-        Self(ffi::TLSEXT_TYPE_quic_transport_parameters_standard as u16);
-    pub const CERT_COMPRESSION: Self = Self(ffi::TLSEXT_TYPE_cert_compression as u16);
-    pub const SESSION_TICKET: Self = Self(ffi::TLSEXT_TYPE_session_ticket as u16);
-    pub const SUPPORTED_GROUPS: Self = Self(ffi::TLSEXT_TYPE_supported_groups as u16);
-    pub const PRE_SHARED_KEY: Self = Self(ffi::TLSEXT_TYPE_pre_shared_key as u16);
-    pub const EARLY_DATA: Self = Self(ffi::TLSEXT_TYPE_early_data as u16);
-    pub const SUPPORTED_VERSIONS: Self = Self(ffi::TLSEXT_TYPE_supported_versions as u16);
-    pub const COOKIE: Self = Self(ffi::TLSEXT_TYPE_cookie as u16);
-    pub const PSK_KEY_EXCHANGE_MODES: Self = Self(ffi::TLSEXT_TYPE_psk_key_exchange_modes as u16);
-    pub const CERTIFICATE_AUTHORITIES: Self = Self(ffi::TLSEXT_TYPE_certificate_authorities as u16);
-    pub const SIGNATURE_ALGORITHMS_CERT: Self =
-        Self(ffi::TLSEXT_TYPE_signature_algorithms_cert as u16);
-    pub const KEY_SHARE: Self = Self(ffi::TLSEXT_TYPE_key_share as u16);
-    pub const RENEGOTIATE: Self = Self(ffi::TLSEXT_TYPE_renegotiate as u16);
-    pub const DELEGATED_CREDENTIAL: Self = Self(ffi::TLSEXT_TYPE_delegated_credential as u16);
-    pub const APPLICATION_SETTINGS: Self = Self(ffi::TLSEXT_TYPE_application_settings as u16);
-    pub const APPLICATION_SETTINGS_OLD: Self =
-        Self(ffi::TLSEXT_TYPE_application_settings_old as u16);
-    pub const ENCRYPTED_CLIENT_HELLO: Self = Self(ffi::TLSEXT_TYPE_encrypted_client_hello as u16);
-    pub const CERTIFICATE_TIMESTAMP: Self = Self(ffi::TLSEXT_TYPE_certificate_timestamp as u16);
-    pub const NEXT_PROTO_NEG: Self = Self(ffi::TLSEXT_TYPE_next_proto_neg as u16);
-    pub const CHANNEL_ID: Self = Self(ffi::TLSEXT_TYPE_channel_id as u16);
-    #[cfg(not(feature = "fips"))]
-    pub const RECORD_SIZE_LIMIT: Self = Self(ffi::TLSEXT_TYPE_record_size_limit as u16);
-    pub const SERVER_PADDING: Self = Self(ffi::TLSEXT_TYPE_server_padding as u16);
+    native_constants! {
+        SERVER_NAME = crate::native_u16(ffi::TLSEXT_TYPE_server_name);
+        STATUS_REQUEST = crate::native_u16(ffi::TLSEXT_TYPE_status_request);
+        EC_POINT_FORMATS = crate::native_u16(ffi::TLSEXT_TYPE_ec_point_formats);
+        SIGNATURE_ALGORITHMS = crate::native_u16(ffi::TLSEXT_TYPE_signature_algorithms);
+        TRUST_ANCHORS = crate::native_u16(ffi::TLSEXT_TYPE_trust_anchors);
+        SRTP = crate::native_u16(ffi::TLSEXT_TYPE_srtp);
+        APPLICATION_LAYER_PROTOCOL_NEGOTIATION = crate::native_u16(ffi::TLSEXT_TYPE_application_layer_protocol_negotiation);
+        PADDING = crate::native_u16(ffi::TLSEXT_TYPE_padding);
+        EXTENDED_MASTER_SECRET = crate::native_u16(ffi::TLSEXT_TYPE_extended_master_secret);
+        QUIC_TRANSPORT_PARAMETERS_LEGACY = crate::native_u16(ffi::TLSEXT_TYPE_quic_transport_parameters_legacy);
+        QUIC_TRANSPORT_PARAMETERS_STANDARD = crate::native_u16(ffi::TLSEXT_TYPE_quic_transport_parameters_standard);
+        CERT_COMPRESSION = crate::native_u16(ffi::TLSEXT_TYPE_cert_compression);
+        SESSION_TICKET = crate::native_u16(ffi::TLSEXT_TYPE_session_ticket);
+        SUPPORTED_GROUPS = crate::native_u16(ffi::TLSEXT_TYPE_supported_groups);
+        PRE_SHARED_KEY = crate::native_u16(ffi::TLSEXT_TYPE_pre_shared_key);
+        EARLY_DATA = crate::native_u16(ffi::TLSEXT_TYPE_early_data);
+        SUPPORTED_VERSIONS = crate::native_u16(ffi::TLSEXT_TYPE_supported_versions);
+        COOKIE = crate::native_u16(ffi::TLSEXT_TYPE_cookie);
+        PSK_KEY_EXCHANGE_MODES = crate::native_u16(ffi::TLSEXT_TYPE_psk_key_exchange_modes);
+        CERTIFICATE_AUTHORITIES = crate::native_u16(ffi::TLSEXT_TYPE_certificate_authorities);
+        SIGNATURE_ALGORITHMS_CERT = crate::native_u16(ffi::TLSEXT_TYPE_signature_algorithms_cert);
+        KEY_SHARE = crate::native_u16(ffi::TLSEXT_TYPE_key_share);
+        RENEGOTIATE = crate::native_u16(ffi::TLSEXT_TYPE_renegotiate);
+        DELEGATED_CREDENTIAL = crate::native_u16(ffi::TLSEXT_TYPE_delegated_credential);
+        APPLICATION_SETTINGS = crate::native_u16(ffi::TLSEXT_TYPE_application_settings);
+        APPLICATION_SETTINGS_OLD = crate::native_u16(ffi::TLSEXT_TYPE_application_settings_old);
+        ENCRYPTED_CLIENT_HELLO = crate::native_u16(ffi::TLSEXT_TYPE_encrypted_client_hello);
+        CERTIFICATE_TIMESTAMP = crate::native_u16(ffi::TLSEXT_TYPE_certificate_timestamp);
+        NEXT_PROTO_NEG = crate::native_u16(ffi::TLSEXT_TYPE_next_proto_neg);
+        CHANNEL_ID = crate::native_u16(ffi::TLSEXT_TYPE_channel_id);
+        #[cfg(not(feature = "fips"))]
+        RECORD_SIZE_LIMIT = crate::native_u16(ffi::TLSEXT_TYPE_record_size_limit);
+        SERVER_PADDING = crate::native_u16(ffi::TLSEXT_TYPE_server_padding);
+    }
 
     /// Returns the wire extension type.
     #[must_use]
@@ -725,29 +721,31 @@ impl From<u16> for ExtensionType {
 pub struct SslVersion(u16);
 
 impl SslVersion {
-    /// SSLv3
-    pub const SSL3: Self = Self(ffi::SSL3_VERSION as _);
+    native_constants! {
+        /// SSLv3
+        SSL3 = crate::native_u16(ffi::SSL3_VERSION);
 
-    /// TLSv1.0
-    pub const TLS1: Self = Self(ffi::TLS1_VERSION as _);
+        /// TLSv1.0
+        TLS1 = crate::native_u16(ffi::TLS1_VERSION);
 
-    /// TLSv1.1
-    pub const TLS1_1: Self = Self(ffi::TLS1_1_VERSION as _);
+        /// TLSv1.1
+        TLS1_1 = crate::native_u16(ffi::TLS1_1_VERSION);
 
-    /// TLSv1.2
-    pub const TLS1_2: Self = Self(ffi::TLS1_2_VERSION as _);
+        /// TLSv1.2
+        TLS1_2 = crate::native_u16(ffi::TLS1_2_VERSION);
 
-    /// TLSv1.3
-    pub const TLS1_3: Self = Self(ffi::TLS1_3_VERSION as _);
+        /// TLSv1.3
+        TLS1_3 = crate::native_u16(ffi::TLS1_3_VERSION);
 
-    /// DTLSv1.0
-    pub const DTLS1: Self = Self(ffi::DTLS1_VERSION as _);
+        /// DTLSv1.0
+        DTLS1 = crate::native_u16(ffi::DTLS1_VERSION);
 
-    /// DTLSv1.2
-    pub const DTLS1_2: Self = Self(ffi::DTLS1_2_VERSION as _);
+        /// DTLSv1.2
+        DTLS1_2 = crate::native_u16(ffi::DTLS1_2_VERSION);
 
-    /// DTLSv1.3
-    pub const DTLS1_3: Self = Self(ffi::DTLS1_3_VERSION as _);
+        /// DTLSv1.3
+        DTLS1_3 = crate::native_u16(ffi::DTLS1_3_VERSION);
+    }
 }
 
 impl TryFrom<u16> for SslVersion {
@@ -802,45 +800,45 @@ impl fmt::Display for SslVersion {
 
 /// A signature verification algorithm.
 ///
-/// **WARNING**: The current implementation of `From` is unsound, as it's possible to create an
-/// SslSignatureAlgorithm that is not defined by the impl. `From` will be deprecated in favor of
-/// `TryFrom` in the next major bump of the library.
+/// Unrecognized wire identifiers are represented without loss.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SslSignatureAlgorithm(u16);
 
 impl SslSignatureAlgorithm {
-    pub const RSA_PKCS1_SHA1: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA1 as _);
+    native_constants! {
+        RSA_PKCS1_SHA1 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA1);
 
-    pub const RSA_PKCS1_SHA256: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA256 as _);
+        RSA_PKCS1_SHA256 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA256);
 
-    pub const RSA_PKCS1_SHA384: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA384 as _);
+        RSA_PKCS1_SHA384 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA384);
 
-    pub const RSA_PKCS1_SHA512: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA512 as _);
+        RSA_PKCS1_SHA512 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA512);
 
-    pub const RSA_PKCS1_MD5_SHA1: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_MD5_SHA1 as _);
+        RSA_PKCS1_MD5_SHA1 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_MD5_SHA1);
 
-    pub const ECDSA_SHA1: Self = Self(ffi::SSL_SIGN_ECDSA_SHA1 as _);
+        ECDSA_SHA1 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SHA1);
 
-    pub const ECDSA_SECP256R1_SHA256: Self = Self(ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256 as _);
+        ECDSA_SECP256R1_SHA256 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256);
 
-    pub const ECDSA_SECP384R1_SHA384: Self = Self(ffi::SSL_SIGN_ECDSA_SECP384R1_SHA384 as _);
+        ECDSA_SECP384R1_SHA384 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SECP384R1_SHA384);
 
-    pub const ECDSA_SECP521R1_SHA512: Self = Self(ffi::SSL_SIGN_ECDSA_SECP521R1_SHA512 as _);
+        ECDSA_SECP521R1_SHA512 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SECP521R1_SHA512);
 
-    pub const RSA_PSS_RSAE_SHA256: Self = Self(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256 as _);
+        RSA_PSS_RSAE_SHA256 = crate::native_u16(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256);
 
-    pub const RSA_PSS_RSAE_SHA384: Self = Self(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA384 as _);
+        RSA_PSS_RSAE_SHA384 = crate::native_u16(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA384);
 
-    pub const RSA_PSS_RSAE_SHA512: Self = Self(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA512 as _);
+        RSA_PSS_RSAE_SHA512 = crate::native_u16(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA512);
 
-    pub const ED25519: Self = Self(ffi::SSL_SIGN_ED25519 as _);
+        ED25519 = crate::native_u16(ffi::SSL_SIGN_ED25519);
 
-    pub const ML_DSA_44: Self = Self(ffi::SSL_SIGN_ML_DSA_44 as _);
+        ML_DSA_44 = crate::native_u16(ffi::SSL_SIGN_ML_DSA_44);
 
-    pub const ML_DSA_65: Self = Self(ffi::SSL_SIGN_ML_DSA_65 as _);
+        ML_DSA_65 = crate::native_u16(ffi::SSL_SIGN_ML_DSA_65);
 
-    pub const ML_DSA_87: Self = Self(ffi::SSL_SIGN_ML_DSA_87 as _);
+        ML_DSA_87 = crate::native_u16(ffi::SSL_SIGN_ML_DSA_87);
+    }
 
     /// Returns the name of this signature algorithm, or `None` if unknown.
     ///
@@ -883,27 +881,29 @@ impl From<u16> for SslSignatureAlgorithm {
 pub struct KeyShare(u16);
 
 impl KeyShare {
-    pub const P256: Self = Self(ffi::SSL_GROUP_SECP256R1 as _);
+    native_constants! {
+        P256 = crate::native_u16(ffi::SSL_GROUP_SECP256R1);
 
-    pub const P384: Self = Self(ffi::SSL_GROUP_SECP384R1 as _);
+        P384 = crate::native_u16(ffi::SSL_GROUP_SECP384R1);
 
-    pub const P521: Self = Self(ffi::SSL_GROUP_SECP521R1 as _);
+        P521 = crate::native_u16(ffi::SSL_GROUP_SECP521R1);
 
-    pub const X25519: Self = Self(ffi::SSL_GROUP_X25519 as _);
+        X25519 = crate::native_u16(ffi::SSL_GROUP_X25519);
 
-    pub const X25519_MLKEM768: Self = Self(ffi::SSL_GROUP_X25519_MLKEM768 as _);
+        X25519_MLKEM768 = crate::native_u16(ffi::SSL_GROUP_X25519_MLKEM768);
 
-    pub const X25519_KYBER768_DRAFT00: Self = Self(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00 as _);
+        X25519_KYBER768_DRAFT00 = crate::native_u16(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00);
 
-    pub const P256_KYBER768_DRAFT00: Self = Self(ffi::SSL_GROUP_P256_KYBER768_DRAFT00 as _);
+        P256_KYBER768_DRAFT00 = crate::native_u16(ffi::SSL_GROUP_P256_KYBER768_DRAFT00);
 
-    pub const MLKEM1024: Self = Self(ffi::SSL_GROUP_MLKEM1024 as _);
+        MLKEM1024 = crate::native_u16(ffi::SSL_GROUP_MLKEM1024);
 
-    #[cfg(not(feature = "fips"))]
-    pub const FFDHE2048: Self = Self(ffi::SSL_GROUP_FFDHE2048 as _);
+        #[cfg(not(feature = "fips"))]
+        FFDHE2048 = crate::native_u16(ffi::SSL_GROUP_FFDHE2048);
 
-    #[cfg(not(feature = "fips"))]
-    pub const FFDHE3072: Self = Self(ffi::SSL_GROUP_FFDHE3072 as _);
+        #[cfg(not(feature = "fips"))]
+        FFDHE3072 = crate::native_u16(ffi::SSL_GROUP_FFDHE3072);
+    }
 }
 
 /// A TLS 1.3 cipher suite.
@@ -912,11 +912,13 @@ impl KeyShare {
 pub struct Tls13Cipher(u16);
 
 impl Tls13Cipher {
-    pub const AES_128_GCM_SHA256: Self = Self(ffi::SSL_CIPHER_AES_128_GCM_SHA256 as _);
+    native_constants! {
+        AES_128_GCM_SHA256 = crate::native_u16(ffi::SSL_CIPHER_AES_128_GCM_SHA256);
 
-    pub const AES_256_GCM_SHA384: Self = Self(ffi::SSL_CIPHER_AES_256_GCM_SHA384 as _);
+        AES_256_GCM_SHA384 = crate::native_u16(ffi::SSL_CIPHER_AES_256_GCM_SHA384);
 
-    pub const CHACHA20_POLY1305_SHA256: Self = Self(ffi::SSL_CIPHER_CHACHA20_POLY1305_SHA256 as _);
+        CHACHA20_POLY1305_SHA256 = crate::native_u16(ffi::SSL_CIPHER_CHACHA20_POLY1305_SHA256);
+    }
 }
 
 /// A compliance policy.
@@ -945,12 +947,14 @@ impl CompliancePolicy {
 pub struct CertificateCompressionAlgorithm(u16);
 
 impl CertificateCompressionAlgorithm {
-    pub const ZLIB: Self = Self(ffi::TLSEXT_cert_compression_zlib as u16);
+    native_constants! {
+        ZLIB = crate::native_u16(ffi::TLSEXT_cert_compression_zlib);
 
-    pub const BROTLI: Self = Self(ffi::TLSEXT_cert_compression_brotli as u16);
+        BROTLI = crate::native_u16(ffi::TLSEXT_cert_compression_brotli);
 
-    #[cfg(not(feature = "fips"))]
-    pub const ZSTD: Self = Self(ffi::TLSEXT_cert_compression_zstd as u16);
+        #[cfg(not(feature = "fips"))]
+        ZSTD = crate::native_u16(ffi::TLSEXT_cert_compression_zstd);
+    }
 }
 
 /// A standard implementation of protocol selection for Application Layer Protocol Negotiation

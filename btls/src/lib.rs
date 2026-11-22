@@ -152,6 +152,13 @@ pub mod symm;
 pub mod version;
 pub mod x509;
 
+const fn native_u16(value: c_int) -> u16 {
+    let [low, high, upper_low, upper_high] = value.to_le_bytes();
+    // These conversions occur only in compile-time native protocol constants.
+    assert!(upper_low == 0 && upper_high == 0);
+    u16::from_le_bytes([low, high])
+}
+
 fn cvt_p<T>(r: *mut T) -> Result<*mut T, ErrorStack> {
     if r.is_null() {
         Err(ErrorStack::get())

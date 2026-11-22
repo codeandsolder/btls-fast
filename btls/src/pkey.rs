@@ -73,21 +73,20 @@ pub enum Private {}
 pub struct Id(c_int);
 
 impl Id {
-    pub const RSA: Self = Self(ffi::EVP_PKEY_RSA);
-    /// RSA-PSS key type
-    #[doc(alias = "RSA_PSS")]
-    pub const RSAPSS: Self = Self(ffi::EVP_PKEY_RSA_PSS);
-    /// rust-openssl alias
-    #[doc(hidden)]
-    pub const RSA_PSS: Self = Self::RSAPSS;
-    pub const DSA: Self = Self(ffi::EVP_PKEY_DSA);
-    pub const DH: Self = Self(ffi::EVP_PKEY_DH);
-    pub const EC: Self = Self(ffi::EVP_PKEY_EC);
-    pub const ED25519: Self = Self(ffi::EVP_PKEY_ED25519);
-    pub const ED448: Self = Self(ffi::EVP_PKEY_ED448);
-    pub const X25519: Self = Self(ffi::EVP_PKEY_X25519);
-    pub const X448: Self = Self(ffi::EVP_PKEY_X448);
-    pub const HKDF: Self = Self(ffi::EVP_PKEY_HKDF);
+    native_constants! {
+        RSA = ffi::EVP_PKEY_RSA;
+        /// RSA-PSS key type
+        #[doc(alias = "RSA_PSS")]
+        RSAPSS = ffi::EVP_PKEY_RSA_PSS;
+        DSA = ffi::EVP_PKEY_DSA;
+        DH = ffi::EVP_PKEY_DH;
+        EC = ffi::EVP_PKEY_EC;
+        ED25519 = ffi::EVP_PKEY_ED25519;
+        ED448 = ffi::EVP_PKEY_ED448;
+        X25519 = ffi::EVP_PKEY_X25519;
+        X448 = ffi::EVP_PKEY_X448;
+        HKDF = ffi::EVP_PKEY_HKDF;
+    }
 
     /// Creates a `Id` from an integer representation.
     #[must_use]
@@ -154,6 +153,40 @@ impl<T> ToOwned for PKeyRef<T> {
             PKey::from_ptr(self.as_ptr())
         }
     }
+}
+
+// The native public/private byte extraction APIs have the same length-query
+// and caller-buffer contract.
+macro_rules! raw_key_accessors {
+    ($length:ident, $extract:ident, $native:ident) => {
+        /// Queries the raw key representation's required byte count.
+        ///
+        /// # Errors
+        ///
+        /// The key type does not support raw extraction.
+        #[corresponds($native)]
+        pub fn $length(&self) -> Result<usize, ErrorStack> {
+            let mut size = 0;
+            // SAFETY: This is a live key. Null output requests a length query.
+            unsafe { cvt_0i(ffi::$native(self.as_ptr(), ptr::null_mut(), &raw mut size))? };
+            Ok(size)
+        }
+
+        /// Writes the raw key into the supplied buffer and returns its used prefix.
+        ///
+        /// # Errors
+        ///
+        /// The key type does not support raw extraction or the output is too small.
+        #[corresponds($native)]
+        pub fn $extract<'a>(&self, out: &'a mut [u8]) -> Result<&'a [u8], ErrorStack> {
+            let mut size = out.len();
+            // SAFETY: The live key is shared-borrowed. The output is exclusive,
+            // and its capacity is passed to the native function.
+            unsafe { cvt_0i(ffi::$native(self.as_ptr(), out.as_mut_ptr(), &raw mut size))? };
+            out.get(..size)
+                .ok_or_else(|| ErrorStack::internal_error_str("invalid native key length"))
+        }
+    };
 }
 
 impl<T> PKeyRef<T> {
@@ -246,35 +279,11 @@ where
         unsafe { ffi::EVP_PKEY_cmp(self.as_ptr(), other.as_ptr()) == 1 }
     }
 
-    /// Returns the length of the "raw" form of the public key. Only supported for certain key types.
-    #[corresponds(EVP_PKEY_get_raw_public_key)]
-    pub fn raw_public_key_len(&self) -> Result<usize, ErrorStack> {
-        unsafe {
-            let mut size = 0;
-            _ = cvt_0i(ffi::EVP_PKEY_get_raw_public_key(
-                self.as_ptr(),
-                ptr::null_mut(),
-                &raw mut size,
-            ))?;
-            Ok(size)
-        }
-    }
-
-    /// Outputs a copy of the "raw" form of the public key. Only supported for certain key types.
-    ///
-    /// Returns the used portion of `out`.
-    #[corresponds(EVP_PKEY_get_raw_public_key)]
-    pub fn raw_public_key<'a>(&self, out: &'a mut [u8]) -> Result<&'a [u8], ErrorStack> {
-        unsafe {
-            let mut size = out.len();
-            _ = cvt_0i(ffi::EVP_PKEY_get_raw_public_key(
-                self.as_ptr(),
-                out.as_mut_ptr(),
-                &raw mut size,
-            ))?;
-            Ok(&out[..size])
-        }
-    }
+    raw_key_accessors!(
+        raw_public_key_len,
+        raw_public_key,
+        EVP_PKEY_get_raw_public_key
+    );
 }
 
 impl<T> PKeyRef<T>
@@ -314,35 +323,11 @@ where
         ffi::i2d_PKCS8PrivateKey_bio
     }
 
-    /// Returns the length of the "raw" form of the private key. Only supported for certain key types.
-    #[corresponds(EVP_PKEY_get_raw_private_key)]
-    pub fn raw_private_key_len(&self) -> Result<usize, ErrorStack> {
-        unsafe {
-            let mut size = 0;
-            _ = cvt_0i(ffi::EVP_PKEY_get_raw_private_key(
-                self.as_ptr(),
-                ptr::null_mut(),
-                &raw mut size,
-            ))?;
-            Ok(size)
-        }
-    }
-
-    /// Outputs a copy of the "raw" form of the private key. Only supported for certain key types.
-    ///
-    /// Returns the used portion of `out`.
-    #[corresponds(EVP_PKEY_get_raw_private_key)]
-    pub fn raw_private_key<'a>(&self, out: &'a mut [u8]) -> Result<&'a [u8], ErrorStack> {
-        unsafe {
-            let mut size = out.len();
-            _ = cvt_0i(ffi::EVP_PKEY_get_raw_private_key(
-                self.as_ptr(),
-                out.as_mut_ptr(),
-                &raw mut size,
-            ))?;
-            Ok(&out[..size])
-        }
-    }
+    raw_key_accessors!(
+        raw_private_key_len,
+        raw_private_key,
+        EVP_PKEY_get_raw_private_key
+    );
 }
 
 impl<T> fmt::Debug for PKey<T> {

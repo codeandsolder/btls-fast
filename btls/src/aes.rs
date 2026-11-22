@@ -38,7 +38,7 @@
 //! ```
 //!
 use crate::ffi;
-use libc::c_int;
+use libc::{c_int, c_uint};
 use openssl_macros::corresponds;
 use std::{fmt, mem, ptr};
 
@@ -69,50 +69,42 @@ impl AesKey {
 
     /// Prepares a key for encryption.
     ///
-    /// # Failure
+    /// # Errors
     ///
     /// Returns an error if the key is not 128, 192, or 256 bits.
     #[corresponds(AES_set_encrypt_key)]
     pub fn new_encrypt(key: &[u8]) -> Result<Self, KeyError> {
-        unsafe {
-            assert!(key.len() <= c_int::MAX as usize / 8);
-
-            let mut aes_key = Self::zeroed();
-            let r = ffi::AES_set_encrypt_key(
-                key.as_ptr(),
-                (key.len() * 8).try_into().map_err(|_| KeyError(()))?,
-                &raw mut aes_key.0,
-            );
-            if r == 0 {
-                Ok(aes_key)
-            } else {
-                Err(KeyError(()))
-            }
-        }
+        Self::new_schedule(key, ffi::AES_set_encrypt_key)
     }
 
     /// Prepares a key for decryption.
     ///
-    /// # Failure
+    /// # Errors
     ///
     /// Returns an error if the key is not 128, 192, or 256 bits.
     #[corresponds(AES_set_decrypt_key)]
     pub fn new_decrypt(key: &[u8]) -> Result<Self, KeyError> {
-        unsafe {
-            assert!(key.len() <= c_int::MAX as usize / 8);
+        Self::new_schedule(key, ffi::AES_set_decrypt_key)
+    }
 
-            let mut aes_key = Self::zeroed();
-            let r = ffi::AES_set_decrypt_key(
-                key.as_ptr(),
-                (key.len() * 8).try_into().map_err(|_| KeyError(()))?,
-                &raw mut aes_key.0,
-            );
-
-            if r == 0 {
-                Ok(aes_key)
-            } else {
-                Err(KeyError(()))
-            }
+    fn new_schedule(
+        key: &[u8],
+        initialize: unsafe extern "C" fn(*const u8, c_uint, *mut ffi::AES_KEY) -> c_int,
+    ) -> Result<Self, KeyError> {
+        let bits = match key.len() {
+            16 => 128,
+            24 => 192,
+            32 => 256,
+            _ => return Err(KeyError(())),
+        };
+        let mut schedule = Self::zeroed();
+        // SAFETY: The selected native initializer reads exactly the matching
+        // key length and writes the initialized, exclusively owned schedule.
+        let result = unsafe { initialize(key.as_ptr(), bits, &raw mut schedule.0) };
+        if result == 0 {
+            Ok(schedule)
+        } else {
+            Err(KeyError(()))
         }
     }
 }

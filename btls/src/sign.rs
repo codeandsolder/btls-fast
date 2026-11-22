@@ -73,153 +73,219 @@ impl RsaPssSaltlen {
     pub const MAXIMUM_LENGTH: Self = Self(-2);
 }
 
-/// A type which computes cryptographic signatures of data.
-pub struct Signer<'a> {
-    md_ctx: *mut ffi::EVP_MD_CTX,
-    pctx: *mut ffi::EVP_PKEY_CTX,
-    _p: PhantomData<&'a ()>,
-}
-
-unsafe impl Sync for Signer<'_> {}
-unsafe impl Send for Signer<'_> {}
-
-impl Drop for Signer<'_> {
-    fn drop(&mut self) {
-        // pkey_ctx is owned by the md_ctx, so no need to explicitly free it.
-        unsafe {
-            EVP_MD_CTX_free(self.md_ctx);
+// The two operation types differ only in native initialization/update and
+// their key capability bound. Both own a native digest context and borrow
+// its associated key context.
+macro_rules! signature_operation {
+    ($(#[$doc:meta])* $kind:ident, $bound:ident, $init:ident, $update:ident) => {
+        $(#[$doc])*
+        pub struct $kind<'a> {
+            md_ctx: *mut ffi::EVP_MD_CTX,
+            pctx: *mut ffi::EVP_PKEY_CTX,
+            _p: PhantomData<&'a ()>,
         }
-    }
-}
 
-impl<'a> Signer<'a> {
-    /// Creates a new `Signer`.
-    ///
-    /// This cannot be used with Ed25519 or Ed448 keys. Please refer to
-    /// `new_without_digest`.
-    #[corresponds(EVP_DigestSignInit)]
-    pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPrivate,
-    {
-        Self::new_intern(Some(type_), pkey)
-    }
+        // SAFETY: A native operation context is not thread-affine. Moving the
+        // unique Rust owner between threads preserves the key's borrowed lifetime.
+        unsafe impl Send for $kind<'_> {}
 
-    /// Creates a new `Signer` without a digest.
-    ///
-    /// This is the only way to create a `Verifier` for Ed25519 or Ed448 keys.
-    /// It can also be used to create a CMAC.
-    #[corresponds(EVP_DigestSignInit)]
-    pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPrivate,
-    {
-        Self::new_intern(None, pkey)
-    }
+        impl Drop for $kind<'_> {
+            fn drop(&mut self) {
+                // SAFETY: This value owns md_ctx; pctx is released by the same call.
+                unsafe { EVP_MD_CTX_free(self.md_ctx) };
+            }
+        }
 
-    fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPrivate,
-    {
-        unsafe {
-            ffi::init();
-
-            let ctx = cvt_p(EVP_MD_CTX_new())?;
-            let mut pctx: *mut ffi::EVP_PKEY_CTX = ptr::null_mut();
-            let r = ffi::EVP_DigestSignInit(
-                ctx,
-                &raw mut pctx,
-                type_.map(|t| t.as_ptr()).unwrap_or(ptr::null()),
-                ptr::null_mut(),
-                pkey.as_ptr(),
-            );
-            if r != 1 {
-                EVP_MD_CTX_free(ctx);
-                return Err(ErrorStack::get());
+        impl<'a> $kind<'a> {
+            /// Creates a new signature operation.
+            ///
+            /// This cannot be used with Ed25519 or Ed448 keys. Please refer to
+            /// `new_without_digest`.
+            ///
+            /// # Errors
+            ///
+            /// The native context cannot be allocated or the digest/key combination is unsupported.
+            #[corresponds($init)]
+            pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
+            where
+                T: $bound,
+            {
+                Self::new_intern(Some(type_), pkey)
             }
 
-            assert!(!pctx.is_null());
+            /// Creates a new signature operation without a digest.
+            ///
+            /// Use this constructor for Ed25519 and other algorithms without a prehash.
+            ///
+            /// # Errors
+            ///
+            /// The native context cannot be allocated or this key requires an explicit digest.
+            #[corresponds($init)]
+            pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
+            where
+                T: $bound,
+            {
+                Self::new_intern(None, pkey)
+            }
 
-            Ok(Signer {
-                md_ctx: ctx,
-                pctx,
-                _p: PhantomData,
-            })
+            fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
+            where
+                T: $bound,
+            {
+                ffi::init();
+                // SAFETY: EVP_MD_CTX_new allocates a fresh native context.
+                let ctx = unsafe { cvt_p(EVP_MD_CTX_new())? };
+                let mut operation = Self {
+                    md_ctx: ctx,
+                    pctx: ptr::null_mut(),
+                    _p: PhantomData,
+                };
+                // SAFETY: operation owns ctx and borrows a live key for 'a.
+                // The result stores a borrowed pkey context owned by the digest context.
+                unsafe {
+                    cvt(ffi::$init(
+                        ctx,
+                        &raw mut operation.pctx,
+                        type_.map_or(ptr::null(), MessageDigest::as_ptr),
+                        ptr::null_mut(),
+                        pkey.as_ptr(),
+                    ))?;
+                }
+                if operation.pctx.is_null() {
+                    return Err(ErrorStack::internal_error_str("native signature context missing"));
+                }
+                Ok(operation)
+            }
+
+            /// Returns the RSA padding mode in use.
+            ///
+            /// This is only useful for RSA keys.
+            ///
+            /// # Errors
+            ///
+            /// The key type does not support querying RSA padding.
+            #[corresponds(EVP_PKEY_CTX_get_rsa_padding)]
+            pub fn rsa_padding(&self) -> Result<Padding, ErrorStack> {
+                // SAFETY: The live context is initialized by the matching native constructor;
+                // pad is writable for the duration of the query.
+                unsafe {
+                    let mut pad = 0;
+                    cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &raw mut pad))
+                        .map(|_| Padding::from_raw(pad))
+                }
+            }
+
+            /// Sets the RSA padding mode.
+            ///
+            /// This is only useful for RSA keys.
+            ///
+            /// # Errors
+            ///
+            /// The key type or requested padding mode is unsupported.
+            #[corresponds(EVP_PKEY_CTX_set_rsa_padding)]
+            pub fn set_rsa_padding(&mut self, padding: Padding) -> Result<(), ErrorStack> {
+                // SAFETY: The signature context is initialized and exclusively borrowed.
+                unsafe {
+                    cvt(ffi::EVP_PKEY_CTX_set_rsa_padding(
+                        self.pctx,
+                        padding.as_raw(),
+                    ))
+                }
+            }
+
+            /// Sets the RSA PSS salt length.
+            ///
+            /// This is only useful for RSA keys.
+            ///
+            /// # Errors
+            ///
+            /// The key type, padding mode or salt length is unsupported.
+            #[corresponds(EVP_PKEY_CTX_set_rsa_pss_saltlen)]
+            pub fn set_rsa_pss_saltlen(&mut self, len: RsaPssSaltlen) -> Result<(), ErrorStack> {
+                // SAFETY: The signature context is initialized and exclusively borrowed.
+                unsafe {
+                    cvt(ffi::EVP_PKEY_CTX_set_rsa_pss_saltlen(
+                        self.pctx,
+                        len.as_raw(),
+                    ))
+                }
+            }
+
+            /// Sets the RSA MGF1 algorithm.
+            ///
+            /// This is only useful for RSA keys.
+            ///
+            /// # Errors
+            ///
+            /// The MGF1 digest or key configuration is unsupported.
+            #[corresponds(EVP_PKEY_CTX_set_rsa_mgf1_md)]
+            pub fn set_rsa_mgf1_md(&mut self, md: MessageDigest) -> Result<(), ErrorStack> {
+                // SAFETY: The signature context is initialized and exclusively borrowed.
+                unsafe {
+                    cvt(ffi::EVP_PKEY_CTX_set_rsa_mgf1_md(
+                        self.pctx,
+                        md.as_ptr().cast_mut(),
+                    ))
+                }
+            }
+
+            /// Feeds more data into the signature operation.
+            ///
+            /// Please note that PureEdDSA (Ed25519 and Ed448 keys) do not support streaming.
+            /// Use the one-shot operation instead.
+            ///
+            /// # Errors
+            ///
+            /// The algorithm does not support streaming or native digest processing fails.
+            #[corresponds($update)]
+            pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
+                // SAFETY: The live context is exclusively borrowed and buf is readable
+                // for buf.len() bytes throughout the native call.
+                unsafe {
+                    cvt(ffi::$update(
+                        self.md_ctx,
+                        buf.as_ptr().cast(),
+                        buf.len(),
+                    ))
+                }
+            }
         }
-    }
 
-    /// Returns the RSA padding mode in use.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_get_rsa_padding)]
-    pub fn rsa_padding(&self) -> Result<Padding, ErrorStack> {
-        unsafe {
-            let mut pad = 0;
-            cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &raw mut pad))
-                .map(|_| Padding::from_raw(pad))
+        impl Write for $kind<'_> {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                self.update(buf)?;
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
         }
-    }
+    };
+}
 
-    /// Sets the RSA padding mode.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_set_rsa_padding)]
-    pub fn set_rsa_padding(&mut self, padding: Padding) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_padding(
-                self.pctx,
-                padding.as_raw(),
-            ))
-        }
-    }
+signature_operation!(
+    /// A type which computes cryptographic signatures of data.
+    Signer,
+    HasPrivate,
+    EVP_DigestSignInit,
+    EVP_DigestSignUpdate
+);
+signature_operation!(
+    /// A type which verifies cryptographic signatures of data.
+    Verifier,
+    HasPublic,
+    EVP_DigestVerifyInit,
+    EVP_DigestVerifyUpdate
+);
 
-    /// Sets the RSA PSS salt length.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_set_rsa_pss_saltlen)]
-    pub fn set_rsa_pss_saltlen(&mut self, len: RsaPssSaltlen) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_pss_saltlen(
-                self.pctx,
-                len.as_raw(),
-            ))
-        }
-    }
-
-    /// Sets the RSA MGF1 algorithm.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_set_rsa_mgf1_md)]
-    pub fn set_rsa_mgf1_md(&mut self, md: MessageDigest) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_mgf1_md(
-                self.pctx,
-                md.as_ptr().cast_mut(),
-            ))
-        }
-    }
-
-    /// Feeds more data into the `Signer`.
-    ///
-    /// Please note that PureEdDSA (Ed25519 and Ed448 keys) do not support streaming.
-    /// Use `sign_oneshot` instead.
-    #[corresponds(EVP_DigestUpdate)]
-    pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_DigestUpdate(
-                self.md_ctx,
-                buf.as_ptr().cast(),
-                buf.len(),
-            ))
-        }
-    }
-
+impl Signer<'_> {
     /// Computes an upper bound on the signature length.
     ///
     /// The actual signature may be shorter than this value. Check the return value of
     /// `sign` to get the exact length.
     #[corresponds(EVP_DigestSignFinal)]
-    pub fn signature_capacity(&self) -> Result<usize, ErrorStack> {
+    pub fn signature_capacity(&mut self) -> Result<usize, ErrorStack> {
         unsafe {
             let mut len = 0;
             cvt(ffi::EVP_DigestSign(
@@ -238,7 +304,7 @@ impl<'a> Signer<'a> {
     /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
     #[corresponds(EVP_DigestSignFinal)]
-    pub fn sign(&self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
+    pub fn sign(&mut self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
         unsafe {
             let mut len = buf.len();
             cvt(ffi::EVP_DigestSignFinal(
@@ -253,7 +319,7 @@ impl<'a> Signer<'a> {
     /// Returns the signature.
     ///
     /// This is a simple convenience wrapper over `signature_capacity` and `sign`.
-    pub fn sign_to_vec(&self) -> Result<Vec<u8>, ErrorStack> {
+    pub fn sign_to_vec(&mut self) -> Result<Vec<u8>, ErrorStack> {
         let mut buf = vec![0; self.signature_capacity()?];
         let len = self.sign(&mut buf)?;
         // The advertised length is not always equal to the real length for things like DSA
@@ -299,163 +365,12 @@ impl<'a> Signer<'a> {
     }
 }
 
-impl Write for Signer<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.update(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-pub struct Verifier<'a> {
-    md_ctx: *mut ffi::EVP_MD_CTX,
-    pctx: *mut ffi::EVP_PKEY_CTX,
-    pkey_pd: PhantomData<&'a ()>,
-}
-
-unsafe impl Sync for Verifier<'_> {}
-unsafe impl Send for Verifier<'_> {}
-
-impl Drop for Verifier<'_> {
-    fn drop(&mut self) {
-        // pkey_ctx is owned by the md_ctx, so no need to explicitly free it.
-        unsafe {
-            EVP_MD_CTX_free(self.md_ctx);
-        }
-    }
-}
-
-/// A type which verifies cryptographic signatures of data.
-impl<'a> Verifier<'a> {
-    /// Creates a new `Verifier`.
-    ///
-    /// This cannot be used with Ed25519 or Ed448 keys. Please refer to
-    /// `new_without_digest`.
-    #[corresponds(EVP_DigestVerifyInit)]
-    pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPublic,
-    {
-        Verifier::new_intern(Some(type_), pkey)
-    }
-
-    /// Creates a new `Verifier` without a digest.
-    ///
-    /// This is the only way to create a `Verifier` for Ed25519 or Ed448 keys.
-    #[corresponds(EVP_DigestVerifyInit)]
-    pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPublic,
-    {
-        Verifier::new_intern(None, pkey)
-    }
-
-    fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPublic,
-    {
-        unsafe {
-            ffi::init();
-
-            let ctx = cvt_p(EVP_MD_CTX_new())?;
-            let mut pctx: *mut ffi::EVP_PKEY_CTX = ptr::null_mut();
-            let r = ffi::EVP_DigestVerifyInit(
-                ctx,
-                &raw mut pctx,
-                type_.map(|t| t.as_ptr()).unwrap_or(ptr::null()),
-                ptr::null_mut(),
-                pkey.as_ptr(),
-            );
-            if r != 1 {
-                EVP_MD_CTX_free(ctx);
-                return Err(ErrorStack::get());
-            }
-
-            assert!(!pctx.is_null());
-
-            Ok(Verifier {
-                md_ctx: ctx,
-                pctx,
-                pkey_pd: PhantomData,
-            })
-        }
-    }
-
-    /// Returns the RSA padding mode in use.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_get_rsa_padding)]
-    pub fn rsa_padding(&self) -> Result<Padding, ErrorStack> {
-        unsafe {
-            let mut pad = 0;
-            cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &raw mut pad))
-                .map(|_| Padding::from_raw(pad))
-        }
-    }
-
-    /// Sets the RSA padding mode.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_set_rsa_padding)]
-    pub fn set_rsa_padding(&mut self, padding: Padding) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_padding(
-                self.pctx,
-                padding.as_raw(),
-            ))
-        }
-    }
-
-    /// Sets the RSA PSS salt length.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_set_rsa_pss_saltlen)]
-    pub fn set_rsa_pss_saltlen(&mut self, len: RsaPssSaltlen) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_pss_saltlen(
-                self.pctx,
-                len.as_raw(),
-            ))
-        }
-    }
-
-    /// Sets the RSA MGF1 algorithm.
-    ///
-    /// This is only useful for RSA keys.
-    #[corresponds(EVP_PKEY_CTX_set_rsa_mgf1_md)]
-    pub fn set_rsa_mgf1_md(&mut self, md: MessageDigest) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_PKEY_CTX_set_rsa_mgf1_md(
-                self.pctx,
-                md.as_ptr().cast_mut(),
-            ))
-        }
-    }
-
-    /// Feeds more data into the `Verifier`.
-    ///
-    /// Please note that PureEdDSA (Ed25519 and Ed448 keys) do not support streaming.
-    /// Use `verify_oneshot` instead.
-    #[corresponds(EVP_DigestUpdate)]
-    pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::EVP_DigestUpdate(
-                self.md_ctx,
-                buf.as_ptr().cast(),
-                buf.len(),
-            ))
-        }
-    }
-
+impl Verifier<'_> {
     /// Determines if the data fed into the `Verifier` matches the provided signature.
     #[corresponds(EVP_DigestVerifyFinal)]
-    pub fn verify(&self, signature: &[u8]) -> Result<bool, ErrorStack> {
+    pub fn verify(&mut self, signature: &[u8]) -> Result<bool, ErrorStack> {
         unsafe {
-            let r =
-                EVP_DigestVerifyFinal(self.md_ctx, signature.as_ptr().cast_mut(), signature.len());
+            let r = ffi::EVP_DigestVerifyFinal(self.md_ctx, signature.as_ptr(), signature.len());
             match r {
                 1 => Ok(true),
                 0 => {
@@ -489,19 +404,6 @@ impl<'a> Verifier<'a> {
         }
     }
 }
-
-impl Write for Verifier<'_> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.update(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-use crate::ffi::EVP_DigestVerifyFinal;
 
 #[cfg(test)]
 mod test {

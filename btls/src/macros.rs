@@ -259,3 +259,14 @@ macro_rules! generic_foreign_type_and_impl_send_sync {
         unsafe impl<T> Sync for $borrowed<T>{}
     };
 }
+
+// Preserve each named native constant and its documentation without repeating
+// the wrapper constructor in every declaration.
+macro_rules! native_constants {
+    ($( $(#[$attr:meta])* $name:ident = $value:expr; )*) => {
+        $(
+            $(#[$attr])*
+            pub const $name: Self = Self($value);
+        )*
+    };
+}
