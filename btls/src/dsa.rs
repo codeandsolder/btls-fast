@@ -99,7 +99,7 @@ where
     }
 
     /// Returns a reference to the public key component of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn pub_key(&self) -> &BigNumRef {
         unsafe {
             let mut pub_key = ptr::null();
@@ -128,7 +128,7 @@ where
     }
 
     /// Returns a reference to the private key component of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn priv_key(&self) -> &BigNumRef {
         unsafe {
             let mut priv_key = ptr::null();
@@ -144,13 +144,13 @@ where
 {
     /// Returns the maximum size of the signature output by `self` in bytes.
     #[corresponds(DSA_size)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn size(&self) -> u32 {
         unsafe { ffi::DSA_size(self.as_ptr()) as u32 }
     }
 
     /// Returns the DSA prime parameter of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn p(&self) -> &BigNumRef {
         unsafe {
             let mut p = ptr::null();
@@ -160,7 +160,7 @@ where
     }
 
     /// Returns the DSA sub-prime parameter of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn q(&self) -> &BigNumRef {
         unsafe {
             let mut q = ptr::null();
@@ -170,7 +170,7 @@ where
     }
 
     /// Returns the DSA base parameter of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn g(&self) -> &BigNumRef {
         unsafe {
             let mut g = ptr::null();

@@ -143,7 +143,7 @@ pub struct Cipher(*const ffi::EVP_CIPHER);
 impl Cipher {
     /// Looks up the cipher for a certain nid.
     #[corresponds(EVP_get_cipherbynid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn from_nid(nid: Nid) -> Option<Self> {
         let ptr = unsafe { ffi::EVP_get_cipherbynid(nid.as_raw()) };
         if ptr.is_null() {
@@ -153,102 +153,102 @@ impl Cipher {
         }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_ecb() -> Self {
         unsafe { Self(ffi::EVP_aes_128_ecb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_cbc() -> Self {
         unsafe { Self(ffi::EVP_aes_128_cbc()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_ctr() -> Self {
         unsafe { Self(ffi::EVP_aes_128_ctr()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm() -> Self {
         unsafe { Self(ffi::EVP_aes_128_gcm()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_ofb() -> Self {
         unsafe { Self(ffi::EVP_aes_128_ofb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_192_ecb() -> Self {
         unsafe { Self(ffi::EVP_aes_192_ecb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_192_cbc() -> Self {
         unsafe { Self(ffi::EVP_aes_192_cbc()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_192_ctr() -> Self {
         unsafe { Self(ffi::EVP_aes_192_ctr()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_192_gcm() -> Self {
         unsafe { Self(ffi::EVP_aes_192_gcm()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_192_ofb() -> Self {
         unsafe { Self(ffi::EVP_aes_192_ofb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_ecb() -> Self {
         unsafe { Self(ffi::EVP_aes_256_ecb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_cbc() -> Self {
         unsafe { Self(ffi::EVP_aes_256_cbc()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_ctr() -> Self {
         unsafe { Self(ffi::EVP_aes_256_ctr()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm() -> Self {
         unsafe { Self(ffi::EVP_aes_256_gcm()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_ofb() -> Self {
         unsafe { Self(ffi::EVP_aes_256_ofb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn des_cbc() -> Self {
         unsafe { Self(ffi::EVP_des_cbc()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn des_ecb() -> Self {
         unsafe { Self(ffi::EVP_des_ecb()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn des_ede3() -> Self {
         unsafe { Self(ffi::EVP_des_ede3()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn des_ede3_cbc() -> Self {
         unsafe { Self(ffi::EVP_des_ede3_cbc()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn rc4() -> Self {
         unsafe { Self(ffi::EVP_rc4()) }
     }
@@ -258,7 +258,7 @@ impl Cipher {
     /// # Safety
     ///
     /// The caller must ensure the pointer is valid for the `'static` lifetime.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const unsafe fn from_ptr(ptr: *const ffi::EVP_CIPHER) -> Self {
         Self(ptr)
     }
@@ -300,7 +300,7 @@ impl Cipher {
 
     /// Returns the cipher's NID.
     #[corresponds(EVP_CIPHER_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn nid(&self) -> Nid {
         ffi::init();
         let nid = unsafe { ffi::EVP_CIPHER_nid(self.as_ptr()) };

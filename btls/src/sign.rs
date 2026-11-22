@@ -60,7 +60,7 @@ impl RsaPssSaltlen {
     }
 
     /// Sets the salt length to the given value.
-    #[must_use]
+    #[must_use = "Use the returned salt-length setting when configuring RSA-PSS."]
     pub const fn custom(val: c_int) -> Self {
         Self(val)
     }

@@ -54,7 +54,7 @@ impl EarlyDataReason {
 
     /// Returns a short name of the reason.
     #[corresponds(SSL_early_data_reason_string)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(&self) -> Option<&'static str> {
         unsafe {
             let description = ffi::SSL_early_data_reason_string(self.0);
@@ -97,7 +97,7 @@ impl SslRef {
     /// Returns whether the handshake is in the early data state, where a client may send early
     /// data and a server may read it.
     #[corresponds(SSL_in_early_data)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn in_early_data(&self) -> bool {
         unsafe { ffi::SSL_in_early_data(self.as_ptr()) == 1 }
     }
@@ -105,7 +105,7 @@ impl SslRef {
     /// Returns whether the peer accepted the early data this client sent, or whether this server
     /// accepted it.
     #[corresponds(SSL_early_data_accepted)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn early_data_accepted(&self) -> bool {
         unsafe { ffi::SSL_early_data_accepted(self.as_ptr()) == 1 }
     }
@@ -130,7 +130,7 @@ impl SslRef {
 
     /// Returns why the connection did or did not use early data.
     #[corresponds(SSL_get_early_data_reason)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn early_data_reason(&self) -> EarlyDataReason {
         EarlyDataReason(unsafe { ffi::SSL_get_early_data_reason(self.as_ptr()) })
     }
@@ -139,7 +139,7 @@ impl SslRef {
 impl SslSessionRef {
     /// Returns whether a client may send early data with the session.
     #[corresponds(SSL_SESSION_early_data_capable)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn early_data_capable(&self) -> bool {
         unsafe { ffi::SSL_SESSION_early_data_capable(self.as_ptr()) == 1 }
     }

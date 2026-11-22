@@ -20,12 +20,12 @@ impl Stackable for SrtpProtectionProfile {
 }
 
 impl SrtpProtectionProfileRef {
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> SrtpProfileId {
         SrtpProfileId::from_raw(unsafe { (*self.as_ptr()).id })
     }
 
-    #[must_use]
+    #[must_use = "Use the returned name for reporting or selecting the native identifier."]
     pub fn name(&self) -> &'static str {
         unsafe { CStr::from_ptr((*self.as_ptr()).name.cast()) }
             .to_str()
@@ -48,7 +48,7 @@ impl SrtpProfileId {
     pub const SRTP_AEAD_AES_256_GCM: Self = Self(ffi::SRTP_AEAD_AES_256_GCM as _);
 
     /// Creates a `SrtpProfileId` from an integer representation.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(value: c_ulong) -> Self {
         Self(value)
     }

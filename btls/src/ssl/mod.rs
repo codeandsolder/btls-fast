@@ -284,7 +284,7 @@ pub struct SslMethod {
 impl SslMethod {
     /// Support all versions of the TLS protocol.
     #[corresponds(TLS_method)]
-    #[must_use]
+    #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub fn tls() -> Self {
         unsafe {
             Self {
@@ -301,7 +301,7 @@ impl SslMethod {
     /// BoringSSL will crash if the user calls a function that involves
     /// X.509 certificates with an object configured with this method.
     /// You most probably don't need it.
-    #[must_use]
+    #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub unsafe fn tls_with_buffer() -> Self {
         unsafe {
             Self {
@@ -313,7 +313,7 @@ impl SslMethod {
 
     /// Support all versions of the DTLS protocol.
     #[corresponds(DTLS_method)]
-    #[must_use]
+    #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub fn dtls() -> Self {
         unsafe {
             Self {
@@ -333,7 +333,7 @@ impl SslMethod {
     ///
     /// The caller must ensure the pointer is valid.
     #[corresponds(TLS_server_method)]
-    #[must_use]
+    #[must_use = "The returned builder assumes ownership of the supplied native context."]
     pub const unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> Self {
         Self {
             ptr,
@@ -464,7 +464,7 @@ impl SslFiletype {
     pub const ASN1: Self = Self(ffi::SSL_FILETYPE_ASN1);
 
     /// Constructs an `SslFiletype` from a raw OpenSSL value.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(raw: c_int) -> Self {
         Self(raw)
     }
@@ -485,7 +485,7 @@ impl StatusType {
     pub const OCSP: Self = Self(ffi::TLSEXT_STATUSTYPE_ocsp);
 
     /// Constructs a `StatusType` from a raw OpenSSL value.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(raw: c_int) -> Self {
         Self(raw)
     }
@@ -506,7 +506,7 @@ impl NameType {
     pub const HOST_NAME: Self = Self(ffi::TLSEXT_NAMETYPE_host_name);
 
     /// Constructs a `StatusType` from a raw OpenSSL value.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(raw: c_int) -> StatusType {
         StatusType(raw)
     }
@@ -594,14 +594,14 @@ impl SslAlert {
     }
 
     /// Returns the alert's description code.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub const fn as_raw(&self) -> c_int {
         self.0
     }
 
     /// Returns a readable name of the alert, or "unknown".
     #[corresponds(SSL_alert_desc_string_long)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(&self) -> &'static str {
         unsafe {
             CStr::from_ptr(ffi::SSL_alert_desc_string_long(self.0))
@@ -696,7 +696,7 @@ impl ExtensionType {
     }
 
     /// Returns the wire extension type.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub const fn as_raw(self) -> u16 {
         self.0
     }
@@ -704,7 +704,7 @@ impl ExtensionType {
     /// Whether this is an [RFC 8701] GREASE value.
     ///
     /// [RFC 8701]: https://www.rfc-editor.org/rfc/rfc8701.html
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub const fn is_grease(self) -> bool {
         self.0 & 0x0f0f == 0x0a0a && self.0 >> 8 == self.0 & 0xff
     }
@@ -845,7 +845,7 @@ impl SslSignatureAlgorithm {
     /// For ECDSA algorithms the TLS 1.3 form is returned
     /// (e.g. `ecdsa_secp256r1_sha256`), not the TLS 1.2 form (`ecdsa_sha256`).
     #[corresponds(SSL_get_signature_algorithm_name)]
-    #[must_use]
+    #[must_use = "Use the returned name for reporting or selecting the native identifier."]
     pub fn name(&self) -> Option<&'static str> {
         unsafe {
             // Pass `include_curve = 1` to get the TLS 1.3 form for ECDSA algorithms
@@ -968,7 +968,7 @@ impl CertificateCompressionAlgorithm {
 ///
 /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos
 #[corresponds(SSL_select_next_proto)]
-#[must_use]
+#[must_use = "Use the negotiated protocol to dispatch the application connection."]
 pub fn select_next_proto<'a>(server: &'a [u8], client: &'a [u8]) -> Option<&'a [u8]> {
     if server.is_empty() || client.is_empty() {
         return None;
@@ -1090,14 +1090,14 @@ pub struct SslInfoCallbackAlert(c_int);
 
 impl SslInfoCallbackAlert {
     /// The level of the SSL alert.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn alert_level(&self) -> Ssl3AlertLevel {
         let value = self.0 >> 8;
         Ssl3AlertLevel(value)
     }
 
     /// The value of the SSL alert.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn alert(&self) -> SslAlert {
         let value = self.0 & i32::from(u8::MAX);
         SslAlert(value)
@@ -1168,7 +1168,7 @@ impl SslContextBuilder {
     }
 
     /// Returns a pointer to the raw OpenSSL value.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub fn as_ptr(&self) -> *mut ffi::SSL_CTX {
         self.ctx.as_ptr()
     }
@@ -1231,7 +1231,7 @@ impl SslContextBuilder {
     /// An explicit [`SslVerifyMode::NONE`] reads the same as the default. Panics if the context
     /// is not configured for X.509 certificates.
     #[corresponds(SSL_CTX_get_verify_mode)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn verify_mode(&self) -> SslVerifyMode {
         self.ctx.verify_mode()
     }
@@ -1702,7 +1702,7 @@ impl SslContextBuilder {
     ///
     /// [`ciphers`]: https://www.openssl.org/docs/manmaster/man1/ciphers.html
     #[corresponds(SSL_CTX_get_ciphers)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ciphers(&self) -> Option<&StackRef<SslCipher>> {
         self.ctx.ciphers()
     }
@@ -1721,7 +1721,7 @@ impl SslContextBuilder {
 
     /// Returns the options used by the context.
     #[corresponds(SSL_CTX_get_options)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn options(&self) -> SslOptions {
         let bits = unsafe { ffi::SSL_CTX_get_options(self.as_ptr()) };
         SslOptions::from_bits_retain(bits)
@@ -1968,7 +1968,7 @@ impl SslContextBuilder {
 
     /// Returns a shared reference to the context's certificate store.
     #[corresponds(SSL_CTX_get_cert_store)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn cert_store(&self) -> &X509StoreBuilderRef {
         self.ctx.check_x509();
 
@@ -2481,7 +2481,7 @@ impl SslContextBuilder {
     }
 
     /// Consumes the builder, returning a new `SslContext`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslContext {
         self.ctx
     }
@@ -2565,7 +2565,7 @@ impl SslContext {
     ///
     /// [`ciphers`]: https://www.openssl.org/docs/manmaster/man1/ciphers.html
     #[corresponds(SSL_CTX_get_ciphers)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ciphers(&self) -> Option<&StackRef<SslCipher>> {
         unsafe {
             let ciphers = ffi::SSL_CTX_get_ciphers(self.as_ptr());
@@ -2581,7 +2581,7 @@ impl SslContext {
 impl SslContextRef {
     /// Returns the certificate associated with this `SslContext`, if present.
     #[corresponds(SSL_CTX_get0_certificate)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn certificate(&self) -> Option<&X509Ref> {
         self.check_x509();
 
@@ -2597,7 +2597,7 @@ impl SslContextRef {
 
     /// Returns the private key associated with this `SslContext`, if present.
     #[corresponds(SSL_CTX_get0_privatekey)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn private_key(&self) -> Option<&PKeyRef<Private>> {
         unsafe {
             let ptr = ffi::SSL_CTX_get0_privatekey(self.as_ptr());
@@ -2611,7 +2611,7 @@ impl SslContextRef {
 
     /// Returns a shared reference to the certificate store used for verification.
     #[corresponds(SSL_CTX_get_cert_store)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn cert_store(&self) -> &X509StoreRef {
         self.check_x509();
 
@@ -2620,7 +2620,7 @@ impl SslContextRef {
 
     /// Returns a shared reference to the stack of certificates making up the chain from the leaf.
     #[corresponds(SSL_CTX_get_extra_chain_certs)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn extra_chain_certs(&self) -> &StackRef<X509> {
         unsafe {
             let mut chain = ptr::null_mut();
@@ -2632,7 +2632,7 @@ impl SslContextRef {
 
     /// Returns a reference to the extra data at the specified index.
     #[corresponds(SSL_CTX_get_ex_data)]
-    #[must_use]
+    #[must_use = "Use the returned application data, or handle an empty slot."]
     pub fn ex_data<T>(&self, index: Index<SslContext, T>) -> Option<&T> {
         unsafe {
             let data = ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw());
@@ -2689,7 +2689,7 @@ impl SslContextRef {
     /// The caller of this method is responsible for ensuring that the session has never been used with another
     /// `SslContext` than this one.
     #[corresponds(SSL_CTX_add_session)]
-    #[must_use]
+    #[must_use = "Check whether the session was actually accepted into the native cache."]
     pub unsafe fn add_session(&self, session: &SslSessionRef) -> bool {
         unsafe { ffi::SSL_CTX_add_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
@@ -2703,7 +2703,7 @@ impl SslContextRef {
     /// The caller of this method is responsible for ensuring that the session has never been used with another
     /// `SslContext` than this one.
     #[corresponds(SSL_CTX_remove_session)]
-    #[must_use]
+    #[must_use = "Check whether the session was actually removed from the native cache."]
     pub unsafe fn remove_session(&self, session: &SslSessionRef) -> bool {
         unsafe { ffi::SSL_CTX_remove_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
@@ -2721,7 +2721,7 @@ impl SslContextRef {
     ///
     /// [`SslContextBuilder::set_verify`]: struct.SslContextBuilder.html#method.set_verify
     #[corresponds(SSL_CTX_get_verify_mode)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn verify_mode(&self) -> SslVerifyMode {
         self.check_x509();
 
@@ -2743,7 +2743,7 @@ impl SslContextRef {
     }
 
     /// Returns `true` if context is configured for X.509 certificates.
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn has_x509_support(&self) -> bool {
         self.ex_data(*X509_FLAG_INDEX).copied().unwrap_or_default()
     }
@@ -2768,7 +2768,7 @@ impl SslContextRef {
     /// Returns the list of server certificate types.
     #[corresponds(SSL_CTX_get0_server_certificate_types)]
     #[cfg(feature = "rpk")]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn server_certificate_types(&self) -> Option<&[CertificateType]> {
         let mut types = ptr::null();
         let mut types_len = 0;
@@ -2813,7 +2813,7 @@ pub struct ClientHello<'ssl>(&'ssl ffi::SSL_CLIENT_HELLO);
 impl ClientHello<'_> {
     /// Returns the data of a given extension, if present.
     #[corresponds(SSL_early_callback_ctx_extension_get)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn get_extension(&self, ext_type: ExtensionType) -> Option<&[u8]> {
         unsafe {
             let mut ptr = ptr::null();
@@ -2835,43 +2835,43 @@ impl ClientHello<'_> {
         unsafe { SslRef::from_ptr_mut(self.0.ssl) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         unsafe { SslRef::from_ptr(self.0.ssl) }
     }
 
     /// Returns the servername sent by the client via Server Name Indication (SNI).
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn servername(&self, type_: NameType) -> Option<&str> {
         self.ssl().servername(type_)
     }
 
     /// Returns the version sent by the client in its Client Hello record.
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub const fn client_version(&self) -> SslVersion {
         SslVersion(self.0.version)
     }
 
     /// Returns a string describing the protocol version of the connection.
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn version_str(&self) -> &'static str {
         self.ssl().version_str()
     }
 
     /// Returns the raw data of the client hello message
-    #[must_use]
+    #[must_use = "The returned byte representation is the result of serialization or borrowing."]
     pub const fn as_bytes(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.0.client_hello, self.0.client_hello_len) }
     }
 
     /// Returns the client random data
-    #[must_use]
+    #[must_use = "Use the returned handshake random bytes for the intended protocol inspection."]
     pub const fn random(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.0.random, self.0.random_len) }
     }
 
     /// Returns the raw list of ciphers supported by the client in its Client Hello record.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub const fn ciphers(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.0.cipher_suites, self.0.cipher_suites_len) }
     }
@@ -2883,7 +2883,7 @@ pub struct SslCipher(&'static SslCipherRef);
 
 impl SslCipher {
     #[corresponds(SSL_get_cipher_by_value)]
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub fn from_value(value: u16) -> Option<Self> {
         unsafe {
             let ptr = ffi::SSL_get_cipher_by_value(value);
@@ -2938,14 +2938,14 @@ unsafe impl ForeignTypeRef for SslCipherRef {
 impl SslCipherRef {
     /// Returns the IANA number of the cipher.
     #[corresponds(SSL_CIPHER_get_protocol_id)]
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub fn protocol_id(&self) -> u16 {
         unsafe { ffi::SSL_CIPHER_get_protocol_id(self.as_ptr()) }
     }
 
     /// Returns the name of the cipher.
     #[corresponds(SSL_CIPHER_get_name)]
-    #[must_use]
+    #[must_use = "Use the returned name for reporting or selecting the native identifier."]
     pub fn name(&self) -> &'static str {
         unsafe {
             let ptr = ffi::SSL_CIPHER_get_name(self.as_ptr());
@@ -2955,7 +2955,7 @@ impl SslCipherRef {
 
     /// Returns the RFC-standard name of the cipher, if one exists.
     #[corresponds(SSL_CIPHER_standard_name)]
-    #[must_use]
+    #[must_use = "Use the standardized cipher suite name for protocol diagnostics."]
     pub fn standard_name(&self) -> Option<&'static str> {
         unsafe {
             let ptr = ffi::SSL_CIPHER_standard_name(self.as_ptr());
@@ -2969,7 +2969,7 @@ impl SslCipherRef {
 
     /// Returns the SSL/TLS protocol version that first defined the cipher.
     #[corresponds(SSL_CIPHER_get_version)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn version(&self) -> &'static str {
         let version = unsafe {
             let ptr = ffi::SSL_CIPHER_get_version(self.as_ptr());
@@ -2981,7 +2981,7 @@ impl SslCipherRef {
 
     /// Returns the number of bits used for the cipher.
     #[corresponds(SSL_CIPHER_get_bits)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn bits(&self) -> CipherBits {
         unsafe {
             let mut algo_bits = 0;
@@ -2995,7 +2995,7 @@ impl SslCipherRef {
 
     /// Returns a textual description of the cipher.
     #[corresponds(SSL_CIPHER_description)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(&self) -> String {
         unsafe {
             // SSL_CIPHER_description requires a buffer of at least 128 bytes.
@@ -3007,7 +3007,7 @@ impl SslCipherRef {
 
     /// Returns one if the cipher uses an AEAD cipher.
     #[corresponds(SSL_CIPHER_is_aead)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn cipher_is_aead(&self) -> bool {
         unsafe { ffi::SSL_CIPHER_is_aead(self.as_ptr()) != 0 }
     }
@@ -3016,7 +3016,7 @@ impl SslCipherRef {
     ///
     /// TLS 1.3 ciphers report [`Nid::KX_ANY`].
     #[corresponds(SSL_CIPHER_get_kx_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn cipher_kx_nid(&self) -> Option<Nid> {
         let n = unsafe { ffi::SSL_CIPHER_get_kx_nid(self.as_ptr()) };
         if n == 0 {
@@ -3028,7 +3028,7 @@ impl SslCipherRef {
 
     /// Returns the NID corresponding to the cipher's authentication type.
     #[corresponds(SSL_CIPHER_get_auth_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn cipher_auth_nid(&self) -> Option<Nid> {
         let n = unsafe { ffi::SSL_CIPHER_get_auth_nid(self.as_ptr()) };
         if n == 0 {
@@ -3040,7 +3040,7 @@ impl SslCipherRef {
 
     /// Returns the NID corresponding to the cipher.
     #[corresponds(SSL_CIPHER_get_cipher_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn cipher_nid(&self) -> Option<Nid> {
         let n = unsafe { ffi::SSL_CIPHER_get_cipher_nid(self.as_ptr()) };
         if n == 0 {
@@ -3092,7 +3092,7 @@ impl ToOwned for SslSessionRef {
 impl SslSessionRef {
     /// Returns the SSL session ID.
     #[corresponds(SSL_SESSION_get_id)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> &[u8] {
         unsafe {
             let mut len = 0;
@@ -3103,7 +3103,7 @@ impl SslSessionRef {
 
     /// Returns the length of the master key.
     #[corresponds(SSL_SESSION_get_master_key)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn master_key_len(&self) -> usize {
         unsafe { SSL_SESSION_get_master_key(self.as_ptr(), ptr::null_mut(), 0) }
     }
@@ -3118,7 +3118,7 @@ impl SslSessionRef {
 
     /// Returns the time at which the session was established, in seconds since the Unix epoch.
     #[corresponds(SSL_SESSION_get_time)]
-    #[must_use]
+    #[must_use = "Use the returned timestamp or lifetime when determining session validity."]
     pub fn time(&self) -> u64 {
         unsafe { ffi::SSL_SESSION_get_time(self.as_ptr()) }
     }
@@ -3127,7 +3127,7 @@ impl SslSessionRef {
     ///
     /// A session older than this time should not be used for session resumption.
     #[corresponds(SSL_SESSION_get_timeout)]
-    #[must_use]
+    #[must_use = "Use the returned timestamp or lifetime when determining session validity."]
     pub fn timeout(&self) -> u32 {
         unsafe { ffi::SSL_SESSION_get_timeout(self.as_ptr()) }
     }
@@ -3137,7 +3137,7 @@ impl SslSessionRef {
     /// Single-use TLS 1.3 tickets prevent connection correlation; see
     /// [RFC 8446 Appendix C.4](https://datatracker.ietf.org/doc/html/rfc8446#appendix-C.4).
     #[corresponds(SSL_SESSION_should_be_single_use)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn should_be_single_use(&self) -> bool {
         unsafe { ffi::SSL_SESSION_should_be_single_use(self.as_ptr()) != 0 }
     }
@@ -3158,7 +3158,7 @@ impl SslSessionRef {
     ///
     /// Returns `None` when the session holds no peer certificates.
     #[corresponds(SSL_SESSION_get0_peer_certificates)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_chain_not_after(&self) -> Option<i64> {
         // SAFETY: the session owns the stack and its buffers for the duration of this call, and
         // each parsed certificate holds its own reference to its buffer.
@@ -3180,7 +3180,7 @@ impl SslSessionRef {
     ///
     /// TLS 1.3 resumptions may use a different cipher.
     #[corresponds(SSL_SESSION_get0_cipher)]
-    #[must_use]
+    #[must_use = "Use the negotiated cipher description to inspect the connection."]
     pub fn cipher(&self) -> Option<&SslCipherRef> {
         unsafe {
             let ptr = ffi::SSL_SESSION_get0_cipher(self.as_ptr());
@@ -3194,7 +3194,7 @@ impl SslSessionRef {
 
     /// Returns the session's TLS protocol version.
     #[corresponds(SSL_SESSION_get_protocol_version)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn protocol_version(&self) -> SslVersion {
         unsafe {
             let version = ffi::SSL_SESSION_get_protocol_version(self.as_ptr());
@@ -3421,7 +3421,7 @@ impl SslRef {
 
     /// Returns the curve ID (aka group ID) used for this `SslRef`.
     #[corresponds(SSL_get_curve_id)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn curve(&self) -> Option<u16> {
         let curve_id = unsafe { ffi::SSL_get_curve_id(self.as_ptr()) };
         if curve_id == 0 {
@@ -3432,7 +3432,7 @@ impl SslRef {
 
     /// Returns the curve name used for this `SslRef`.
     #[corresponds(SSL_get_curve_name)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn curve_name(&self) -> Option<&'static str> {
         let curve_id = self.curve()?;
 
@@ -3447,14 +3447,14 @@ impl SslRef {
     }
 
     /// Returns whether the TLS 1.3 HelloRetryRequest was used
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn used_hello_retry_request(&self) -> bool {
         unsafe { ffi::SSL_used_hello_retry_request(self.as_ptr()) == 1 }
     }
 
     /// Returns an `ErrorCode` value for the most recent operation on this `SslRef`.
     #[corresponds(SSL_get_error)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn error_code(&self, ret: c_int) -> ErrorCode {
         unsafe { ErrorCode::from_raw(ffi::SSL_get_error(self.as_ptr(), ret)) }
     }
@@ -3483,7 +3483,7 @@ impl SslRef {
 
     /// Returns the verify mode that was set using `set_verify`.
     #[corresponds(SSL_get_verify_mode)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn verify_mode(&self) -> SslVerifyMode {
         self.ssl_context().check_x509();
 
@@ -3621,7 +3621,7 @@ impl SslRef {
 
     /// Returns the stack of available SslCiphers for `SSL`, sorted by preference.
     #[corresponds(SSL_get_ciphers)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ciphers(&self) -> &StackRef<SslCipher> {
         unsafe {
             let cipher_list = ffi::SSL_get_ciphers(self.as_ptr());
@@ -3631,7 +3631,7 @@ impl SslRef {
 
     /// Returns the current cipher if the session is active.
     #[corresponds(SSL_get_current_cipher)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn current_cipher(&self) -> Option<&SslCipherRef> {
         unsafe {
             let ptr = ffi::SSL_get_current_cipher(self.as_ptr());
@@ -3647,7 +3647,7 @@ impl SslRef {
     /// Returns the signature algorithm used by the peer in the most recent TLS handshake,
     /// or `None` if no signature was produced (e.g. session resumption).
     #[corresponds(SSL_get_peer_signature_algorithm)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn peer_signature_algorithm(&self) -> Option<SslSignatureAlgorithm> {
         let sigalg = unsafe { ffi::SSL_get_peer_signature_algorithm(self.as_ptr()) };
         if sigalg == 0 {
@@ -3670,7 +3670,7 @@ impl SslRef {
     /// [RFC 9345]: https://www.rfc-editor.org/rfc/rfc9345
     #[cfg(not(feature = "fips"))]
     #[corresponds(SSL_used_delegated_credential)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn used_delegated_credential(&self) -> bool {
         unsafe { ffi::SSL_used_delegated_credential(self.as_ptr()) != 0 }
     }
@@ -3682,7 +3682,7 @@ impl SslRef {
     /// capture it from an [`SslContextBuilder::set_info_callback`] handler at
     /// [`SslInfoCallbackMode::HANDSHAKE_DONE`].
     #[corresponds(SSL_get_signature_algorithm_used)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn signature_algorithm_used(&self) -> Option<SslSignatureAlgorithm> {
         let sigalg = unsafe { ffi::SSL_get_signature_algorithm_used(self.as_ptr()) };
         if sigalg == 0 {
@@ -3696,7 +3696,7 @@ impl SslRef {
     ///
     /// Returns empty string if the state wasn't valid UTF-8.
     #[corresponds(SSL_state_string)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn state_string(&self) -> &'static str {
         let state = unsafe {
             let ptr = ffi::SSL_state_string(self.as_ptr());
@@ -3710,7 +3710,7 @@ impl SslRef {
     ///
     /// Returns empty string if the state wasn't valid UTF-8.
     #[corresponds(SSL_state_string_long)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn state_string_long(&self) -> &'static str {
         let state = unsafe {
             let ptr = ffi::SSL_state_string_long(self.as_ptr());
@@ -3731,7 +3731,7 @@ impl SslRef {
 
     /// Returns the peer's certificate, if present.
     #[corresponds(SSL_get_peer_certificate)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_certificate(&self) -> Option<X509> {
         self.ssl_context().check_x509();
 
@@ -3750,7 +3750,7 @@ impl SslRef {
     /// On the client side, the chain includes the leaf certificate, but on the server side it does
     /// not. Fun!
     #[corresponds(SSL_get_peer_cert_chain)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_cert_chain(&self) -> Option<&StackRef<X509>> {
         self.ssl_context().check_x509();
 
@@ -3766,7 +3766,7 @@ impl SslRef {
 
     /// Like [`SslContext::certificate`].
     #[corresponds(SSL_get_certificate)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn certificate(&self) -> Option<&X509Ref> {
         self.ssl_context().check_x509();
 
@@ -3782,7 +3782,7 @@ impl SslRef {
 
     /// Like [`SslContext::private_key`].
     #[corresponds(SSL_get_privatekey)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn private_key(&self) -> Option<&PKeyRef<Private>> {
         unsafe {
             let ptr = ffi::SSL_get_privatekey(self.as_ptr());
@@ -3795,7 +3795,7 @@ impl SslRef {
     }
 
     #[deprecated(since = "0.10.5", note = "renamed to `version_str`")]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn version(&self) -> &str {
         self.version_str()
     }
@@ -3817,7 +3817,7 @@ impl SslRef {
     ///
     /// This may panic if the string isn't valid UTF-8 for some reason. Use [`Self::version2`] instead.
     #[corresponds(SSL_get_version)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn version_str(&self) -> &'static str {
         let version = unsafe {
             let ptr = ffi::SSL_get_version(self.as_ptr());
@@ -3869,7 +3869,7 @@ impl SslRef {
 
     /// Gets the maximum supported protocol version.
     #[corresponds(SSL_get_max_proto_version)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn max_proto_version(&self) -> Option<SslVersion> {
         let r = unsafe { ffi::SSL_get_max_proto_version(self.as_ptr()) };
         if r == 0 {
@@ -3884,7 +3884,7 @@ impl SslRef {
     /// The protocol's name is returned is an opaque sequence of bytes. It is up to the client
     /// to interpret it.
     #[corresponds(SSL_get0_alpn_selected)]
-    #[must_use]
+    #[must_use = "Use the negotiated protocol to dispatch the application connection."]
     pub fn selected_alpn_protocol(&self) -> Option<&[u8]> {
         unsafe {
             let mut data: *const c_uchar = ptr::null();
@@ -3942,7 +3942,7 @@ impl SslRef {
     ///
     /// DTLS extension "use_srtp" as defined in RFC5764 has to be enabled.
     #[corresponds(SSL_get_strp_profiles)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn srtp_profiles(&self) -> Option<&StackRef<SrtpProtectionProfile>> {
         unsafe {
             let chain = ffi::SSL_get_srtp_profiles(self.as_ptr());
@@ -3959,7 +3959,7 @@ impl SslRef {
     ///
     /// DTLS extension "use_srtp" as defined in RFC5764 has to be enabled.
     #[corresponds(SSL_get_selected_srtp_profile)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn selected_srtp_profile(&self) -> Option<&SrtpProtectionProfileRef> {
         unsafe {
             let profile = ffi::SSL_get_selected_srtp_profile(self.as_ptr());
@@ -3977,7 +3977,7 @@ impl SslRef {
     /// If this is greater than 0, the next call to `read` will not call down to the underlying
     /// stream.
     #[corresponds(SSL_pending)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn pending(&self) -> usize {
         unsafe { ffi::SSL_pending(self.as_ptr()) as usize }
     }
@@ -3995,7 +3995,7 @@ impl SslRef {
     ///
     // FIXME maybe rethink in 0.11?
     #[corresponds(SSL_get_servername)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn servername(&self, type_: NameType) -> Option<&str> {
         self.servername_raw(type_)
             .and_then(|b| str::from_utf8(b).ok())
@@ -4009,7 +4009,7 @@ impl SslRef {
     ///
     /// Unlike `servername`, this method does not require the name be valid UTF-8.
     #[corresponds(SSL_get_servername)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn servername_raw(&self, type_: NameType) -> Option<&[u8]> {
         unsafe {
             let name = ffi::SSL_get_servername(self.as_ptr(), type_.0);
@@ -4045,7 +4045,7 @@ impl SslRef {
 
     /// Returns the context corresponding to the current connection.
     #[corresponds(SSL_get_SSL_CTX)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl_context(&self) -> &SslContextRef {
         unsafe {
             let ssl_ctx = ffi::SSL_get_SSL_CTX(self.as_ptr());
@@ -4168,7 +4168,7 @@ impl SslRef {
 
     /// Returns a shared reference to the SSL session.
     #[corresponds(SSL_get_session)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn session(&self) -> Option<&SslSessionRef> {
         unsafe {
             let p = ffi::SSL_get_session(self.as_ptr());
@@ -4258,7 +4258,7 @@ impl SslRef {
 
     /// Determines if the session provided to `set_session` was successfully reused.
     #[corresponds(SSL_session_reused)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn session_reused(&self) -> bool {
         unsafe { ffi::SSL_session_reused(self.as_ptr()) != 0 }
     }
@@ -4276,7 +4276,7 @@ impl SslRef {
 
     /// Returns the server's OCSP response, if present.
     #[corresponds(SSL_get_tlsext_status_ocsp_resp)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn ocsp_status(&self) -> Option<&[u8]> {
         unsafe {
             let mut p = ptr::null();
@@ -4305,7 +4305,7 @@ impl SslRef {
 
     /// Determines if this `Ssl` is configured for server-side or client-side use.
     #[corresponds(SSL_is_server)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_server(&self) -> bool {
         unsafe { SSL_is_server(self.as_ptr()) != 0 }
     }
@@ -4349,7 +4349,7 @@ impl SslRef {
 
     /// Returns a reference to the extra data at the specified index.
     #[corresponds(SSL_get_ex_data)]
-    #[must_use]
+    #[must_use = "Use the returned application data, or handle an empty slot."]
     pub fn ex_data<T>(&self, index: Index<Ssl, T>) -> Option<&T> {
         unsafe {
             let data = ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw());
@@ -4392,7 +4392,7 @@ impl SslRef {
 
     /// Determines if the initial handshake has been completed.
     #[corresponds(SSL_is_init_finished)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_init_finished(&self) -> bool {
         unsafe { ffi::SSL_is_init_finished(self.as_ptr()) != 0 }
     }
@@ -4425,7 +4425,7 @@ impl SslRef {
     ///
     /// Always `None` in FIPS builds, which lack the BoringSSL patch.
     #[corresponds(SSL_seal_app_data_limits)]
-    #[must_use]
+    #[must_use = "Use the returned limits when allocating and framing TLS record buffers."]
     pub fn seal_app_data_limits(&self) -> Option<SealLimits> {
         #[cfg(not(feature = "fips"))]
         {
@@ -4585,7 +4585,7 @@ impl SslRef {
     /// recover from potential key mismatches. If the result is `Some`, the client should retry the
     /// connection using the returned `ECHConfigList`.
     #[corresponds(SSL_get0_ech_retry_configs)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn get_ech_retry_configs(&self) -> Option<&[u8]> {
         unsafe {
             let mut data = ptr::null();
@@ -4607,7 +4607,7 @@ impl SslRef {
     /// ensure the server's certificate is valid for the public name, which is required to
     /// authenticate retry configs.
     #[corresponds(SSL_get0_ech_name_override)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn get_ech_name_override(&self) -> Option<&[u8]> {
         unsafe {
             let mut data: *const c_char = ptr::null();
@@ -4624,7 +4624,7 @@ impl SslRef {
 
     /// Whether or not `SSL` negotiated ECH.
     #[corresponds(SSL_ech_accepted)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn ech_accepted(&self) -> bool {
         unsafe { ffi::SSL_ech_accepted(self.as_ptr()) != 0 }
     }
@@ -4656,7 +4656,7 @@ impl SslRef {
     /// Returns the public key sent by the other peer, `None` if there is no ongoing handshake.
     #[corresponds(SSL_get0_peer_pubkey)]
     #[cfg(feature = "rpk")]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_pubkey(&self) -> Option<&PKeyRef<Public>> {
         unsafe {
             let pubkey = ffi::SSL_get0_peer_pubkey(self.as_ptr());
@@ -4700,7 +4700,7 @@ impl SslRef {
     ///
     /// Only valid on a client-side `Ssl`; returns `None` on server-side SSLs.
     #[corresponds(SSL_get0_accepted_peer_cert_types)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     #[cfg(feature = "rpk")]
     pub fn server_certificate_types(&self) -> Option<&[CertificateType]> {
         if self.is_server() {
@@ -4733,7 +4733,7 @@ impl SslRef {
     /// Only valid on a client-side `Ssl`; returns `None` on server-side SSLs
     /// (a server knows its own selected credential type by other means).
     #[corresponds(SSL_get_peer_cert_type)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     #[cfg(feature = "rpk")]
     pub fn selected_server_certificate_type(&self) -> Option<CertificateType> {
         if self.is_server() {
@@ -4794,7 +4794,7 @@ impl SslRef {
     ///
     /// Only known during the handshake, such as in a certificate verification callback.
     #[corresponds(SSL_peer_matched_trust_anchor)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn peer_matched_trust_anchor(&self) -> bool {
         unsafe { ffi::SSL_peer_matched_trust_anchor(self.as_ptr()) == 1 }
     }
@@ -4805,7 +4805,7 @@ impl SslRef {
     /// Only known during the handshake, such as in a certificate verification callback, where a
     /// client that rejects the certificate can choose anchors to request when it retries.
     #[corresponds(SSL_get0_peer_available_trust_anchors)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn peer_available_trust_anchors(&self) -> &[u8] {
         let mut data = ptr::null();
         let mut len = 0;
@@ -4890,7 +4890,7 @@ impl SslRef {
     /// Returns whether the server sent the padding requested with
     /// [`set_server_padding_request`](Self::set_server_padding_request).
     #[corresponds(SSL_server_sent_requested_padding)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn server_sent_requested_padding(&self) -> bool {
         unsafe { ffi::SSL_server_sent_requested_padding(self.as_ptr()) == 1 }
     }
@@ -4908,25 +4908,25 @@ pub struct SealLimits {
 
 impl SealLimits {
     /// Most plaintext bytes in one record.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn max_fragment(&self) -> usize {
         self.max_fragment
     }
 
     /// Most bytes one record adds to its plaintext.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn record_overhead(&self) -> usize {
         self.record_overhead
     }
 
     /// Most bytes of pending handshake records written ahead of the data.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn pending_len(&self) -> usize {
         self.pending_len
     }
 
     /// Returns the output room needed to seal `len` plaintext bytes, or `None` on overflow.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn sealed_len(&self, len: usize) -> Option<usize> {
         len.div_ceil(self.max_fragment)
             .checked_mul(self.record_overhead)?
@@ -5013,7 +5013,7 @@ pub struct MidHandshakeSslStream<S> {
 
 impl<S> MidHandshakeSslStream<S> {
     /// Returns a shared reference to the inner stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
         self.stream.get_ref()
     }
@@ -5024,7 +5024,7 @@ impl<S> MidHandshakeSslStream<S> {
     }
 
     /// Returns a shared reference to the `Ssl` of the stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         self.stream.ssl()
     }
@@ -5035,25 +5035,25 @@ impl<S> MidHandshakeSslStream<S> {
     }
 
     /// Returns the underlying error which interrupted this handshake.
-    #[must_use]
+    #[must_use = "Inspect the returned failure information before deciding how to resume the handshake."]
     pub const fn error(&self) -> &Error {
         &self.error
     }
 
     /// Consumes `self`, returning its error.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_error(self) -> Error {
         self.error
     }
 
     /// Returns the source data stream.
-    #[must_use]
+    #[must_use = "The returned underlying transport is the result of consuming the failed handshake."]
     pub fn into_source_stream(self) -> S {
         self.stream.into_inner()
     }
 
     /// Returns both the error and the source data stream, consuming `self`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_parts(self) -> (Error, S) {
         (self.error, self.stream.into_inner())
     }
@@ -5327,13 +5327,13 @@ impl<S> SslStream<S> {
     }
 
     /// Converts the SslStream to the underlying data stream.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_inner(self) -> S {
         unsafe { bio::take_stream::<S>(self.ssl.get_raw_rbio()) }
     }
 
     /// Returns a shared reference to the underlying stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
         unsafe {
             let bio = self.ssl.get_raw_rbio();
@@ -5355,7 +5355,7 @@ impl<S> SslStream<S> {
     }
 
     /// Returns a shared reference to the `Ssl` object associated with this stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         &self.ssl
     }
@@ -5429,7 +5429,7 @@ where
     /// This method calls [`Self::set_connect_state`] and returns without actually
     /// initiating the handshake. The caller is then free to call
     /// [`MidHandshakeSslStream`] and loop on [`HandshakeError::WouldBlock`].
-    #[must_use]
+    #[must_use = "Drive the returned handshake state; dropping it discards the underlying stream."]
     pub fn setup_connect(mut self) -> MidHandshakeSslStream<S> {
         self.set_connect_state();
 
@@ -5458,7 +5458,7 @@ where
     /// This method calls [`Self::set_accept_state`] and returns without actually
     /// initiating the handshake. The caller is then free to call
     /// [`MidHandshakeSslStream`] and loop on [`HandshakeError::WouldBlock`].
-    #[must_use]
+    #[must_use = "Drive the returned handshake state; dropping it discards the underlying stream."]
     pub fn setup_accept(mut self) -> MidHandshakeSslStream<S> {
         self.set_accept_state();
 
@@ -5504,7 +5504,7 @@ where
 
 impl<S> SslStreamBuilder<S> {
     /// Returns a shared reference to the underlying stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
         self.inner.get_ref()
     }
@@ -5520,7 +5520,7 @@ impl<S> SslStreamBuilder<S> {
     }
 
     /// Returns a shared reference to the `Ssl` object associated with this builder.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         &self.inner.ssl
     }

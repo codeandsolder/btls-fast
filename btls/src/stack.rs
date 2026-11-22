@@ -179,18 +179,18 @@ impl<T: Stackable> StackRef<T> {
     }
 
     /// Returns the number of items in the stack.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn len(&self) -> usize {
         unsafe { OPENSSL_sk_num(self.as_stack()) }
     }
 
     /// Determines if the stack is empty.
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    #[must_use]
+    #[must_use = "Use the returned iterator or element to inspect the collection."]
     pub fn iter(&self) -> Iter<'_, T> {
         Iter {
             stack: self,
@@ -207,7 +207,7 @@ impl<T: Stackable> StackRef<T> {
 
     /// Returns a reference to the element at the given index in the
     /// stack or `None` if the index is out of bounds
-    #[must_use]
+    #[must_use = "Use the returned iterator or element to inspect the collection."]
     pub fn get(&self, idx: usize) -> Option<&T::Ref> {
         unsafe {
             if idx >= self.len() {

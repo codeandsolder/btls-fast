@@ -68,7 +68,7 @@ impl Padding {
     pub const PKCS1_PSS: Self = Self(ffi::RSA_PKCS1_PSS_PADDING);
 
     /// Creates a `Padding` from an integer representation.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(value: c_int) -> Self {
         Self(value)
     }
@@ -189,7 +189,7 @@ where
 
     /// Returns a reference to the private exponent of the key.
     #[corresponds(RSA_get0_key)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn d(&self) -> &BigNumRef {
         unsafe {
             let mut d = ptr::null();
@@ -200,7 +200,7 @@ where
 
     /// Returns a reference to the first factor of the exponent of the key.
     #[corresponds(RSA_get0_factors)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn p(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut p = ptr::null();
@@ -215,7 +215,7 @@ where
 
     /// Returns a reference to the second factor of the exponent of the key.
     #[corresponds(RSA_get0_factors)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn q(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut q = ptr::null();
@@ -230,7 +230,7 @@ where
 
     /// Returns a reference to the first exponent used for CRT calculations.
     #[corresponds(RSA_get0_crt_params)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn dmp1(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut dp = ptr::null();
@@ -245,7 +245,7 @@ where
 
     /// Returns a reference to the second exponent used for CRT calculations.
     #[corresponds(RSA_get0_crt_params)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn dmq1(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut dq = ptr::null();
@@ -260,7 +260,7 @@ where
 
     /// Returns a reference to the coefficient used for CRT calculations.
     #[corresponds(RSA_get0_crt_params)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn iqmp(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut qi = ptr::null();
@@ -325,7 +325,7 @@ where
 
     /// Returns the size of the modulus in bytes.
     #[corresponds(RSA_size)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn size(&self) -> u32 {
         unsafe { ffi::RSA_size(self.as_ptr()) }
     }
@@ -384,7 +384,7 @@ where
 
     /// Returns a reference to the modulus of the key.
     #[corresponds(RSA_get0_key)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn n(&self) -> &BigNumRef {
         unsafe {
             let mut n = ptr::null();
@@ -395,7 +395,7 @@ where
 
     /// Returns a reference to the public exponent of the key.
     #[corresponds(RSA_get0_key)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn e(&self) -> &BigNumRef {
         unsafe {
             let mut e = ptr::null();
@@ -516,7 +516,7 @@ impl RsaPrivateKeyBuilder {
     }
 
     /// Returns the Rsa key.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> Rsa<Private> {
         self.rsa
     }

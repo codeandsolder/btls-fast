@@ -89,7 +89,7 @@ impl Id {
     }
 
     /// Creates a `Id` from an integer representation.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(value: c_int) -> Self {
         Self(value)
     }
@@ -228,14 +228,14 @@ impl<T> PKeyRef<T> {
 
     /// Returns the `Id` that represents the type of this key.
     #[corresponds(EVP_PKEY_id)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> Id {
         unsafe { Id::from_raw(ffi::EVP_PKEY_id(self.as_ptr())) }
     }
 
     /// Returns the maximum size of a signature in bytes.
     #[corresponds(EVP_PKEY_size)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn size(&self) -> usize {
         unsafe { ffi::EVP_PKEY_size(self.as_ptr()) as usize }
     }
@@ -265,13 +265,13 @@ where
     ///
     /// This corresponds to the bit length of the modulus of an RSA key, and the bit length of the
     /// group order for an elliptic curve key, for example.
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn bits(&self) -> u32 {
         unsafe { ffi::EVP_PKEY_bits(self.as_ptr()) as u32 }
     }
 
     /// Compares the public component of this key with another.
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn public_eq<U>(&self, other: &PKeyRef<U>) -> bool
     where
         U: HasPublic,

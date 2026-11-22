@@ -19,7 +19,7 @@ impl ConfMethod {
     }
 
     /// Convert to raw pointer.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub const fn as_ptr(&self) -> *mut c_void {
         self.0
     }

@@ -62,7 +62,7 @@ impl ErrorCode {
     /// Wrap an `SSL_ERROR_*` error code.
     ///
     /// This is different than [packed error codes](crate::error::Error).
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
     pub fn from_raw(raw: c_int) -> Self {
@@ -83,7 +83,7 @@ impl ErrorCode {
     }
 
     #[corresponds(SSL_error_description)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(self) -> Option<&'static str> {
         unsafe {
             let msg = ffi::SSL_error_description(self.0);
@@ -122,12 +122,12 @@ pub struct Error {
 
 impl Error {
     /// An `SSL_ERROR_*` error code.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn code(&self) -> ErrorCode {
         self.code
     }
 
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn io_error(&self) -> Option<&io::Error> {
         match self.cause {
             Some(InnerError::Io(ref e)) => Some(e),
@@ -143,7 +143,7 @@ impl Error {
     }
 
     /// Stack of [library-specific errors](crate::error::Error), if available.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn ssl_error(&self) -> Option<&ErrorStack> {
         match self.cause {
             Some(InnerError::Ssl(ref e)) => Some(e),
@@ -151,7 +151,7 @@ impl Error {
         }
     }
 
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub const fn would_block(&self) -> bool {
         matches!(
             self.code,

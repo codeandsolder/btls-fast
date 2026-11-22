@@ -90,7 +90,7 @@ impl Pkcs12 {
     /// * `nid_cert` - `nid::PBE_WITHSHA1AND40BITRC2_CBC`
     /// * `iter` - `2048`
     /// * `mac_iter` - `2048`
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub fn builder() -> Pkcs12Builder {
         ffi::init();
 
@@ -118,7 +118,7 @@ pub struct ParsedPkcs12_2 {
 }
 
 impl ParsedPkcs12_2 {
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn chain(&self) -> Option<&StackRef<X509>> {
         self.ca.as_deref()
     }

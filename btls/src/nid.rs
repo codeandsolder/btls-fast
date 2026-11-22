@@ -50,7 +50,7 @@ pub struct Nid(c_int);
 
 impl Nid {
     /// Create a `Nid` from an integer representation.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(raw: c_int) -> Self {
         Self(raw)
     }

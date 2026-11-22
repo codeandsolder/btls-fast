@@ -74,7 +74,7 @@ impl SslCredential {
 impl SslCredentialRef {
     /// Returns a reference to the extra data at the specified index.
     #[corresponds(SSL_CREDENTIAL_get_ex_data)]
-    #[must_use]
+    #[must_use = "Use the returned application data, or handle an empty slot."]
     pub fn ex_data<T>(&self, index: Index<SslCredential, T>) -> Option<&T> {
         unsafe {
             let data = ffi::SSL_CREDENTIAL_get_ex_data(self.as_ptr(), index.as_raw());
@@ -200,7 +200,7 @@ impl SslCredentialBuilder {
         }
     }
 
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslCredential {
         self.0
     }

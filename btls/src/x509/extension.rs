@@ -38,7 +38,7 @@ impl Default for BasicConstraints {
 
 impl BasicConstraints {
     /// Construct a new `BasicConstraints` extension.
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
         Self {
             critical: false,
@@ -107,7 +107,7 @@ impl Default for KeyUsage {
 
 impl KeyUsage {
     /// Construct a new `KeyUsage` extension.
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
         Self {
             critical: false,
@@ -236,7 +236,7 @@ impl Default for ExtendedKeyUsage {
 
 impl ExtendedKeyUsage {
     /// Construct a new `ExtendedKeyUsage` extension.
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
         Self {
             critical: false,
@@ -332,7 +332,7 @@ impl Default for SubjectKeyIdentifier {
 
 impl SubjectKeyIdentifier {
     /// Construct a new `SubjectKeyIdentifier` extension.
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
         Self { critical: false }
     }
@@ -369,7 +369,7 @@ impl Default for AuthorityKeyIdentifier {
 
 impl AuthorityKeyIdentifier {
     /// Construct a new `AuthorityKeyIdentifier` extension.
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
         Self {
             critical: false,
@@ -438,7 +438,7 @@ impl Default for SubjectAlternativeName {
 
 impl SubjectAlternativeName {
     /// Construct a new `SubjectAlternativeName` extension.
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
         Self {
             critical: false,

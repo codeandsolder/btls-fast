@@ -41,7 +41,7 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// Returns the encoded public key size in bytes.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn public_key_bytes(&self) -> usize {
         match self {
             Self::MlDsa44 => ffi::MLDSA44_PUBLIC_KEY_BYTES as usize,
@@ -51,7 +51,7 @@ impl Algorithm {
     }
 
     /// Returns the signature size in bytes.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn signature_bytes(&self) -> usize {
         match self {
             Self::MlDsa44 => ffi::MLDSA44_SIGNATURE_BYTES as usize,

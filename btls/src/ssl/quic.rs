@@ -239,7 +239,7 @@ impl SslRef {
 
     /// Returns the transport parameters the peer sent, once they arrived.
     #[corresponds(SSL_get_peer_quic_transport_params)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn peer_quic_transport_params(&self) -> Option<&[u8]> {
         let mut params = ptr::null();
         let mut len = 0;
@@ -280,7 +280,7 @@ impl SslRef {
     ///
     /// BoringSSL asserts that the connection is a QUIC one in debug builds.
     #[corresponds(SSL_quic_read_level)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn quic_read_level(&self) -> QuicEncryptionLevel {
         QuicEncryptionLevel(unsafe { ffi::SSL_quic_read_level(self.as_ptr()) })
     }
@@ -289,7 +289,7 @@ impl SslRef {
     ///
     /// BoringSSL asserts that the connection is a QUIC one in debug builds.
     #[corresponds(SSL_quic_write_level)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn quic_write_level(&self) -> QuicEncryptionLevel {
         QuicEncryptionLevel(unsafe { ffi::SSL_quic_write_level(self.as_ptr()) })
     }
@@ -297,7 +297,7 @@ impl SslRef {
     /// Returns the most handshake data the peer may send at `level`, to bound buffering
     /// ([RFC 9000 §7.5](https://www.rfc-editor.org/rfc/rfc9000#section-7.5)).
     #[corresponds(SSL_quic_max_handshake_flight_len)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn quic_max_handshake_flight_len(&self, level: QuicEncryptionLevel) -> usize {
         unsafe { ffi::SSL_quic_max_handshake_flight_len(self.as_ptr(), level.0) }
     }

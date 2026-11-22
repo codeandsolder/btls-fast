@@ -137,13 +137,13 @@ impl SslConnector {
     }
 
     /// Consumes the `SslConnector`, returning the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_context(self) -> SslContext {
         self.0
     }
 
     /// Returns a shared reference to the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn context(&self) -> &SslContextRef {
         &self.0
     }
@@ -154,7 +154,7 @@ pub struct SslConnectorBuilder(SslContextBuilder);
 
 impl SslConnectorBuilder {
     /// Consumes the builder, returning an `SslConnector`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslConnector {
         SslConnector(self.0.build())
     }
@@ -256,7 +256,7 @@ impl ClientSession {
     }
 
     /// Returns the underlying session.
-    #[must_use]
+    #[must_use = "Use the returned session reference to inspect the resumption state."]
     pub fn session(&self) -> &SslSessionRef {
         &self.session
     }
@@ -339,7 +339,7 @@ fn verifies_peer(ssl: &SslRef) -> bool {
 
 impl ConnectConfiguration {
     /// A builder-style version of `set_use_server_name_indication`.
-    #[must_use]
+    #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
     pub fn use_server_name_indication(mut self, use_sni: bool) -> Self {
         self.set_use_server_name_indication(use_sni);
         self
@@ -353,7 +353,7 @@ impl ConnectConfiguration {
     }
 
     /// A builder-style version of `set_verify_hostname`.
-    #[must_use]
+    #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
     pub fn verify_hostname(mut self, verify_hostname: bool) -> Self {
         self.set_verify_hostname(verify_hostname);
         self
@@ -373,7 +373,7 @@ impl ConnectConfiguration {
     }
 
     /// A builder-style version of `set_client_session`.
-    #[must_use]
+    #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
     pub fn client_session(mut self, session: ClientSession) -> Self {
         self.set_client_session(session);
         self
@@ -575,13 +575,13 @@ impl SslAcceptor {
     }
 
     /// Consumes the `SslAcceptor`, returning the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_context(self) -> SslContext {
         self.0
     }
 
     /// Returns a shared reference to the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn context(&self) -> &SslContextRef {
         &self.0
     }
@@ -592,7 +592,7 @@ pub struct SslAcceptorBuilder(SslContextBuilder);
 
 impl SslAcceptorBuilder {
     /// Consumes the builder, returning a `SslAcceptor`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslAcceptor {
         SslAcceptor(self.0.build())
     }

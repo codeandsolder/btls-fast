@@ -94,35 +94,35 @@ impl Algorithm {
     ///
     /// The caller must ensure that `ptr` is a valid pointer to an
     /// `EVP_AEAD` with a `'static` lifetime.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const unsafe fn from_ptr(ptr: *const ffi::EVP_AEAD) -> Self {
         Self(ptr)
     }
 
     /// AES-128 in Galois Counter Mode (GCM).
     #[corresponds(EVP_aead_aes_128_gcm)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm() -> Self {
         unsafe { Self(ffi::EVP_aead_aes_128_gcm()) }
     }
 
     /// AES-256 in Galois Counter Mode (GCM).
     #[corresponds(EVP_aead_aes_256_gcm)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm() -> Self {
         unsafe { Self(ffi::EVP_aead_aes_256_gcm()) }
     }
 
     /// ChaCha20-Poly1305 as described in RFC 8439.
     #[corresponds(EVP_aead_chacha20_poly1305)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn chacha20_poly1305() -> Self {
         unsafe { Self(ffi::EVP_aead_chacha20_poly1305()) }
     }
 
     /// XChaCha20-Poly1305 with a 24-byte nonce.
     #[corresponds(EVP_aead_xchacha20_poly1305)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn xchacha20_poly1305() -> Self {
         unsafe { Self(ffi::EVP_aead_xchacha20_poly1305()) }
     }
@@ -138,7 +138,7 @@ impl Algorithm {
     /// Contexts created with this algorithm are **stateful**.
     /// `seal` operations must not be called concurrently on the same context.
     #[corresponds(EVP_aead_aes_128_gcm_tls12)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm_tls12() -> Self {
         unsafe { Self(ffi::EVP_aead_aes_128_gcm_tls12()) }
     }
@@ -154,7 +154,7 @@ impl Algorithm {
     /// Contexts created with this algorithm are **stateful**.
     /// `seal` operations must not be called concurrently on the same context.
     #[corresponds(EVP_aead_aes_256_gcm_tls12)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm_tls12() -> Self {
         unsafe { Self(ffi::EVP_aead_aes_256_gcm_tls12()) }
     }
@@ -170,7 +170,7 @@ impl Algorithm {
     /// Contexts created with this algorithm are **stateful**.
     /// `seal` operations must not be called concurrently on the same context.
     #[corresponds(EVP_aead_aes_128_gcm_tls13)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm_tls13() -> Self {
         unsafe { Self(ffi::EVP_aead_aes_128_gcm_tls13()) }
     }
@@ -186,7 +186,7 @@ impl Algorithm {
     /// Contexts created with this algorithm are **stateful**.
     /// `seal` operations must not be called concurrently on the same context.
     #[corresponds(EVP_aead_aes_256_gcm_tls13)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm_tls13() -> Self {
         unsafe { Self(ffi::EVP_aead_aes_256_gcm_tls13()) }
     }

@@ -60,7 +60,7 @@ use crate::ffi;
 /// assert!(!eq(&a, &b));
 /// assert!(!eq(&a, &c));
 /// ```
-#[must_use]
+#[must_use = "Use this predicate to decide how to handle the current value or connection."]
 pub fn eq(a: &[u8], b: &[u8]) -> bool {
     assert_eq!(a.len(), b.len());
     let ret = unsafe { ffi::CRYPTO_memcmp(a.as_ptr().cast(), b.as_ptr().cast(), a.len()) };

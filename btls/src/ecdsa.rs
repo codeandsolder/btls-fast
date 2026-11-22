@@ -93,7 +93,7 @@ impl EcdsaSigRef {
 
     /// Returns internal component: `r` of an `EcdsaSig`. (See X9.62 or FIPS 186-2)
     #[corresponds(ECDSA_SIG_get0)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn r(&self) -> &BigNumRef {
         unsafe {
             let mut r = ptr::null();
@@ -104,7 +104,7 @@ impl EcdsaSigRef {
 
     /// Returns internal components: `s` of an `EcdsaSig`. (See X9.62 or FIPS 186-2)
     #[corresponds(ECDSA_SIG_get0)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn s(&self) -> &BigNumRef {
         unsafe {
             let mut s = ptr::null();

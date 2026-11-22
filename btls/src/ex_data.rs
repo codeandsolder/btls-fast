@@ -21,7 +21,7 @@ impl<T, U> Index<T, U> {
     /// # Safety
     ///
     /// The caller must ensure that the index correctly maps to a `U` value stored in a `T`.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const unsafe fn from_raw(idx: c_int) -> Self {
         Self(idx, PhantomData)
     }

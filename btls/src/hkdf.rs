@@ -18,13 +18,13 @@ pub struct HkdfSuite {
 
 impl HkdfSuite {
     /// Creates an HKDF suite using `digest`.
-    #[must_use]
+    #[must_use = "Use the returned HKDF instance configured for the selected digest."]
     pub const fn new(digest: MessageDigest) -> Self {
         Self { digest }
     }
 
     /// Returns `HashLen`, the digest output size in bytes.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn prk_size(&self) -> usize {
         self.digest.size()
     }

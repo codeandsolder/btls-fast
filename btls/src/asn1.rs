@@ -205,13 +205,13 @@ impl Asn1Type {
     }
 
     /// Constructs an `Asn1Type` from a raw OpenSSL value.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const fn from_raw(value: c_int) -> Self {
         Self(value)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub const fn as_raw(&self) -> c_int {
         self.0
     }
@@ -498,7 +498,7 @@ impl Asn1StringRef {
     ///
     /// [`as_utf8`]: struct.Asn1String.html#method.as_utf8
     #[corresponds(ASN1_STRING_get0_data)]
-    #[must_use]
+    #[must_use = "Use the borrowed ASN.1 contents while the containing value remains alive."]
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
             let ptr = ffi::ASN1_STRING_get0_data(self.as_ptr().cast());
@@ -511,13 +511,13 @@ impl Asn1StringRef {
 
     /// Returns the number of bytes in the string.
     #[corresponds(ASN1_STRING_length)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn len(&self) -> usize {
         unsafe { ffi::ASN1_STRING_length(self.as_ptr()) as usize }
     }
 
     /// Determines if the string is empty.
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -673,7 +673,7 @@ foreign_type_and_impl_send_sync! {
 impl Asn1BitStringRef {
     /// Returns the Asn1BitString as a slice.
     #[corresponds(ASN1_STRING_get0_data)]
-    #[must_use]
+    #[must_use = "Use the borrowed ASN.1 contents while the containing value remains alive."]
     pub fn as_slice(&self) -> &[u8] {
         unsafe {
             let ptr = ffi::ASN1_STRING_get0_data(self.as_ptr().cast());
@@ -686,20 +686,20 @@ impl Asn1BitStringRef {
 
     /// Returns the Asn1BitString as a str, if possible.
     #[corresponds(ASN1_STRING_get0_data)]
-    #[must_use]
+    #[must_use = "Use the returned UTF-8 view, or handle invalid encoding."]
     pub fn to_str(&self) -> Option<&str> {
         str::from_utf8(self.as_slice()).ok()
     }
 
     /// Returns the number of bytes in the string.
     #[corresponds(ASN1_STRING_length)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn len(&self) -> usize {
         unsafe { ffi::ASN1_STRING_length(self.as_ptr().cast_const()) as usize }
     }
 
     /// Determines if the string is empty.
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -747,7 +747,7 @@ impl str::FromStr for Asn1Object {
 
 impl Asn1ObjectRef {
     /// Returns the NID associated with this OID.
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn nid(&self) -> Nid {
         unsafe { Nid::from_raw(ffi::OBJ_obj2nid(self.as_ptr())) }
     }

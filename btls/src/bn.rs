@@ -201,7 +201,7 @@ impl BigNumRef {
 
     /// Returns `true` if the `n`th bit of `self` is set to 1, `false` otherwise.
     #[corresponds(BN_is_bit_set)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_bit_set(&self, n: i32) -> bool {
         unsafe { ffi::BN_is_bit_set(self.as_ptr(), n) == 1 }
     }
@@ -280,39 +280,39 @@ impl BigNumRef {
     /// assert_eq!(s.ucmp(&o), Ordering::Equal);
     /// ```
     #[corresponds(BN_ucmp)]
-    #[must_use]
+    #[must_use = "Use the comparison result to determine the ordering of the operands."]
     pub fn ucmp(&self, oth: &Self) -> Ordering {
         unsafe { ffi::BN_ucmp(self.as_ptr(), oth.as_ptr()).cmp(&0) }
     }
 
     /// Returns `true` if `self` is negative.
     #[corresponds(BN_is_negative)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_negative(&self) -> bool {
         unsafe { BN_is_negative(self.as_ptr()) == 1 }
     }
 
     #[corresponds(BN_is_odd)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_odd(&self) -> bool {
         unsafe { ffi::BN_is_odd(self.as_ptr()) == 1 }
     }
 
     #[corresponds(BN_is_even)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_even(&self) -> bool {
         !self.is_odd()
     }
 
     /// Returns the number of significant bits in `self`.
     #[corresponds(BN_num_bits)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn num_bits(&self) -> i32 {
         unsafe { ffi::BN_num_bits(self.as_ptr()) as i32 }
     }
 
     /// Returns the size of `self` in bytes. Implemented natively.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn num_bytes(&self) -> i32 {
         (self.num_bits() + 7) / 8
     }
@@ -723,7 +723,7 @@ impl BigNumRef {
     /// assert_eq!(BigNum::from_slice(&s_vec).unwrap(), r);
     /// ```
     #[corresponds(BN_bn2bin)]
-    #[must_use]
+    #[must_use = "The returned byte representation is the result of serialization or borrowing."]
     pub fn to_vec(&self) -> Vec<u8> {
         let size = self.num_bytes() as usize;
         let mut v = Vec::with_capacity(size);

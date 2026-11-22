@@ -71,7 +71,7 @@ impl X509StoreBuilder {
     }
 
     /// Constructs the `X509Store`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> X509Store {
         X509Store(ManuallyDrop::new(self).0)
     }

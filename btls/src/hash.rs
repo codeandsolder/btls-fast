@@ -22,14 +22,14 @@ impl MessageDigest {
     /// # Safety
     ///
     /// The caller must ensure the pointer is valid.
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const unsafe fn from_ptr(x: *const ffi::EVP_MD) -> Self {
         Self(x)
     }
 
     /// Returns the `MessageDigest` corresponding to an `Nid`.
     #[corresponds(EVP_get_digestbynid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn from_nid(type_: Nid) -> Option<Self> {
         unsafe {
             let ptr = ffi::EVP_get_digestbynid(type_.as_raw());
@@ -41,37 +41,37 @@ impl MessageDigest {
         }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn md5() -> Self {
         unsafe { Self(ffi::EVP_md5()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn sha1() -> Self {
         unsafe { Self(ffi::EVP_sha1()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn sha224() -> Self {
         unsafe { Self(ffi::EVP_sha224()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn sha256() -> Self {
         unsafe { Self(ffi::EVP_sha256()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn sha384() -> Self {
         unsafe { Self(ffi::EVP_sha384()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn sha512() -> Self {
         unsafe { Self(ffi::EVP_sha512()) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
     pub fn sha512_256() -> Self {
         unsafe { Self(ffi::EVP_sha512_256()) }
     }

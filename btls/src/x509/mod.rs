@@ -115,7 +115,7 @@ impl X509StoreContext {
 impl X509StoreContextRef {
     /// Returns application data pertaining to an `X509` store context.
     #[corresponds(X509_STORE_CTX_get_ex_data)]
-    #[must_use]
+    #[must_use = "Use the returned application data, or handle an empty slot."]
     pub fn ex_data<T>(&self, index: Index<X509StoreContext, T>) -> Option<&T> {
         unsafe {
             ffi::X509_STORE_CTX_get_ex_data(self.as_ptr(), index.as_raw())
@@ -287,7 +287,7 @@ impl X509StoreContextRef {
     /// Returns a reference to the certificate which caused the error or None if
     /// no certificate is relevant to the error.
     #[corresponds(X509_STORE_CTX_get_current_cert)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn current_cert(&self) -> Option<&X509Ref> {
         unsafe {
             let ptr = ffi::X509_STORE_CTX_get_current_cert(self.as_ptr());
@@ -304,14 +304,14 @@ impl X509StoreContextRef {
     /// entity certificate, one if it is the certificate which signed the end
     /// entity certificate and so on.
     #[corresponds(X509_STORE_CTX_get_error_depth)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn error_depth(&self) -> u32 {
         unsafe { ffi::X509_STORE_CTX_get_error_depth(self.as_ptr()) as u32 }
     }
 
     /// Returns a reference to a complete valid `X509` certificate chain.
     #[corresponds(X509_STORE_CTX_get0_chain)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn chain(&self) -> Option<&StackRef<X509>> {
         unsafe {
             let chain = X509_STORE_CTX_get0_chain(self.as_ptr());
@@ -327,7 +327,7 @@ impl X509StoreContextRef {
     /// Returns a reference to the `X509` certificates used to initialize the
     /// [`X509StoreContextRef`].
     #[corresponds(X509_STORE_CTX_get0_untrusted)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn untrusted(&self) -> Option<&StackRef<X509>> {
         unsafe {
             let certs = ffi::X509_STORE_CTX_get0_untrusted(self.as_ptr());
@@ -343,7 +343,7 @@ impl X509StoreContextRef {
     /// Returns a reference to the certificate being verified.
     /// May return None if a raw public key is being verified.
     #[corresponds(X509_STORE_CTX_get0_cert)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn cert(&self) -> Option<&X509Ref> {
         unsafe {
             let ptr = ffi::X509_STORE_CTX_get0_cert(self.as_ptr());
@@ -449,7 +449,7 @@ impl X509Builder {
     ///
     /// Set `issuer` to `None` if the certificate will be self-signed.
     #[corresponds(X509V3_set_ctx)]
-    #[must_use]
+    #[must_use = "Use the returned context when constructing certificate extensions."]
     pub fn x509v3_context<'a>(
         &'a self,
         issuer: Option<&'a X509Ref>,
@@ -500,7 +500,7 @@ impl X509Builder {
     }
 
     /// Consumes the builder, returning the certificate.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> X509 {
         self.0
     }
@@ -517,7 +517,7 @@ foreign_type_and_impl_send_sync! {
 impl X509Ref {
     /// Returns this certificate's subject name.
     #[corresponds(X509_get_subject_name)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_name(&self) -> &X509NameRef {
         unsafe {
             let name = ffi::X509_get_subject_name(self.as_ptr());
@@ -527,14 +527,14 @@ impl X509Ref {
 
     /// Returns the hash of the certificates subject
     #[corresponds(X509_subject_name_hash)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_name_hash(&self) -> u32 {
         unsafe { ffi::X509_subject_name_hash(self.as_ptr()) as u32 }
     }
 
     /// Returns this certificate's subject alternative name entries, if they exist.
     #[corresponds(X509_get_ext_d2i)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_alt_names(&self) -> Option<Stack<GeneralName>> {
         unsafe {
             let stack = ffi::X509_get_ext_d2i(
@@ -553,7 +553,7 @@ impl X509Ref {
 
     /// Returns this certificate's issuer name.
     #[corresponds(X509_get_issuer_name)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn issuer_name(&self) -> &X509NameRef {
         unsafe {
             let name = ffi::X509_get_issuer_name(self.as_ptr());
@@ -563,7 +563,7 @@ impl X509Ref {
 
     /// Returns this certificate's issuer alternative name entries, if they exist.
     #[corresponds(X509_get_ext_d2i)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn issuer_alt_names(&self) -> Option<Stack<GeneralName>> {
         unsafe {
             let stack = ffi::X509_get_ext_d2i(
@@ -582,7 +582,7 @@ impl X509Ref {
 
     /// Returns this certificate's subject key id, if it exists.
     #[corresponds(X509_get0_subject_key_id)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_key_id(&self) -> Option<&Asn1StringRef> {
         unsafe {
             let data = ffi::X509_get0_subject_key_id(self.as_ptr());
@@ -592,7 +592,7 @@ impl X509Ref {
 
     /// Returns this certificate's authority key id, if it exists.
     #[corresponds(X509_get0_authority_key_id)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn authority_key_id(&self) -> Option<&Asn1StringRef> {
         unsafe {
             let data = ffi::X509_get0_authority_key_id(self.as_ptr());
@@ -636,7 +636,7 @@ impl X509Ref {
 
     /// Returns the certificate's Not After validity period.
     #[corresponds(X509_getm_notAfter)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn not_after(&self) -> &Asn1TimeRef {
         unsafe {
             let date = X509_getm_notAfter(self.as_ptr());
@@ -647,7 +647,7 @@ impl X509Ref {
 
     /// Returns the certificate's Not Before validity period.
     #[corresponds(X509_getm_notBefore)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn not_before(&self) -> &Asn1TimeRef {
         unsafe {
             let date = X509_getm_notBefore(self.as_ptr());
@@ -658,7 +658,7 @@ impl X509Ref {
 
     /// Returns the certificate's signature
     #[corresponds(X509_get0_signature)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn signature(&self) -> &Asn1BitStringRef {
         unsafe {
             let mut signature = ptr::null();
@@ -670,7 +670,7 @@ impl X509Ref {
 
     /// Returns the certificate's signature algorithm.
     #[corresponds(X509_get0_signature)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn signature_algorithm(&self) -> &X509AlgorithmRef {
         unsafe {
             let mut algor = ptr::null();
@@ -712,7 +712,7 @@ impl X509Ref {
 
     /// Returns this certificate's serial number.
     #[corresponds(X509_get_serialNumber)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn serial_number(&self) -> &Asn1IntegerRef {
         unsafe {
             let r = ffi::X509_get_serialNumber(self.as_ptr());
@@ -889,7 +889,7 @@ impl Stackable for X509 {
 pub struct X509v3Context<'a>(ffi::X509V3_CTX, PhantomData<(&'a X509Ref, &'a ConfRef)>);
 
 impl X509v3Context<'_> {
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub const fn as_ptr(&self) -> *mut ffi::X509V3_CTX {
         std::ptr::addr_of!(self.0).cast_mut()
     }
@@ -1108,7 +1108,7 @@ impl X509NameBuilder {
     }
 
     /// Return an `X509Name`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> X509Name {
         // Round-trip through bytes because OpenSSL is not const correct and
         // names in a "modified" state compute various things lazily. This can
@@ -1156,7 +1156,7 @@ impl Stackable for X509Name {
 
 impl X509NameRef {
     /// Returns the name entries by the nid.
-    #[must_use]
+    #[must_use = "Use the returned iterator or element to inspect the collection."]
     pub const fn entries_by_nid(&self, nid: Nid) -> X509NameEntries<'_> {
         X509NameEntries {
             name: self,
@@ -1166,7 +1166,7 @@ impl X509NameRef {
     }
 
     /// Returns an iterator over all `X509NameEntry` values
-    #[must_use]
+    #[must_use = "Use the returned iterator or element to inspect the collection."]
     pub const fn entries(&self) -> X509NameEntries<'_> {
         X509NameEntries {
             name: self,
@@ -1179,7 +1179,7 @@ impl X509NameRef {
     ///
     /// This function will return `None` if the underlying string contains invalid utf-8.
     #[corresponds(X509_NAME_print_ex)]
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn print_ex(&self, flags: i32) -> Option<String> {
         unsafe {
             let bio = MemBio::new().ok()?;
@@ -1263,7 +1263,7 @@ foreign_type_and_impl_send_sync! {
 impl X509NameEntryRef {
     /// Returns the field value of an `X509NameEntry`.
     #[corresponds(X509_NAME_ENTRY_get_data)]
-    #[must_use]
+    #[must_use = "Use the returned extension bytes when inspecting the certificate."]
     pub fn data(&self) -> &Asn1StringRef {
         unsafe {
             let data = ffi::X509_NAME_ENTRY_get_data(self.as_ptr());
@@ -1274,7 +1274,7 @@ impl X509NameEntryRef {
     /// Returns the `Asn1Object` value of an `X509NameEntry`.
     /// This is useful for finding out about the actual `Nid` when iterating over all `X509NameEntries`.
     #[corresponds(X509_NAME_ENTRY_get_object)]
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn object(&self) -> &Asn1ObjectRef {
         unsafe {
             let object = ffi::X509_NAME_ENTRY_get_object(self.as_ptr());
@@ -1329,7 +1329,7 @@ impl X509ReqBuilder {
 
     /// Return an `X509v3Context`. This context object can be used to construct
     /// certain `X509` extensions.
-    #[must_use]
+    #[must_use = "Use the returned context when constructing certificate extensions."]
     pub fn x509v3_context<'a>(&'a self, conf: Option<&'a ConfRef>) -> X509v3Context<'a> {
         unsafe {
             let mut ctx = mem::zeroed();
@@ -1381,7 +1381,7 @@ impl X509ReqBuilder {
     }
 
     /// Returns the `X509Req`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> X509Req {
         self.0
     }
@@ -1440,14 +1440,14 @@ impl X509ReqRef {
 
     /// Returns the numerical value of the version field of the certificate request.
     #[corresponds(X509_REQ_get_version)]
-    #[must_use]
+    #[must_use = "Use the returned certificate version when inspecting its encoding."]
     pub fn version(&self) -> i32 {
         unsafe { X509_REQ_get_version(self.as_ptr()) as i32 }
     }
 
     /// Returns the subject name of the certificate request.
     #[corresponds(X509_REQ_get_subject_name)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_name(&self) -> &X509NameRef {
         unsafe {
             let name = X509_REQ_get_subject_name(self.as_ptr());
@@ -1759,25 +1759,25 @@ impl GeneralNameRef {
     }
 
     /// Returns the contents of this `GeneralName` if it is an `rfc822Name`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn email(&self) -> Option<&str> {
         self.ia5_string(ffi::GEN_EMAIL)
     }
 
     /// Returns the contents of this `GeneralName` if it is a `dNSName`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn dnsname(&self) -> Option<&str> {
         self.ia5_string(ffi::GEN_DNS)
     }
 
     /// Returns the contents of this `GeneralName` if it is an `uniformResourceIdentifier`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn uri(&self) -> Option<&str> {
         self.ia5_string(ffi::GEN_URI)
     }
 
     /// Returns the contents of this `GeneralName` if it is an `iPAddress`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn ipaddress(&self) -> Option<&[u8]> {
         unsafe {
             if (*self.as_ptr()).type_ != ffi::GEN_IPADD {
@@ -1820,7 +1820,7 @@ foreign_type_and_impl_send_sync! {
 
 impl X509AlgorithmRef {
     /// Returns the ASN.1 OID of this algorithm.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn object(&self) -> &Asn1ObjectRef {
         unsafe {
             let mut oid = ptr::null();
@@ -1845,7 +1845,7 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl X509ObjectRef {
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn x509(&self) -> Option<&X509Ref> {
         unsafe {
             let ptr = X509_OBJECT_get0_X509(self.as_ptr());

@@ -47,7 +47,7 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// Returns 1184 for ML-KEM-768, 1568 for ML-KEM-1024.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn public_key_bytes(self) -> usize {
         match self {
             Self::MlKem768 => MlKem768PublicKey::PUBLIC_KEY_BYTES,
@@ -56,7 +56,7 @@ impl Algorithm {
     }
 
     /// Returns 1088 for ML-KEM-768, 1568 for ML-KEM-1024.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub const fn ciphertext_bytes(self) -> usize {
         match self {
             Self::MlKem768 => MlKem768PrivateKey::CIPHERTEXT_BYTES,

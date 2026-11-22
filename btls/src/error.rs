@@ -82,7 +82,7 @@ impl ErrorStack {
 
 impl ErrorStack {
     /// Returns the errors in the stack.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn errors(&self) -> &[Error] {
         &self.0
     }
@@ -207,7 +207,7 @@ impl Error {
     ///
     /// Libraries are identified by [`ERR_LIB_{name}`(ffi::ERR_LIB_SSL) constants.
     #[inline]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     #[track_caller]
     pub fn library_reason(&self, library_code: ErrLib) -> Option<c_int> {
         debug_assert!(library_code.0 < ffi::ERR_NUM_LIBS.0);
@@ -218,14 +218,14 @@ impl Error {
     ///
     /// Use [`Error::library_code()`] and [`Error::library_reason()`] instead.
     /// Packed error codes are different than [SSL error codes](crate::ssl::ErrorCode).
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     #[deprecated(note = "use library_reason() to compare error codes")]
     pub const fn code(&self) -> c_uint {
         self.code
     }
 
     /// Returns the name of the library reporting the error, if available.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn library(&self) -> Option<&'static str> {
         if self.is_internal() {
             return None;
@@ -245,7 +245,7 @@ impl Error {
     /// Returns the raw OpenSSL error constant for the library reporting the error (`ERR_LIB_{name}`).
     ///
     /// Error [reason codes](Error::library_reason) are not globally unique, but scoped to each library.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn library_code(&self) -> c_int {
         ffi::ERR_GET_LIB(self.code)
     }
@@ -256,7 +256,7 @@ impl Error {
     }
 
     /// Returns the reason for the error.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn reason(&self) -> Option<&str> {
         if self.is_internal() {
             return self.data();
@@ -277,13 +277,13 @@ impl Error {
     ///
     /// For `ERR_LIB_SYS` the reason code is `errno`. `ERR_LIB_USER` can use any values.
     /// Other libraries may use [`ERR_R_*`](ffi::ERR_R_FATAL) or their own codes.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn reason_code(&self) -> c_int {
         ffi::ERR_GET_REASON(self.code)
     }
 
     /// Returns the name of the source file which encountered the error.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn file(&self) -> &'static str {
         unsafe {
             if self.file.is_null() {
@@ -298,13 +298,13 @@ impl Error {
     /// Returns the line in the source file which encountered the error.
     ///
     /// 0 if unknown
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn line(&self) -> u32 {
         self.line
     }
 
     /// Returns additional data describing the error.
-    #[must_use]
+    #[must_use = "Use the returned supplementary native error information when reporting the failure."]
     pub fn data(&self) -> Option<&str> {
         match &self.data {
             Data::None => None,
@@ -314,7 +314,7 @@ impl Error {
         }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     fn data_cstr(&self) -> Option<Cow<'_, CStr>> {
         let s = match &self.data {
             Data::None => return None,
