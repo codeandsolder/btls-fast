@@ -28,7 +28,7 @@ use crate::asn1::{
 use crate::bio::{MemBio, MemBioSlice};
 use crate::conf::ConfRef;
 use crate::error::ErrorStack;
-use crate::ex_data::{replace_boxed, Index};
+use crate::ex_data::{replace_boxed, Index, IndexSlot};
 use crate::hash::{DigestBytes, MessageDigest};
 use crate::nid::Nid;
 use crate::pkey::{HasPrivate, HasPublic, PKey, PKeyRef, Public};

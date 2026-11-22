@@ -2706,33 +2706,40 @@ impl fmt::Debug for SslContext {
     }
 }
 
+// Allocate a native index for the exact wrapper and payload type. The native
+// class-specific allocator installs the matching destructor.
+macro_rules! callback_indices {
+    ($native:ident, $allocate:ident, $registry:ident) => {
+        /// Allocates a distinct typed extra-data index.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the native index allocation fails.
+        #[corresponds($native)]
+        pub fn new_ex_index<T: 'static + Sync + Send>() -> Result<Index<Self, T>, ErrorStack> {
+            // SAFETY: the class-specific allocator registers the destructor for T.
+            unsafe {
+                ffi::init();
+                let idx = cvt_n($allocate(Some(free_data_box::<T>)))?;
+                Ok(Index::from_raw(idx))
+            }
+        }
+
+        fn register_callback<T: 'static + Send + Sync>(
+            role: CallbackRole,
+        ) -> Result<Index<Self, T>, ErrorStack> {
+            $registry.register(role, Self::new_ex_index)
+        }
+    };
+}
+
 impl SslContext {
     /// Creates a new builder object for an `SslContext`.
     pub fn builder(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
         SslContextBuilder::new(method)
     }
 
-    /// Returns a new extra data index.
-    ///
-    /// Each invocation of this function is guaranteed to return a distinct index. These can be used
-    /// to store data in the context that can be retrieved later by callbacks, for example.
-    #[corresponds(SSL_CTX_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            ffi::init();
-            let idx = cvt_n(get_new_idx(Some(free_data_box::<T>)))?;
-            Ok(Index::from_raw(idx))
-        }
-    }
-
-    fn register_callback<T: 'static + Send + Sync>(
-        role: CallbackRole,
-    ) -> Result<Index<Self, T>, ErrorStack> {
-        CONTEXT_CALLBACKS.register(role, Self::new_ex_index)
-    }
+    callback_indices!(SSL_CTX_get_ex_new_index, get_new_idx, CONTEXT_CALLBACKS);
 
     /// Gets the list of supported ciphers for protocols before TLSv1.3.
     ///
@@ -3408,27 +3415,7 @@ impl fmt::Debug for Ssl {
 }
 
 impl Ssl {
-    /// Returns a new extra data index.
-    ///
-    /// Each invocation of this function is guaranteed to return a distinct index. These can be used
-    /// to store data in the context that can be retrieved later by callbacks, for example.
-    #[corresponds(SSL_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            ffi::init();
-            let idx = cvt_n(get_new_ssl_idx(Some(free_data_box::<T>)))?;
-            Ok(Index::from_raw(idx))
-        }
-    }
-
-    fn register_callback<T: 'static + Send + Sync>(
-        role: CallbackRole,
-    ) -> Result<Index<Self, T>, ErrorStack> {
-        SSL_CALLBACKS.register(role, Self::new_ex_index)
-    }
+    callback_indices!(SSL_get_ex_new_index, get_new_ssl_idx, SSL_CALLBACKS);
 
     /// Creates a new [`Ssl`].
     #[corresponds(SSL_new)]

@@ -305,65 +305,42 @@ fn client_session_is_not_offered_after_its_chain_expires() {
 
 #[test]
 fn custom_callback_success() {
-    static SESSION_TICKET: OnceLock<SslSession> = OnceLock::new();
-    static NST_RECIEVED_COUNT: AtomicU8 = AtomicU8::new(0);
-
-    let mut server = Server::builder();
-    server.expected_connections_count(2);
-    unsafe {
-        server
-            .ctx()
-            .set_ticket_key_callback(test_success_tickey_key_callback)
-            .unwrap();
-    };
-    let server = server.build();
-
-    let mut client = server.client();
-    client
-        .ctx()
-        .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client
-        .ctx()
-        .set_new_session_callback(|_, session| {
-            NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-            // The server sends multiple session tickets but we only care to retrieve one.
-            let _ = SESSION_TICKET.set(session);
-        })
-        .unwrap();
-    let ssl_stream = client.connect();
-
-    assert!(!ssl_stream.ssl().session_reused());
-    assert!(SESSION_TICKET.get().is_some());
-    assert_eq!(SUCCESS_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 2);
-    assert_eq!(SUCCESS_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 0);
-    assert_eq!(NST_RECIEVED_COUNT.load(Ordering::SeqCst), 2);
-
-    // Retrieve the session ticket
-    let session_ticket = SESSION_TICKET.get().unwrap();
-
-    // Attempt to resume the connection using the session ticket
-    let client_2 = server.client();
-    let mut ssl_builder = client_2.build().builder();
-    unsafe { ssl_builder.ssl().set_session(session_ticket).unwrap() };
-    let ssl_stream_2 = ssl_builder.connect();
-
-    assert!(ssl_stream_2.ssl().session_reused());
-    assert_eq!(SUCCESS_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 4);
-    assert_eq!(SUCCESS_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 1);
+    custom_callback_roundtrip(
+        test_success_tickey_key_callback,
+        &SUCCESS_ENCRYPTION_CALLED_BACK,
+        &SUCCESS_DECRYPTION_CALLED_BACK,
+        true,
+    );
 }
 
 #[test]
 fn custom_callback_unrecognized_decryption_ticket() {
-    static SESSION_TICKET: OnceLock<SslSession> = OnceLock::new();
-    static NST_RECIEVED_COUNT: AtomicU8 = AtomicU8::new(0);
+    custom_callback_roundtrip(
+        test_noop_tickey_key_callback,
+        &NOOP_ENCRYPTION_CALLED_BACK,
+        &NOOP_DECRYPTION_CALLED_BACK,
+        false,
+    );
+}
+
+fn custom_callback_roundtrip(
+    callback: fn(
+        &SslRef,
+        TicketKeyMode<'_>,
+        &mut CipherCtxRef,
+        &mut HmacCtxRef,
+    ) -> TicketKeyCallbackResult,
+    encryptions: &AtomicU8,
+    decryptions: &AtomicU8,
+    resumed: bool,
+) {
+    let session_ticket = std::sync::Arc::new(OnceLock::new());
+    let received = std::sync::Arc::new(AtomicU8::new(0));
 
     let mut server = Server::builder();
     server.expected_connections_count(2);
     unsafe {
-        server
-            .ctx()
-            .set_ticket_key_callback(test_noop_tickey_key_callback)
-            .unwrap();
+        server.ctx().set_ticket_key_callback(callback).unwrap();
     };
     let server = server.build();
 
@@ -371,24 +348,26 @@ fn custom_callback_unrecognized_decryption_ticket() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
+    let ticket_out = session_ticket.clone();
+    let received_out = received.clone();
     client
         .ctx()
-        .set_new_session_callback(|_, session| {
-            NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
+        .set_new_session_callback(move |_, session| {
+            received_out.fetch_add(1, Ordering::SeqCst);
             // The server sends multiple session tickets but we only care to retrieve one.
-            let _ = SESSION_TICKET.set(session);
+            let _ = ticket_out.set(session);
         })
         .unwrap();
     let ssl_stream = client.connect();
 
     assert!(!ssl_stream.ssl().session_reused());
-    assert!(SESSION_TICKET.get().is_some());
-    assert_eq!(NOOP_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 2);
-    assert_eq!(NOOP_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 0);
-    assert_eq!(NST_RECIEVED_COUNT.load(Ordering::SeqCst), 2);
+    assert!(session_ticket.get().is_some());
+    assert_eq!(encryptions.load(Ordering::SeqCst), 2);
+    assert_eq!(decryptions.load(Ordering::SeqCst), 0);
+    assert_eq!(received.load(Ordering::SeqCst), 2);
 
     // Retrieve the session ticket
-    let session_ticket = SESSION_TICKET.get().unwrap();
+    let session_ticket = session_ticket.get().unwrap();
 
     // Attempt to resume the connection using the session ticket
     let client_2 = server.client();
@@ -396,10 +375,9 @@ fn custom_callback_unrecognized_decryption_ticket() {
     unsafe { ssl_builder.ssl().set_session(session_ticket).unwrap() };
     let ssl_stream_2 = ssl_builder.connect();
 
-    // Second connection was NOT resumed due to TicketKeyCallbackResult::Noop on decryption
-    assert!(!ssl_stream_2.ssl().session_reused());
-    assert_eq!(NOOP_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 4);
-    assert_eq!(NOOP_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 1);
+    assert_eq!(ssl_stream_2.ssl().session_reused(), resumed);
+    assert_eq!(encryptions.load(Ordering::SeqCst), 4);
+    assert_eq!(decryptions.load(Ordering::SeqCst), 1);
 }
 
 // Successfully return a session ticket in encryption mode but return a

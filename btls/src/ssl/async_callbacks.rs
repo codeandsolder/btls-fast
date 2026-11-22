@@ -495,7 +495,7 @@ fn with_private_key_method(
 ///
 /// This function won't even bother storing the future in `index` if the future
 /// created by `create_fut` returns `Poll::Ready(_)` on the first poll call.
-fn with_ex_data_future<H, R, T, E>(
+fn with_ex_data_future<H, R: 'static, T, E>(
     ssl_handle: &mut H,
     index: Index<Ssl, MutOnly<Option<ExDataFuture<R>>>>,
     get_ssl_mut: impl Fn(&mut H) -> &mut SslRef,

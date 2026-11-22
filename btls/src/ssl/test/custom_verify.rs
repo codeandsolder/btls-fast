@@ -1,4 +1,5 @@
 use super::server::Server;
+use crate::ssl::SslRef;
 use crate::ssl::{ErrorCode, HandshakeError, SslAlert, SslVerifyMode};
 use crate::x509::X509StoreContext;
 use crate::{hash::MessageDigest, ssl::SslVerifyError};
@@ -152,34 +153,31 @@ fn trusted_callback_override_bad() {
     client.connect_err();
 }
 
+fn check_peer_digest(ssl: &mut SslRef) -> Result<(), SslVerifyError> {
+    let cert = ssl.peer_certificate().unwrap();
+    let digest = cert.digest(MessageDigest::sha1()).unwrap();
+    assert_eq!(hex::encode(digest), super::TEST_CERT_DIGEST);
+    Ok(())
+}
+
 #[test]
 fn callback() {
     static CALLED_BACK: AtomicBool = AtomicBool::new(false);
     let server = Server::builder().build();
     let mut client = server.client();
-    let expected = super::TEST_CERT_DIGEST;
-
     client
         .ctx()
         .set_verify_callback(SslVerifyMode::PEER, |_, _| {
             panic!("verify callback should not be called");
         })
         .unwrap();
-
     client
         .ctx()
-        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+        .set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
             CALLED_BACK.store(true, Ordering::SeqCst);
-
-            let cert = ssl.peer_certificate().unwrap();
-            let digest = cert.digest(MessageDigest::sha1()).unwrap();
-
-            assert_eq!(hex::encode(digest), expected);
-
-            Ok(())
+            check_peer_digest(ssl)
         })
         .unwrap();
-
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
 }
@@ -189,29 +187,19 @@ fn ssl_callback() {
     static CALLED_BACK: AtomicBool = AtomicBool::new(false);
     let server = Server::builder().build();
     let mut client = server.client().build().builder();
-    let expected = super::TEST_CERT_DIGEST;
-
     client
         .ssl()
         .set_verify_callback(SslVerifyMode::PEER, |_, _| {
             panic!("verify callback should not be called");
         })
         .unwrap();
-
     client
         .ssl()
-        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+        .set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
             CALLED_BACK.store(true, Ordering::SeqCst);
-
-            let cert = ssl.peer_certificate().unwrap();
-            let digest = cert.digest(MessageDigest::sha1()).unwrap();
-
-            assert_eq!(hex::encode(digest), expected);
-
-            Ok(())
+            check_peer_digest(ssl)
         })
         .unwrap();
-
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
 }
