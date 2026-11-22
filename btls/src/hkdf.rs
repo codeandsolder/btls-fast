@@ -158,11 +158,6 @@ impl HkdfSuite {
             ));
         }
 
-        if okm.len() > 255 * width {
-            return Err(ErrorStack::internal_error_str(
-                "HKDF output exceeds RFC limit",
-            ));
-        }
         ffi::init();
 
         // SAFETY: the descriptor has a supported nonzero width; all inputs
