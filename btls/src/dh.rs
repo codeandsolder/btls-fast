@@ -3,7 +3,6 @@ use crate::ffi;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
 use std::mem;
-use std::ptr;
 
 use crate::bn::BigNum;
 use crate::pkey::{HasParams, Params};
