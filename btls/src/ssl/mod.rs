@@ -5096,11 +5096,19 @@ pub struct SslStream<S> {
 
 impl<S> Drop for SslStream<S> {
     fn drop(&mut self) {
-        // ssl holds a reference to method internally so it has to drop first
-        unsafe {
+        // Detach the Rust transport before SSL_free invokes the BIO destructor.
+        // The transport's Drop may unwind; release the native resources before
+        // dropping it in Rust rather than unwinding through a C callback.
+        // SAFETY: We own the stream and its BIO exclusively. into_inner may
+        // already have detached the state. SSL holds a reference to method,
+        // so freeing SSL must precede freeing the method.
+        let state = unsafe {
+            let state = bio::detach_state::<S>(self.ssl.get_raw_rbio());
             ManuallyDrop::drop(&mut self.ssl);
             ManuallyDrop::drop(&mut self.method);
-        }
+            state
+        };
+        drop(state);
     }
 }
 

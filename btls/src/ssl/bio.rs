@@ -103,19 +103,27 @@ pub unsafe fn get_mut<'a, S: 'a>(bio: *mut BIO) -> &'a mut S {
     unsafe { &mut state::<S>(bio).stream }
 }
 
-pub unsafe fn take_stream<S>(bio: *mut BIO) -> S {
-    assert!(!bio.is_null());
-    // SAFETY: The caller consumes the stream, so its boxed state can be taken once.
+/// Detach the owned Rust state exactly once, before its BIO is freed.
+pub unsafe fn detach_state<S>(bio: *mut BIO) -> Option<Box<StreamState<S>>> {
+    // SAFETY: The caller has exclusive ownership of the BIO, which remains live
+    // for these operations. A non-null data pointer originates from Box::into_raw.
     unsafe {
         let data = BIO_get_data(bio);
-
-        assert!(!data.is_null());
-
-        let state = Box::<StreamState<S>>::from_raw(data.cast());
-
+        if data.is_null() {
+            return None;
+        }
         BIO_set_data(bio, ptr::null_mut());
+        Some(Box::from_raw(data.cast()))
+    }
+}
 
-        state.stream
+pub unsafe fn take_stream<S>(bio: *mut BIO) -> S {
+    // SAFETY: This call consumes a constructed stream, so its state is live
+    // and has not been detached.
+    let state = unsafe { detach_state::<S>(bio) };
+    match state {
+        Some(state) => state.stream,
+        None => unreachable!("a live SslStream owns an attached BIO state"),
     }
 }
 
@@ -141,31 +149,31 @@ unsafe fn state<'a, S>(bio: *mut BIO) -> &'a mut StreamState<S> {
     unsafe { &mut *state_ptr::<S>(bio) }
 }
 
-unsafe extern "C" fn bwrite<S: Write>(bio: *mut BIO, buf: *const c_char, len: c_int) -> c_int {
-    // SAFETY: BIO_meth_set_write's callback contract provides an initialized BIO
-    // and a readable buffer of len bytes for the duration of this call.
+#[derive(Clone, Copy)]
+enum RetryDirection {
+    Read,
+    Write,
+}
+
+unsafe fn run_io<S>(
+    bio: *mut BIO,
+    direction: RetryDirection,
+    limit: usize,
+    operation: impl FnOnce(&mut S) -> io::Result<usize>,
+) -> c_int {
+    // SAFETY: The registered callback supplies the initialized BIO and exclusive
+    // access to its state. The Rust operation cannot outlive this call.
     unsafe {
         BIO_clear_retry_flags(bio);
-
-        let Ok(len) = usize::try_from(len) else {
-            return -1;
-        };
-
-        if len == 0 {
-            return 0;
-        }
-        if buf.is_null() {
-            return -1;
-        }
-
         let state = state::<S>(bio);
-        let buf = slice::from_raw_parts(buf.cast(), len);
-
-        match catch_unwind(AssertUnwindSafe(|| state.stream.write(buf))) {
-            Ok(Ok(count)) => checked_count(state, count, len),
+        match catch_unwind(AssertUnwindSafe(|| operation(&mut state.stream))) {
+            Ok(Ok(count)) => checked_count(state, count, limit),
             Ok(Err(err)) => {
                 if retriable_error(&err) {
-                    BIO_set_retry_write(bio);
+                    match direction {
+                        RetryDirection::Read => BIO_set_retry_read(bio),
+                        RetryDirection::Write => BIO_set_retry_write(bio),
+                    }
                 }
                 state.error = Some(err);
                 -1
@@ -175,55 +183,51 @@ unsafe extern "C" fn bwrite<S: Write>(bio: *mut BIO, buf: *const c_char, len: c_
                 -1
             }
         }
+    }
+}
+
+unsafe extern "C" fn bwrite<S: Write>(bio: *mut BIO, buf: *const c_char, len: c_int) -> c_int {
+    let Ok(len) = usize::try_from(len) else {
+        return -1;
+    };
+    if len == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        return -1;
+    }
+    // SAFETY: BIO_meth_set_write supplies an initialized BIO and a readable
+    // buffer of len bytes for the duration of this callback.
+    unsafe {
+        let bytes = slice::from_raw_parts(buf.cast(), len);
+        run_io::<S>(bio, RetryDirection::Write, len, |stream| {
+            stream.write(bytes)
+        })
     }
 }
 
 unsafe extern "C" fn bread<S: Read>(bio: *mut BIO, buf: *mut c_char, len: c_int) -> c_int {
-    // SAFETY: BIO_meth_set_read's contract provides an initialized BIO and an
-    // exclusive writable buffer of len bytes. We initialize it before borrowing.
+    let Ok(len) = usize::try_from(len) else {
+        return -1;
+    };
+    if len == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        return -1;
+    }
+    // SAFETY: BIO_meth_set_read supplies an initialized BIO and an exclusive
+    // writable buffer. Initialize it before passing it to safe Rust Read.
     unsafe {
-        BIO_clear_retry_flags(bio);
-
-        let Ok(len) = usize::try_from(len) else {
-            return -1;
-        };
-
-        if len == 0 {
-            return 0;
-        }
-        if buf.is_null() {
-            return -1;
-        }
-
-        let state = state::<S>(bio);
-        // Native BIO output buffers may be uninitialized. Read::read accepts
-        // an initialized byte slice and may inspect its initial contents, so
-        // initialize the buffer before creating the Rust reference.
         buf.cast::<u8>().write_bytes(0, len);
-        let buf = slice::from_raw_parts_mut(buf.cast(), len);
-
-        match catch_unwind(AssertUnwindSafe(|| state.stream.read(buf))) {
-            Ok(Ok(count)) => checked_count(state, count, len),
-            Ok(Err(err)) => {
-                if retriable_error(&err) {
-                    BIO_set_retry_read(bio);
-                }
-                state.error = Some(err);
-                -1
-            }
-            Err(err) => {
-                state.panic = Some(err);
-                -1
-            }
-        }
+        let bytes = slice::from_raw_parts_mut(buf.cast(), len);
+        run_io::<S>(bio, RetryDirection::Read, len, |stream| stream.read(bytes))
     }
 }
 
 fn checked_count<S>(state: &mut StreamState<S>, count: usize, limit: usize) -> c_int {
-    if count <= limit {
-        if let Ok(count) = c_int::try_from(count) {
-            return count;
-        }
+    if let Some(count) = c_int::try_from(count).ok().filter(|_| count <= limit) {
+        return count;
     }
     state.error = Some(io::Error::new(
         io::ErrorKind::InvalidData,
@@ -257,29 +261,22 @@ unsafe extern "C" fn ctrl<S: Write>(
     _num: c_long,
     _ptr: *mut c_void,
 ) -> c_long {
-    // SAFETY: The registered control callback receives the BIO's live state
-    // for this call; flush and MTU query operate on that same state.
+    // SAFETY: The control callback is invoked with a valid BIO. A control
+    // operation before attachment must not dereference absent stream state.
     unsafe {
-        let state = state::<S>(bio);
-
+        let data = state_ptr::<S>(bio);
+        if data.is_null() {
+            return 0;
+        }
         if cmd == BIO_CTRL_FLUSH {
-            BIO_clear_retry_flags(bio);
-            match catch_unwind(AssertUnwindSafe(|| state.stream.flush())) {
-                Ok(Ok(())) => 1,
-                Ok(Err(err)) => {
-                    if retriable_error(&err) {
-                        BIO_set_retry_write(bio);
-                    }
-                    state.error = Some(err);
-                    0
-                }
-                Err(err) => {
-                    state.panic = Some(err);
-                    0
-                }
-            }
+            c_long::from(
+                run_io::<S>(bio, RetryDirection::Write, 1, |stream| {
+                    stream.flush().map(|()| 1)
+                })
+                .max(0),
+            )
         } else if cmd == BIO_CTRL_DGRAM_QUERY_MTU {
-            state.dtls_mtu_size
+            (*data).dtls_mtu_size
         } else {
             0
         }
@@ -301,16 +298,11 @@ unsafe extern "C" fn destroy<S>(bio: *mut BIO) -> c_int {
         return 0;
     }
 
-    // SAFETY: The final BIO destructor owns the attached allocation, if any.
+    // SAFETY: The final BIO destructor has exclusive access to the BIO.
     unsafe {
-        let data = BIO_get_data(bio);
-
-        if !data.is_null() {
-            drop(Box::<StreamState<S>>::from_raw(data.cast()));
-            BIO_set_data(bio, ptr::null_mut());
-        }
-
+        let state = detach_state::<S>(bio);
         BIO_set_init(bio, 0);
+        drop(state);
         1
     }
 }
@@ -377,6 +369,35 @@ mod tests {
             ffi::BIO_free(bio);
         }
         drop(method);
+        Ok(())
+    }
+
+    #[test]
+    fn user_transport_drop_runs_outside_native_destructor() -> Result<(), ErrorStack> {
+        struct PanickingDrop;
+        impl Read for PanickingDrop {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Ok(0)
+            }
+        }
+        impl Write for PanickingDrop {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        impl Drop for PanickingDrop {
+            fn drop(&mut self) {
+                panic!("transport destructor");
+            }
+        }
+        use crate::ssl::{Ssl, SslContext, SslMethod, SslStream};
+        let context = SslContext::builder(SslMethod::tls())?.build();
+        let ssl = Ssl::new(&context)?;
+        let stream = SslStream::new(ssl, PanickingDrop)?;
+        assert!(catch_unwind(AssertUnwindSafe(|| drop(stream))).is_err());
         Ok(())
     }
 }
