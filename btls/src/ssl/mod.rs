@@ -3298,11 +3298,11 @@ impl Ssl {
     ///
     /// BoringSSL's default configuration is insecure. It is highly recommended to use
     /// [`SslConnector`] rather than [`Ssl`] directly, as it manages that configuration.
-    pub fn setup_connect<S>(self, stream: S) -> MidHandshakeSslStream<S>
+    pub fn setup_connect<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
-        SslStreamBuilder::new(self, stream).setup_connect()
+        Ok(SslStreamBuilder::new(self, stream)?.setup_connect())
     }
 
     /// Attempts a client-side TLS handshake.
@@ -3318,7 +3318,7 @@ impl Ssl {
     where
         S: Read + Write,
     {
-        self.setup_connect(stream).handshake()
+        self.setup_connect(stream)?.handshake()
     }
 
     /// Initiates a server-side TLS handshake.
@@ -3332,11 +3332,11 @@ impl Ssl {
     ///
     /// BoringSSL's default configuration is insecure. It is highly recommended to use
     /// [`SslAcceptor`] rather than [`Ssl`] directly, as it manages that configuration.
-    pub fn setup_accept<S>(self, stream: S) -> MidHandshakeSslStream<S>
+    pub fn setup_accept<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
-        SslStreamBuilder::new(self, stream).setup_accept()
+        Ok(SslStreamBuilder::new(self, stream)?.setup_accept())
     }
 
     /// Attempts a server-side TLS handshake.
@@ -3354,7 +3354,7 @@ impl Ssl {
     where
         S: Read + Write,
     {
-        self.setup_accept(stream).handshake()
+        self.setup_accept(stream)?.handshake()
     }
 }
 
@@ -5406,21 +5406,36 @@ where
     S: Read + Write,
 {
     /// Begin creating an `SslStream` atop `stream`
-    pub fn new(ssl: Ssl, stream: S) -> Self {
-        Self {
-            inner: SslStream::new(ssl, stream).unwrap(),
+    pub fn new(ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
+        Ok(Self {
+            inner: SslStream::new(ssl, stream)?,
+        })
+    }
+
+    fn pending(self, code: ErrorCode, message: &'static str) -> MidHandshakeSslStream<S> {
+        MidHandshakeSslStream {
+            stream: self.inner,
+            error: Error {
+                code,
+                cause: Some(InnerError::Io(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    message,
+                ))),
+            },
         }
     }
 
     /// Configure as an outgoing stream from a client.
     #[corresponds(SSL_set_connect_state)]
     pub fn set_connect_state(&mut self) {
+        // SAFETY: the builder owns a live SSL object and exclusively borrows it.
         unsafe { ffi::SSL_set_connect_state(self.inner.ssl.as_ptr()) }
     }
 
     /// Configure as an incoming stream to a server.
     #[corresponds(SSL_set_accept_state)]
     pub fn set_accept_state(&mut self) {
+        // SAFETY: the builder owns a live SSL object and exclusively borrows it.
         unsafe { ffi::SSL_set_accept_state(self.inner.ssl.as_ptr()) }
     }
 
@@ -5433,16 +5448,10 @@ where
     pub fn setup_connect(mut self) -> MidHandshakeSslStream<S> {
         self.set_connect_state();
 
-        MidHandshakeSslStream {
-            stream: self.inner,
-            error: Error {
-                code: ErrorCode::WANT_WRITE,
-                cause: Some(InnerError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "connect handshake has not started yet",
-                ))),
-            },
-        }
+        self.pending(
+            ErrorCode::WANT_WRITE,
+            "connect handshake has not started yet",
+        )
     }
 
     /// Attempts a client-side TLS handshake.
@@ -5462,16 +5471,7 @@ where
     pub fn setup_accept(mut self) -> MidHandshakeSslStream<S> {
         self.set_accept_state();
 
-        MidHandshakeSslStream {
-            stream: self.inner,
-            error: Error {
-                code: ErrorCode::WANT_READ,
-                cause: Some(InnerError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "accept handshake has not started yet",
-                ))),
-            },
-        }
+        self.pending(ErrorCode::WANT_READ, "accept handshake has not started yet")
     }
 
     /// Attempts a server-side TLS handshake.

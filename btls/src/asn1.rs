@@ -39,7 +39,6 @@ use crate::bn::{BigNum, BigNumRef};
 use crate::error::ErrorStack;
 use crate::nid::Nid;
 use crate::stack::Stackable;
-use crate::string::OpensslString;
 use crate::{cvt, cvt_p};
 use openssl_macros::corresponds;
 
@@ -473,22 +472,23 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl Asn1StringRef {
-    /// Converts the ASN.1 underlying format to UTF8
+    /// Converts the ASN.1 representation to an owned UTF-8 string,
+    /// preserving embedded NUL characters.
     ///
-    /// ASN.1 strings may utilize UTF-16, ASCII, BMP, or UTF8.  This is important to
-    /// consume the string in a meaningful way without knowing the underlying
-    /// format.
+    /// # Errors
+    ///
+    /// The value is not a valid ASN.1 string, conversion fails, or it is not UTF-8.
     #[corresponds(ASN1_STRING_to_UTF8)]
-    pub fn as_utf8(&self) -> Result<OpensslString, ErrorStack> {
-        unsafe {
-            let mut ptr = ptr::null_mut();
-            let len = ffi::ASN1_STRING_to_UTF8(&raw mut ptr, self.as_ptr());
-            if len < 0 {
-                return Err(ErrorStack::get());
-            }
-
-            Ok(OpensslString::from_ptr(ptr.cast()))
-        }
+    pub fn as_utf8(&self) -> Result<String, ErrorStack> {
+        let mut output = crate::util::NativeBuffer::new();
+        // SAFETY: self borrows a live native string. On success the native call
+        // transfers an allocation containing exactly the reported bytes.
+        let bytes = unsafe {
+            let len = ffi::ASN1_STRING_to_UTF8(output.output(), self.as_ptr());
+            let len = usize::try_from(len).map_err(|_| ErrorStack::get())?;
+            output.copy(len)?
+        };
+        String::from_utf8(bytes).map_err(ErrorStack::internal_error)
     }
 
     /// Return the string as an array of bytes.
@@ -639,13 +639,30 @@ impl Asn1IntegerRef {
         }
     }
 
-    to_der! {
-        /// Serializes the integer as DER contents, excluding the tag and length.
-        ///
-        /// The result is a minimal, big-endian two's complement encoding.
-        #[corresponds(i2c_ASN1_INTEGER)]
-        to_der_contents,
-        ffi::i2c_ASN1_INTEGER
+    /// Serializes the integer as DER contents, excluding tag and length.
+    ///
+    /// The result is a minimal, big-endian two's complement encoding.
+    ///
+    /// # Errors
+    ///
+    /// The integer's encoded length is not representable by the native API.
+    #[corresponds(i2c_ASN1_INTEGER)]
+    pub fn to_der_contents(&self) -> Result<Vec<u8>, ErrorStack> {
+        // SAFETY: ASN1_INTEGER is immutable while shared-borrowed.
+        // i2c_ASN1_INTEGER does not allocate if its output pointer is null.
+        unsafe {
+            let len = crate::cvt_nz(ffi::i2c_ASN1_INTEGER(self.as_ptr(), ptr::null_mut()))?.get();
+            let mut bytes = vec![0; len];
+            let mut output = bytes.as_mut_ptr();
+            let written =
+                crate::cvt_nz(ffi::i2c_ASN1_INTEGER(self.as_ptr(), &raw mut output))?.get();
+            if written != len {
+                return Err(ErrorStack::internal_error_str(
+                    "inconsistent ASN.1 integer length",
+                ));
+            }
+            Ok(bytes)
+        }
     }
 
     /// Sets the ASN.1 value to the value of a signed 32-bit integer, for larger numbers
@@ -784,6 +801,26 @@ mod tests {
 
     use crate::bn::BigNum;
     use crate::nid::Nid;
+
+    #[test]
+    fn utf8_preserves_embedded_nul() {
+        // SAFETY: allocation returns an owned ASN1_STRING; the source bytes
+        // remain readable throughout ASN1_STRING_set, which copies them.
+        let value = unsafe {
+            let value = Asn1String::from_ptr(
+                cvt_p(ffi::ASN1_STRING_type_new(ffi::V_ASN1_UTF8STRING)).unwrap(),
+            );
+            let bytes = b"alpha\0omega";
+            cvt(ffi::ASN1_STRING_set(
+                value.as_ptr(),
+                bytes.as_ptr().cast(),
+                11,
+            ))
+            .unwrap();
+            value
+        };
+        assert_eq!(value.as_utf8().unwrap(), "alpha\0omega");
+    }
 
     /// Tests conversion between BigNum and Asn1Integer.
     #[test]

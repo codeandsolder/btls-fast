@@ -108,6 +108,41 @@ impl<T> ToOwned for RsaRef<T> {
     }
 }
 
+impl<T: HasPublic> RsaRef<T> {
+    fn transform(
+        &self,
+        from: &[u8],
+        to: &mut [u8],
+        padding: Padding,
+        operation: unsafe extern "C" fn(usize, *const u8, *mut u8, *mut ffi::RSA, c_int) -> c_int,
+    ) -> Result<usize, ErrorStack> {
+        if to.len() < usize::try_from(self.size()).map_err(ErrorStack::internal_error)? {
+            return Err(ErrorStack::internal_error_str(
+                "RSA output buffer too small",
+            ));
+        }
+        // SAFETY: The live key has the components required by the public
+        // wrapper's capability bound. The output buffer is at least RSA_size,
+        // and the complete readable input slice is described by its length.
+        let written = unsafe {
+            cvt_n(operation(
+                from.len(),
+                from.as_ptr(),
+                to.as_mut_ptr(),
+                self.as_ptr(),
+                padding.0,
+            ))?
+        };
+        let written = usize::try_from(written).map_err(ErrorStack::internal_error)?;
+        if written > to.len() {
+            return Err(ErrorStack::internal_error_str(
+                "invalid native RSA output size",
+            ));
+        }
+        Ok(written)
+    }
+}
+
 impl<T> RsaRef<T>
 where
     T: HasPrivate,
@@ -133,58 +168,32 @@ where
         ffi::i2d_RSAPrivateKey
     }
 
-    /// Decrypts data using the private key, returning the number of decrypted bytes.
+    /// Decrypts data using the private key, returning the number of output bytes.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `self` has no private components, or if `to` is smaller
-    /// than `self.size()`.
+    /// The input is invalid, the padding is unsupported, or the output is too small.
     pub fn private_decrypt(
         &self,
         from: &[u8],
         to: &mut [u8],
         padding: Padding,
     ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_private_decrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+        self.transform(from, to, padding, ffi::RSA_private_decrypt)
     }
 
-    /// Encrypts data using the private key, returning the number of encrypted bytes.
+    /// Encrypts data using the private key, returning the number of output bytes.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `self` has no private components, or if `to` is smaller
-    /// than `self.size()`.
+    /// The input is invalid, the padding is unsupported, or the output is too small.
     pub fn private_encrypt(
         &self,
         from: &[u8],
         to: &mut [u8],
         padding: Padding,
     ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_private_encrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+        self.transform(from, to, padding, ffi::RSA_private_encrypt)
     }
 
     /// Returns a reference to the private exponent of the key.
@@ -330,56 +339,32 @@ where
         unsafe { ffi::RSA_size(self.as_ptr()) }
     }
 
-    /// Decrypts data using the public key, returning the number of decrypted bytes.
+    /// Decrypts data using the public key, returning the number of output bytes.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `to` is smaller than `self.size()`.
+    /// The input is invalid, the padding is unsupported, or the output is too small.
     pub fn public_decrypt(
         &self,
         from: &[u8],
         to: &mut [u8],
         padding: Padding,
     ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_public_decrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+        self.transform(from, to, padding, ffi::RSA_public_decrypt)
     }
 
-    /// Encrypts data using the public key, returning the number of encrypted bytes.
+    /// Encrypts data using the public key, returning the number of output bytes.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `to` is smaller than `self.size()`.
+    /// The input is invalid, the padding is unsupported, or the output is too small.
     pub fn public_encrypt(
         &self,
         from: &[u8],
         to: &mut [u8],
         padding: Padding,
     ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_public_encrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+        self.transform(from, to, padding, ffi::RSA_public_encrypt)
     }
 
     /// Returns a reference to the modulus of the key.
@@ -623,6 +608,18 @@ mod test {
             .unwrap();
         Rsa::private_key_from_pem_passphrase(&pem, b"foobar").unwrap();
         assert!(Rsa::private_key_from_pem_passphrase(&pem, b"fizzbuzz").is_err());
+    }
+
+    #[test]
+    fn rejects_small_output_and_trailing_der() {
+        let key = Rsa::private_key_from_pem(include_bytes!("../test/rsa.pem")).unwrap();
+        assert!(key
+            .public_encrypt(b"message", &mut [0; 1], Padding::PKCS1)
+            .is_err());
+        let mut der = key.private_key_to_der().unwrap();
+        assert!(Rsa::private_key_from_der(&der).is_ok());
+        der.push(0);
+        assert!(Rsa::private_key_from_der(&der).is_err());
     }
 
     #[test]

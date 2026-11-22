@@ -536,19 +536,7 @@ impl X509Ref {
     #[corresponds(X509_get_ext_d2i)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_alt_names(&self) -> Option<Stack<GeneralName>> {
-        unsafe {
-            let stack = ffi::X509_get_ext_d2i(
-                self.as_ptr(),
-                ffi::NID_subject_alt_name,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-            if stack.is_null() {
-                None
-            } else {
-                Some(Stack::from_ptr(stack.cast()))
-            }
-        }
+        self.alt_names(ffi::NID_subject_alt_name)
     }
 
     /// Returns this certificate's issuer name.
@@ -565,13 +553,14 @@ impl X509Ref {
     #[corresponds(X509_get_ext_d2i)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn issuer_alt_names(&self) -> Option<Stack<GeneralName>> {
+        self.alt_names(ffi::NID_issuer_alt_name)
+    }
+
+    fn alt_names(&self, nid: c_int) -> Option<Stack<GeneralName>> {
+        // SAFETY: Both call sites supply a native GENERAL_NAMES extension NID,
+        // and the decoder transfers ownership of the stack and its elements.
         unsafe {
-            let stack = ffi::X509_get_ext_d2i(
-                self.as_ptr(),
-                ffi::NID_issuer_alt_name,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
+            let stack = ffi::X509_get_ext_d2i(self.as_ptr(), nid, ptr::null_mut(), ptr::null_mut());
             if stack.is_null() {
                 None
             } else {
@@ -684,7 +673,17 @@ impl X509Ref {
     /// Access field.
     #[corresponds(X509_get1_ocsp)]
     pub fn ocsp_responders(&self) -> Result<Stack<OpensslString>, ErrorStack> {
-        unsafe { cvt_p(ffi::X509_get1_ocsp(self.as_ptr())).map(|p| Stack::from_ptr(p)) }
+        // SAFETY: The native API transfers ownership of the stack and each
+        // NUL-terminated string. Validate UTF-8 before exposing OpensslString.
+        let strings: Stack<OpensslString> =
+            unsafe { Stack::from_ptr(cvt_p(ffi::X509_get1_ocsp(self.as_ptr()))?) };
+        for string in &strings {
+            // SAFETY: Each native element is a live, allocated C string.
+            unsafe { CStr::from_ptr(string.as_ptr()) }
+                .to_str()
+                .map_err(ErrorStack::internal_error)?;
+        }
+        Ok(strings)
     }
 
     /// Checks that this certificate issued `subject`.

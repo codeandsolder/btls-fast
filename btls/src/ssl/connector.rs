@@ -440,7 +440,7 @@ impl ConnectConfiguration {
     where
         S: Read + Write,
     {
-        Ok(self.into_ssl(domain)?.setup_connect(stream))
+        self.into_ssl(domain)?.setup_connect(stream)
     }
 
     /// Attempts a client-side TLS session on a stream.
@@ -558,7 +558,7 @@ impl SslAcceptor {
     {
         let ssl = Ssl::new(&self.0)?;
 
-        Ok(ssl.setup_accept(stream))
+        ssl.setup_accept(stream)
     }
 
     /// Attempts a server-side TLS handshake on a stream.

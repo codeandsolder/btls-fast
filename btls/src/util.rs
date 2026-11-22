@@ -91,6 +91,44 @@ where
     }
 }
 
+/// Owns an allocation transferred by a native OpenSSL output-pointer API.
+pub(crate) struct NativeBuffer(*mut u8);
+
+impl NativeBuffer {
+    pub const fn new() -> Self {
+        Self(std::ptr::null_mut())
+    }
+
+    pub const fn output(&mut self) -> *mut *mut u8 {
+        &raw mut self.0
+    }
+
+    /// Copy a fully initialized native output.
+    ///
+    /// # Safety
+    /// The native call must have initialized exactly len readable bytes in this allocation.
+    pub unsafe fn copy(&self, len: usize) -> Result<Vec<u8>, ErrorStack> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        if self.0.is_null() || len > isize::MAX.unsigned_abs() {
+            return Err(ErrorStack::internal_error_str(
+                "invalid native output buffer",
+            ));
+        }
+        // SAFETY: The caller supplies the initialized size; the native allocation
+        // remains owned by self until after copying.
+        Ok(unsafe { slice::from_raw_parts(self.0, len) }.to_vec())
+    }
+}
+
+impl Drop for NativeBuffer {
+    fn drop(&mut self) {
+        // SAFETY: The pointer is either null or an owned OPENSSL allocation.
+        unsafe { crate::ffi::OPENSSL_free(self.0.cast()) };
+    }
+}
+
 pub trait ForeignTypeRefExt: ForeignTypeRef {
     unsafe fn from_const_ptr<'a>(ptr: *const Self::CType) -> &'a Self {
         unsafe { Self::from_ptr(ptr.cast_mut()) }

@@ -103,7 +103,7 @@ fn test_nid_values() {
     assert_eq!(email.data().as_slice(), b"test@example.com");
 
     let friendly = subject.entries_by_nid(Nid::FRIENDLYNAME).next().unwrap();
-    assert_eq!(&**friendly.data().as_utf8().unwrap(), "Example");
+    assert_eq!(friendly.data().as_utf8().unwrap(), "Example");
 }
 
 #[test]
@@ -126,7 +126,7 @@ fn test_nameref_iterator() {
 
     let friendly = all_entries.next().unwrap();
     assert_eq!(friendly.object().nid().as_raw(), Nid::FRIENDLYNAME.as_raw());
-    assert_eq!(&**friendly.data().as_utf8().unwrap(), "Example");
+    assert_eq!(friendly.data().as_utf8().unwrap(), "Example");
 
     if all_entries.next().is_some() {
         panic!();
