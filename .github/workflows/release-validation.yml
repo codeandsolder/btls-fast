@@ -183,7 +183,7 @@ jobs:
         run: rustup show && rustup target add ${{ matrix.target }}
         shell: bash
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version: ">=1.27.0"
       - name: Install target-specific APT dependencies
@@ -282,7 +282,7 @@ jobs:
       run: rustup show
       shell: bash
     - name: Install golang
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
       with:
         go-version: '>=1.27.0'
     - name: Resolve fleet compiler
@@ -316,7 +316,7 @@ jobs:
       with:
         submodules: 'recursive'
     - name: Install golang
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
       with:
         go-version: '>=1.27.0'
     - name: Install build tools (clang, cmake)
@@ -401,7 +401,7 @@ jobs:
         run: rustup show && rustup target add ${{ matrix.target }}
         shell: bash
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version: ">=1.27.0"
       - name: Install ${{ matrix.target }} toolchain
@@ -440,7 +440,7 @@ jobs:
       - name: Install Rust (rustup)
         run: rustup show
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: btls-sys/deps/boringssl/go.mod
           cache-dependency-path: btls-sys/deps/boringssl/go.sum
@@ -553,7 +553,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: btls-sys/deps/boringssl/go.mod
           cache-dependency-path: btls-sys/deps/boringssl/go.sum
