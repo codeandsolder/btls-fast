@@ -962,6 +962,7 @@ const GENERATED_MODULE: &str = r#"
     clippy::too_many_arguments,
     clippy::undocumented_unsafe_blocks,
     clippy::unreadable_literal,
+    clippy::struct_field_names,
     clippy::upper_case_acronyms,
     clippy::use_self,
     clippy::used_underscore_binding,

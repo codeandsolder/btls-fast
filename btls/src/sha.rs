@@ -54,8 +54,10 @@ use std::mem::MaybeUninit;
 /// SHA1 is known to be insecure - it should not be used unless required for
 /// compatibility with existing systems.
 #[inline]
-#[must_use]
+#[must_use = "The computed digest is the result of hashing the input."]
 pub fn sha1(data: &[u8]) -> [u8; 20] {
+    // SAFETY: The input is readable for data.len() bytes. The native one-shot
+    // function writes the entire fixed-size digest and returns the output pointer.
     unsafe {
         let mut hash: MaybeUninit<[u8; 20]> = MaybeUninit::uninit();
         ffi::SHA1(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
@@ -65,8 +67,10 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 
 /// Computes the SHA224 hash of some data.
 #[inline]
-#[must_use]
+#[must_use = "The computed digest is the result of hashing the input."]
 pub fn sha224(data: &[u8]) -> [u8; 28] {
+    // SAFETY: The input is readable for data.len() bytes. The native one-shot
+    // function writes the entire fixed-size digest and returns the output pointer.
     unsafe {
         let mut hash: MaybeUninit<[u8; 28]> = MaybeUninit::uninit();
         ffi::SHA224(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
@@ -76,8 +80,10 @@ pub fn sha224(data: &[u8]) -> [u8; 28] {
 
 /// Computes the SHA256 hash of some data.
 #[inline]
-#[must_use]
+#[must_use = "The computed digest is the result of hashing the input."]
 pub fn sha256(data: &[u8]) -> [u8; 32] {
+    // SAFETY: The input is readable for data.len() bytes. The native one-shot
+    // function writes the entire fixed-size digest and returns the output pointer.
     unsafe {
         let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
         ffi::SHA256(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
@@ -87,8 +93,10 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 
 /// Computes the SHA384 hash of some data.
 #[inline]
-#[must_use]
+#[must_use = "The computed digest is the result of hashing the input."]
 pub fn sha384(data: &[u8]) -> [u8; 48] {
+    // SAFETY: The input is readable for data.len() bytes. The native one-shot
+    // function writes the entire fixed-size digest and returns the output pointer.
     unsafe {
         let mut hash: MaybeUninit<[u8; 48]> = MaybeUninit::uninit();
         ffi::SHA384(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
@@ -98,8 +106,10 @@ pub fn sha384(data: &[u8]) -> [u8; 48] {
 
 /// Computes the SHA512 hash of some data.
 #[inline]
-#[must_use]
+#[must_use = "The computed digest is the result of hashing the input."]
 pub fn sha512(data: &[u8]) -> [u8; 64] {
+    // SAFETY: The input is readable for data.len() bytes. The native one-shot
+    // function writes the entire fixed-size digest and returns the output pointer.
     unsafe {
         let mut hash: MaybeUninit<[u8; 64]> = MaybeUninit::uninit();
         ffi::SHA512(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
@@ -109,8 +119,10 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
 
 /// Computes the SHA512-256 hash of some data.
 #[inline]
-#[must_use]
+#[must_use = "The computed digest is the result of hashing the input."]
 pub fn sha512_256(data: &[u8]) -> [u8; 32] {
+    // SAFETY: The input is readable for data.len() bytes. The native one-shot
+    // function writes the entire fixed-size digest and returns the output pointer.
     unsafe {
         let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
         ffi::SHA512_256(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
@@ -137,12 +149,14 @@ impl Default for Sha1 {
 impl Sha1 {
     /// Creates a new hasher.
     #[inline]
-    #[must_use]
+    #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
     pub fn new() -> Sha1 {
+        // SAFETY: The native constructor clears the complete context,
+        // sets the initial chaining state and returns success unconditionally.
         unsafe {
             let mut ctx = MaybeUninit::uninit();
             ffi::SHA1_Init(ctx.as_mut_ptr());
-            Sha1(ctx.assume_init())
+            Self(ctx.assume_init())
         }
     }
 
@@ -151,6 +165,8 @@ impl Sha1 {
     /// This can be called multiple times.
     #[inline]
     pub fn update(&mut self, buf: &[u8]) {
+        // SAFETY: The uniquely borrowed context is initialized and the native
+        // update reads at most buf.len() bytes for the duration of the call.
         unsafe {
             ffi::SHA1_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
         }
@@ -158,8 +174,10 @@ impl Sha1 {
 
     /// Returns the hash of the data.
     #[inline]
-    #[must_use]
+    #[must_use = "The computed digest is the result of hashing the input."]
     pub fn finish(mut self) -> [u8; 20] {
+        // SAFETY: The private context is initialized by its matching constructor;
+        // native finalization writes the full digest for this algorithm.
         unsafe {
             let mut hash: MaybeUninit<[u8; 20]> = MaybeUninit::uninit();
             ffi::SHA1_Final(hash.as_mut_ptr().cast(), &mut self.0);
@@ -182,12 +200,14 @@ impl Default for Sha224 {
 impl Sha224 {
     /// Creates a new hasher.
     #[inline]
-    #[must_use]
+    #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
     pub fn new() -> Sha224 {
+        // SAFETY: The native constructor clears the complete context,
+        // sets the initial chaining state and returns success unconditionally.
         unsafe {
             let mut ctx = MaybeUninit::uninit();
             ffi::SHA224_Init(ctx.as_mut_ptr());
-            Sha224(ctx.assume_init())
+            Self(ctx.assume_init())
         }
     }
 
@@ -196,6 +216,8 @@ impl Sha224 {
     /// This can be called multiple times.
     #[inline]
     pub fn update(&mut self, buf: &[u8]) {
+        // SAFETY: The uniquely borrowed context is initialized and the native
+        // update reads at most buf.len() bytes for the duration of the call.
         unsafe {
             ffi::SHA224_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
         }
@@ -203,8 +225,10 @@ impl Sha224 {
 
     /// Returns the hash of the data.
     #[inline]
-    #[must_use]
+    #[must_use = "The computed digest is the result of hashing the input."]
     pub fn finish(mut self) -> [u8; 28] {
+        // SAFETY: The private context is initialized by its matching constructor;
+        // native finalization writes the full digest for this algorithm.
         unsafe {
             let mut hash: MaybeUninit<[u8; 28]> = MaybeUninit::uninit();
             ffi::SHA224_Final(hash.as_mut_ptr().cast(), &mut self.0);
@@ -227,12 +251,14 @@ impl Default for Sha256 {
 impl Sha256 {
     /// Creates a new hasher.
     #[inline]
-    #[must_use]
+    #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
     pub fn new() -> Sha256 {
+        // SAFETY: The native constructor clears the complete context,
+        // sets the initial chaining state and returns success unconditionally.
         unsafe {
             let mut ctx = MaybeUninit::uninit();
             ffi::SHA256_Init(ctx.as_mut_ptr());
-            Sha256(ctx.assume_init())
+            Self(ctx.assume_init())
         }
     }
 
@@ -241,6 +267,8 @@ impl Sha256 {
     /// This can be called multiple times.
     #[inline]
     pub fn update(&mut self, buf: &[u8]) {
+        // SAFETY: The uniquely borrowed context is initialized and the native
+        // update reads at most buf.len() bytes for the duration of the call.
         unsafe {
             ffi::SHA256_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
         }
@@ -248,8 +276,10 @@ impl Sha256 {
 
     /// Returns the hash of the data.
     #[inline]
-    #[must_use]
+    #[must_use = "The computed digest is the result of hashing the input."]
     pub fn finish(mut self) -> [u8; 32] {
+        // SAFETY: The private context is initialized by its matching constructor;
+        // native finalization writes the full digest for this algorithm.
         unsafe {
             let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
             ffi::SHA256_Final(hash.as_mut_ptr().cast(), &mut self.0);
@@ -272,12 +302,15 @@ impl Default for Sha384 {
 impl Sha384 {
     /// Creates a new hasher.
     #[inline]
-    #[must_use]
+    #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
     pub fn new() -> Sha384 {
+        // SAFETY: The native constructor initializes counters and chaining
+        // state but leaves the block buffer alone. Zero the integer-only
+        // context first, so every field is initialized when Rust takes ownership.
         unsafe {
-            let mut ctx = MaybeUninit::uninit();
+            let mut ctx = MaybeUninit::zeroed();
             ffi::SHA384_Init(ctx.as_mut_ptr());
-            Sha384(ctx.assume_init())
+            Self(ctx.assume_init())
         }
     }
 
@@ -286,6 +319,8 @@ impl Sha384 {
     /// This can be called multiple times.
     #[inline]
     pub fn update(&mut self, buf: &[u8]) {
+        // SAFETY: The uniquely borrowed context is initialized and the native
+        // update reads at most buf.len() bytes for the duration of the call.
         unsafe {
             ffi::SHA384_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
         }
@@ -293,8 +328,10 @@ impl Sha384 {
 
     /// Returns the hash of the data.
     #[inline]
-    #[must_use]
+    #[must_use = "The computed digest is the result of hashing the input."]
     pub fn finish(mut self) -> [u8; 48] {
+        // SAFETY: The private context is initialized by its matching constructor;
+        // native finalization writes the full digest for this algorithm.
         unsafe {
             let mut hash: MaybeUninit<[u8; 48]> = MaybeUninit::uninit();
             ffi::SHA384_Final(hash.as_mut_ptr().cast(), &mut self.0);
@@ -317,12 +354,15 @@ impl Default for Sha512 {
 impl Sha512 {
     /// Creates a new hasher.
     #[inline]
-    #[must_use]
+    #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
     pub fn new() -> Sha512 {
+        // SAFETY: The native constructor initializes counters and chaining
+        // state but leaves the block buffer alone. Zero the integer-only
+        // context first, so every field is initialized when Rust takes ownership.
         unsafe {
-            let mut ctx = MaybeUninit::uninit();
+            let mut ctx = MaybeUninit::zeroed();
             ffi::SHA512_Init(ctx.as_mut_ptr());
-            Sha512(ctx.assume_init())
+            Self(ctx.assume_init())
         }
     }
 
@@ -331,6 +371,8 @@ impl Sha512 {
     /// This can be called multiple times.
     #[inline]
     pub fn update(&mut self, buf: &[u8]) {
+        // SAFETY: The uniquely borrowed context is initialized and the native
+        // update reads at most buf.len() bytes for the duration of the call.
         unsafe {
             ffi::SHA512_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
         }
@@ -338,8 +380,10 @@ impl Sha512 {
 
     /// Returns the hash of the data.
     #[inline]
-    #[must_use]
+    #[must_use = "The computed digest is the result of hashing the input."]
     pub fn finish(mut self) -> [u8; 64] {
+        // SAFETY: The private context is initialized by its matching constructor;
+        // native finalization writes the full digest for this algorithm.
         unsafe {
             let mut hash: MaybeUninit<[u8; 64]> = MaybeUninit::uninit();
             ffi::SHA512_Final(hash.as_mut_ptr().cast(), &mut self.0);
@@ -362,12 +406,15 @@ impl Default for Sha512_256 {
 impl Sha512_256 {
     /// Creates a new hasher.
     #[inline]
-    #[must_use]
+    #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
     pub fn new() -> Sha512_256 {
+        // SAFETY: The native constructor initializes counters and chaining
+        // state but leaves the block buffer alone. Zero the integer-only
+        // context first, so every field is initialized when Rust takes ownership.
         unsafe {
-            let mut ctx = MaybeUninit::uninit();
+            let mut ctx = MaybeUninit::zeroed();
             ffi::SHA512_256_Init(ctx.as_mut_ptr());
-            Sha512_256(ctx.assume_init())
+            Self(ctx.assume_init())
         }
     }
 
@@ -376,6 +423,8 @@ impl Sha512_256 {
     /// This can be called multiple times.
     #[inline]
     pub fn update(&mut self, buf: &[u8]) {
+        // SAFETY: The uniquely borrowed context is initialized and the native
+        // update reads at most buf.len() bytes for the duration of the call.
         unsafe {
             ffi::SHA512_256_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
         }
@@ -383,8 +432,10 @@ impl Sha512_256 {
 
     /// Returns the hash of the data.
     #[inline]
-    #[must_use]
+    #[must_use = "The computed digest is the result of hashing the input."]
     pub fn finish(mut self) -> [u8; 32] {
+        // SAFETY: The private context is initialized by its matching constructor;
+        // native finalization writes the full digest for this algorithm.
         unsafe {
             let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
             ffi::SHA512_256_Final(hash.as_mut_ptr().cast(), &mut self.0);
@@ -398,6 +449,43 @@ mod test {
     use hex;
 
     use super::*;
+
+    #[test]
+    fn wide_hash_contexts_have_initialized_block_storage() {
+        let sha384 = Sha384::new();
+        let sha512 = Sha512::new();
+        let sha512_256 = Sha512_256::new();
+        assert_eq!(sha384.0.p, [0; 128]);
+        assert_eq!(sha512.0.p, [0; 128]);
+        assert_eq!(sha512_256.0.p, [0; 128]);
+    }
+
+    #[test]
+    fn wide_hash_clones_are_independent_at_block_boundaries() {
+        macro_rules! check {
+            ($hasher:ty, $one_shot:ident) => {{
+                for len in [0, 1, 127, 128, 129, 255, 256] {
+                    let prefix = vec![42; len];
+                    let mut original = <$hasher>::new();
+                    original.update(&prefix);
+                    let mut clone = original.clone();
+                    clone.update(b"second");
+                    original.update(b"first");
+                    assert_eq!(
+                        clone.finish(),
+                        $one_shot(&[prefix.as_slice(), b"second"].concat())
+                    );
+                    assert_eq!(
+                        original.finish(),
+                        $one_shot(&[prefix.as_slice(), b"first"].concat())
+                    );
+                }
+            }};
+        }
+        check!(Sha384, sha384);
+        check!(Sha512, sha512);
+        check!(Sha512_256, sha512_256);
+    }
 
     #[test]
     fn standalone_1() {
