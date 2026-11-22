@@ -270,7 +270,7 @@ fn test_sign_retry_complete_ok() {
 #[cfg(feature = "rpk")]
 #[test]
 fn raw_public_key_uses_credential_specific_method() {
-    use crate::ssl::{CertificateType, SslCredential};
+    use crate::ssl::{CertificateType, SslAlert, SslCredential, SslVerifyError, SslVerifyMode};
     let invoked = Arc::new(AtomicBool::new(false));
     let called = invoked.clone();
     let key = PKey::private_key_from_pem(KEY).unwrap();
@@ -302,6 +302,15 @@ fn raw_public_key_uses_credential_specific_method() {
         .ctx()
         .set_verify_algorithm_prefs(&[SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256])
         .unwrap();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            if ssl.peer_pubkey().is_some_and(|peer| peer.public_eq(&key)) {
+                Ok(())
+            } else {
+                Err(SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))
+            }
+        });
     client.connect();
     assert!(invoked.load(Ordering::SeqCst));
 }
