@@ -263,24 +263,21 @@ impl Cipher {
         Cipher(ptr)
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_ptr(&self) -> *const ffi::EVP_CIPHER {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_ptr(self) -> *const ffi::EVP_CIPHER {
         self.0
     }
 
     /// Returns the length of keys used with this cipher.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn key_len(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn key_len(self) -> usize {
         unsafe { EVP_CIPHER_key_length(self.0) as usize }
     }
 
     /// Returns the length of the IV used with this cipher, or `None` if the
     /// cipher does not use an IV.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn iv_len(&self) -> Option<usize> {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn iv_len(self) -> Option<usize> {
         unsafe {
             let len = EVP_CIPHER_iv_length(self.0) as usize;
             if len == 0 {
@@ -296,9 +293,8 @@ impl Cipher {
     /// # Note
     ///
     /// Stream ciphers such as RC4 have a block size of 1.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn block_size(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn block_size(self) -> usize {
         unsafe { EVP_CIPHER_block_size(self.0) as usize }
     }
 

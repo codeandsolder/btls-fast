@@ -165,10 +165,9 @@ impl EcGroupRef {
 
     /// Returns the degree of the curve.
     #[corresponds(EC_GROUP_get_degree)]
-    #[allow(clippy::unnecessary_cast)]
     #[must_use]
     pub fn degree(&self) -> u32 {
-        unsafe { ffi::EC_GROUP_get_degree(self.as_ptr()) as u32 }
+        unsafe { ffi::EC_GROUP_get_degree(self.as_ptr()) }
     }
 
     /// Returns the number of bits in the group order.

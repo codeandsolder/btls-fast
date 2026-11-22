@@ -310,7 +310,7 @@ impl ExtendedKeyUsage {
     pub fn build(&self) -> Result<X509Extension, ErrorStack> {
         let mut stack = Stack::new()?;
         for item in &self.items {
-            stack.push(Asn1Object::from_str(item)?)?;
+            stack.push(item.parse::<Asn1Object>()?)?;
         }
         unsafe {
             X509Extension::new_internal(Nid::EXT_KEY_USAGE, self.critical, stack.as_ptr().cast())
@@ -513,7 +513,7 @@ impl SubjectAlternativeName {
                 RustGeneralName::Ip(s) => {
                     GeneralName::new_ip(s.parse().map_err(|_| ErrorStack::get())?)?
                 }
-                RustGeneralName::Rid(s) => GeneralName::new_rid(Asn1Object::from_str(s)?)?,
+                RustGeneralName::Rid(s) => GeneralName::new_rid(s.parse::<Asn1Object>()?)?,
             };
             stack.push(gn)?;
         }

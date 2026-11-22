@@ -23,7 +23,6 @@ pub struct KeyIvPair {
 ///
 /// New applications should not use this and instead use
 /// `pbkdf2_hmac` or another more modern key derivation algorithm.
-#[allow(clippy::useless_conversion)]
 pub fn bytes_to_key(
     cipher: Cipher,
     digest: MessageDigest,

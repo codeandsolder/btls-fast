@@ -293,10 +293,9 @@ impl Error {
     /// Returns the line in the source file which encountered the error.
     ///
     /// 0 if unknown
-    #[allow(clippy::unnecessary_cast)]
     #[must_use]
     pub fn line(&self) -> u32 {
-        self.line as u32
+        self.line
     }
 
     /// Returns additional data describing the error.

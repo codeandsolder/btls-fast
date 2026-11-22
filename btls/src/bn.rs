@@ -138,7 +138,10 @@ impl BigNumRef {
 
     /// Divides `self` by a `u32`, returning the remainder.
     #[corresponds(BN_div_word)]
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "The input conversion is an identity on 32-bit targets; the output conversion is an identity on 64-bit targets. Both preserve the fixed-width Rust API across BN_ULONG widths."
+    )]
     pub fn div_word(&mut self, w: u32) -> Result<u64, ErrorStack> {
         unsafe {
             let r = ffi::BN_div_word(self.as_ptr(), w.into());
@@ -152,7 +155,10 @@ impl BigNumRef {
 
     /// Returns the result of `self` modulo `w`.
     #[corresponds(BN_mod_word)]
-    #[allow(clippy::useless_conversion)]
+    #[expect(
+        clippy::useless_conversion,
+        reason = "The input conversion is an identity on 32-bit targets; the output conversion is an identity on 64-bit targets. Both preserve the fixed-width Rust API across BN_ULONG widths."
+    )]
     pub fn mod_word(&self, w: u32) -> Result<u64, ErrorStack> {
         unsafe {
             let r = ffi::BN_mod_word(self.as_ptr(), w.into());
@@ -181,35 +187,31 @@ impl BigNumRef {
     ///
     /// When setting a bit outside of `self`, it is expanded.
     #[corresponds(BN_set_bit)]
-    #[allow(clippy::useless_conversion)]
     pub fn set_bit(&mut self, n: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::BN_set_bit(self.as_ptr(), n.into())) }
+        unsafe { cvt(ffi::BN_set_bit(self.as_ptr(), n)) }
     }
 
     /// Clears bit `n`, setting it to 0. Equivalent to `self &= ~(1 << n)`.
     ///
     /// When clearing a bit outside of `self`, an error is returned.
     #[corresponds(BN_clear_bit)]
-    #[allow(clippy::useless_conversion)]
     pub fn clear_bit(&mut self, n: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::BN_clear_bit(self.as_ptr(), n.into())) }
+        unsafe { cvt(ffi::BN_clear_bit(self.as_ptr(), n)) }
     }
 
     /// Returns `true` if the `n`th bit of `self` is set to 1, `false` otherwise.
     #[corresponds(BN_is_bit_set)]
-    #[allow(clippy::useless_conversion)]
     #[must_use]
     pub fn is_bit_set(&self, n: i32) -> bool {
-        unsafe { ffi::BN_is_bit_set(self.as_ptr(), n.into()) == 1 }
+        unsafe { ffi::BN_is_bit_set(self.as_ptr(), n) == 1 }
     }
 
     /// Truncates `self` to the lowest `n` bits.
     ///
     /// An error occurs if `self` is already shorter than `n` bits.
     #[corresponds(BN_mask_bits)]
-    #[allow(clippy::useless_conversion)]
     pub fn mask_bits(&mut self, n: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::BN_mask_bits(self.as_ptr(), n.into())) }
+        unsafe { cvt(ffi::BN_mask_bits(self.as_ptr(), n)) }
     }
 
     /// Places `a << 1` in `self`.  Equivalent to `self * 2`.
@@ -242,16 +244,14 @@ impl BigNumRef {
 
     /// Places `a << n` in `self`.  Equivalent to `a * 2 ^ n`.
     #[corresponds(BN_lshift)]
-    #[allow(clippy::useless_conversion)]
     pub fn lshift(&mut self, a: &BigNumRef, n: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::BN_lshift(self.as_ptr(), a.as_ptr(), n.into())) }
+        unsafe { cvt(ffi::BN_lshift(self.as_ptr(), a.as_ptr(), n)) }
     }
 
     /// Places `a >> n` in `self`. Equivalent to `a / 2 ^ n`.
     #[corresponds(BN_rshift)]
-    #[allow(clippy::useless_conversion)]
     pub fn rshift(&mut self, a: &BigNumRef, n: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::BN_rshift(self.as_ptr(), a.as_ptr(), n.into())) }
+        unsafe { cvt(ffi::BN_rshift(self.as_ptr(), a.as_ptr(), n)) }
     }
 
     /// Creates a new BigNum with the same value.
@@ -342,26 +342,17 @@ impl BigNumRef {
     ///
     /// [`constants`]: index.html#constants
     #[corresponds(BN_rand)]
-    #[allow(clippy::useless_conversion)]
     pub fn rand(&mut self, bits: i32, msb: MsbOption, odd: bool) -> Result<(), ErrorStack> {
-        unsafe {
-            cvt(ffi::BN_rand(
-                self.as_ptr(),
-                bits.into(),
-                msb.0,
-                c_int::from(odd),
-            ))
-        }
+        unsafe { cvt(ffi::BN_rand(self.as_ptr(), bits, msb.0, c_int::from(odd))) }
     }
 
     /// The cryptographically weak counterpart to `rand`.  Not suitable for key generation.
     #[corresponds(BN_pseudo_rand)]
-    #[allow(clippy::useless_conversion)]
     pub fn pseudo_rand(&mut self, bits: i32, msb: MsbOption, odd: bool) -> Result<(), ErrorStack> {
         unsafe {
             cvt(ffi::BN_pseudo_rand(
                 self.as_ptr(),
-                bits.into(),
+                bits,
                 msb.0,
                 c_int::from(odd),
             ))
@@ -679,12 +670,11 @@ impl BigNumRef {
     ///
     /// Returns `true` if `self` is prime with an error probability of less than `0.25 ^ checks`.
     #[corresponds(BN_is_prime_ex)]
-    #[allow(clippy::useless_conversion)]
     pub fn is_prime(&self, checks: i32, ctx: &mut BigNumContextRef) -> Result<bool, ErrorStack> {
         unsafe {
             cvt_n(ffi::BN_is_prime_ex(
                 self.as_ptr(),
-                checks.into(),
+                checks,
                 ctx.as_ptr(),
                 ptr::null_mut(),
             ))
@@ -702,7 +692,6 @@ impl BigNumRef {
     ///
     /// Returns `true` if `self` is prime with an error probability of less than `0.25 ^ checks`.
     #[corresponds(BN_is_prime_fasttest_ex)]
-    #[allow(clippy::useless_conversion)]
     pub fn is_prime_fasttest(
         &self,
         checks: i32,
@@ -712,7 +701,7 @@ impl BigNumRef {
         unsafe {
             cvt_n(ffi::BN_is_prime_fasttest_ex(
                 self.as_ptr(),
-                checks.into(),
+                checks,
                 ctx.as_ptr(),
                 c_int::from(do_trial_division),
                 ptr::null_mut(),

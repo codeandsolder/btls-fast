@@ -92,7 +92,6 @@ impl Drop for Signer<'_> {
     }
 }
 
-#[allow(clippy::len_without_is_empty)]
 impl<'a> Signer<'a> {
     /// Creates a new `Signer`.
     ///
@@ -223,11 +222,7 @@ impl<'a> Signer<'a> {
     /// The actual signature may be shorter than this value. Check the return value of
     /// `sign` to get the exact length.
     #[corresponds(EVP_DigestSignFinal)]
-    pub fn len(&self) -> Result<usize, ErrorStack> {
-        self.len_intern()
-    }
-
-    fn len_intern(&self) -> Result<usize, ErrorStack> {
+    pub fn signature_capacity(&self) -> Result<usize, ErrorStack> {
         unsafe {
             let mut len = 0;
             cvt(ffi::EVP_DigestSign(
@@ -243,7 +238,7 @@ impl<'a> Signer<'a> {
 
     /// Writes the signature into the provided buffer, returning the number of bytes written.
     ///
-    /// This method will fail if the buffer is not large enough for the signature. Use the `len`
+    /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
     #[corresponds(EVP_DigestSignFinal)]
     pub fn sign(&self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
@@ -260,9 +255,9 @@ impl<'a> Signer<'a> {
 
     /// Returns the signature.
     ///
-    /// This is a simple convenience wrapper over `len` and `sign`.
+    /// This is a simple convenience wrapper over `signature_capacity` and `sign`.
     pub fn sign_to_vec(&self) -> Result<Vec<u8>, ErrorStack> {
-        let mut buf = vec![0; self.len()?];
+        let mut buf = vec![0; self.signature_capacity()?];
         let len = self.sign(&mut buf)?;
         // The advertised length is not always equal to the real length for things like DSA
         buf.truncate(len);
@@ -274,7 +269,7 @@ impl<'a> Signer<'a> {
     ///
     /// For PureEdDSA (Ed25519 and Ed448 keys) this is the only way to sign data.
     ///
-    /// This method will fail if the buffer is not large enough for the signature. Use the `len`
+    /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
     #[corresponds(EVP_DigestSign)]
     pub fn sign_oneshot(
@@ -297,9 +292,9 @@ impl<'a> Signer<'a> {
 
     /// Returns the signature.
     ///
-    /// This is a simple convenience wrapper over `len` and `sign_oneshot`.
+    /// This is a simple convenience wrapper over `signature_capacity` and `sign_oneshot`.
     pub fn sign_oneshot_to_vec(&mut self, data_buf: &[u8]) -> Result<Vec<u8>, ErrorStack> {
-        let mut sig_buf = vec![0; self.len()?];
+        let mut sig_buf = vec![0; self.signature_capacity()?];
         let len = self.sign_oneshot(&mut sig_buf, data_buf)?;
         // The advertised length is not always equal to the real length for things like DSA
         sig_buf.truncate(len);

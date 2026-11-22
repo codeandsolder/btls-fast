@@ -76,23 +76,20 @@ impl MessageDigest {
         unsafe { MessageDigest(ffi::EVP_sha512_256()) }
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_ptr(&self) -> *const ffi::EVP_MD {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_ptr(self) -> *const ffi::EVP_MD {
         self.0
     }
 
     /// The size of the digest in bytes.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn size(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn size(self) -> usize {
         unsafe { ffi::EVP_MD_size(self.0) }
     }
 
     /// The name of the digest.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn type_(&self) -> Nid {
+    #[must_use = "The returned identifier is the result of this query."]
+    pub fn type_(self) -> Nid {
         Nid::from_raw(unsafe { ffi::EVP_MD_type(self.0) })
     }
 }

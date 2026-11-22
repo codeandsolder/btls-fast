@@ -62,7 +62,7 @@ use openssl_macros::corresponds;
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io::prelude::*;
@@ -353,9 +353,8 @@ impl SslMethod {
     }
 
     /// Returns a pointer to the underlying OpenSSL value.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_ptr(&self) -> *const ffi::SSL_METHOD {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_ptr(self) -> *const ffi::SSL_METHOD {
         self.ptr
     }
 
@@ -471,9 +470,8 @@ impl SslFiletype {
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -493,9 +491,8 @@ impl StatusType {
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -515,9 +512,8 @@ impl NameType {
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -2220,9 +2216,8 @@ impl SslContextBuilder {
     ///
     /// A value of 0 means that the cache size is unbounded.
     #[corresponds(SSL_CTX_sess_set_cache_size)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_session_cache_size(&mut self, size: u32) -> u64 {
-        unsafe { ffi::SSL_CTX_sess_set_cache_size(self.as_ptr(), size.into()).into() }
+    pub fn set_session_cache_size(&mut self, size: c_ulong) -> c_ulong {
+        unsafe { ffi::SSL_CTX_sess_set_cache_size(self.as_ptr(), size) }
     }
 
     /// Sets the context's supported signature algorithms.
@@ -2732,10 +2727,9 @@ impl SslContextRef {
     ///
     /// A value of 0 means that the cache size is unbounded.
     #[corresponds(SSL_CTX_sess_get_cache_size)]
-    #[allow(clippy::useless_conversion)]
-    #[must_use]
-    pub fn session_cache_size(&self) -> u64 {
-        unsafe { ffi::SSL_CTX_sess_get_cache_size(self.as_ptr()).into() }
+    #[must_use = "The configured cache capacity is the result of this query."]
+    pub fn session_cache_size(&self) -> c_ulong {
+        unsafe { ffi::SSL_CTX_sess_get_cache_size(self.as_ptr()) }
     }
 
     /// Returns the verify mode that was set on this context from [`SslContextBuilder::set_verify`].
@@ -2994,15 +2988,14 @@ impl SslCipherRef {
 
     /// Returns the number of bits used for the cipher.
     #[corresponds(SSL_CIPHER_get_bits)]
-    #[allow(clippy::useless_conversion)]
     #[must_use]
     pub fn bits(&self) -> CipherBits {
         unsafe {
             let mut algo_bits = 0;
             let secret_bits = ffi::SSL_CIPHER_get_bits(self.as_ptr(), &mut algo_bits);
             CipherBits {
-                secret: secret_bits.into(),
-                algorithm: algo_bits.into(),
+                secret: secret_bits,
+                algorithm: algo_bits,
             }
         }
     }
@@ -3132,7 +3125,6 @@ impl SslSessionRef {
 
     /// Returns the time at which the session was established, in seconds since the Unix epoch.
     #[corresponds(SSL_SESSION_get_time)]
-    #[allow(clippy::useless_conversion)]
     #[must_use]
     pub fn time(&self) -> u64 {
         unsafe { ffi::SSL_SESSION_get_time(self.as_ptr()) }
@@ -3142,7 +3134,6 @@ impl SslSessionRef {
     ///
     /// A session older than this time should not be used for session resumption.
     #[corresponds(SSL_SESSION_get_timeout)]
-    #[allow(clippy::useless_conversion)]
     #[must_use]
     pub fn timeout(&self) -> u32 {
         unsafe { ffi::SSL_SESSION_get_timeout(self.as_ptr()) }
@@ -5677,8 +5668,7 @@ pub trait CertificateCompressor: Send + Sync + 'static {
     const CAN_DECOMPRESS: bool;
 
     /// Perform compression of `input` buffer and write compressed data to `output`.
-    #[allow(unused_variables)]
-    fn compress<W>(&self, input: &[u8], output: &mut W) -> io::Result<()>
+    fn compress<W>(&self, _input: &[u8], _output: &mut W) -> io::Result<()>
     where
         W: Write,
     {
@@ -5686,8 +5676,7 @@ pub trait CertificateCompressor: Send + Sync + 'static {
     }
 
     /// Perform decompression of `input` buffer and write compressed data to `output`.
-    #[allow(unused_variables)]
-    fn decompress<W>(&self, input: &[u8], output: &mut W) -> io::Result<()>
+    fn decompress<W>(&self, _input: &[u8], _output: &mut W) -> io::Result<()>
     where
         W: Write,
     {

@@ -57,17 +57,15 @@ impl Nid {
     }
 
     /// Return the integer representation of a `Nid`.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 
     /// Returns the `Nid`s of the digest and public key algorithms associated with a signature ID.
     #[corresponds(OBJ_find_sigid_algs)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn signature_algorithms(&self) -> Option<SignatureAlgorithms> {
+    #[must_use = "The returned algorithm identifiers describe the signature."]
+    pub fn signature_algorithms(self) -> Option<SignatureAlgorithms> {
         unsafe {
             let mut digest = 0;
             let mut pkey = 0;
@@ -84,8 +82,7 @@ impl Nid {
 
     /// Return the string representation of a `Nid` (long)
     #[corresponds(OBJ_nid2ln)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    pub fn long_name(&self) -> Result<&'static str, ErrorStack> {
+    pub fn long_name(self) -> Result<&'static str, ErrorStack> {
         unsafe {
             let nameptr = cvt_p(ffi::OBJ_nid2ln(self.0).cast_mut())?;
             CStr::from_ptr(nameptr)
@@ -96,8 +93,7 @@ impl Nid {
 
     /// Return the string representation of a `Nid` (short)
     #[corresponds(OBJ_nid2sn)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    pub fn short_name(&self) -> Result<&'static str, ErrorStack> {
+    pub fn short_name(self) -> Result<&'static str, ErrorStack> {
         unsafe {
             let nameptr = cvt_p(ffi::OBJ_nid2sn(self.0).cast_mut())?;
             CStr::from_ptr(nameptr)

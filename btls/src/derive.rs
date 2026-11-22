@@ -23,7 +23,6 @@ impl Drop for Deriver<'_> {
     }
 }
 
-#[allow(clippy::len_without_is_empty)]
 impl<'a> Deriver<'a> {
     /// Creates a new `Deriver` using the provided private key.
     #[corresponds(EVP_PKEY_derive_init)]
@@ -51,7 +50,7 @@ impl<'a> Deriver<'a> {
     ///
     /// It can be used to size the buffer passed to [`Deriver::derive`].
     #[corresponds(EVP_PKEY_derive)]
-    pub fn len(&mut self) -> Result<usize, ErrorStack> {
+    pub fn secret_len(&mut self) -> Result<usize, ErrorStack> {
         unsafe {
             let mut len = 0;
             cvt(ffi::EVP_PKEY_derive(self.0, ptr::null_mut(), &mut len)).map(|_| len)
@@ -69,12 +68,12 @@ impl<'a> Deriver<'a> {
 
     /// A convenience function which derives a shared secret and returns it in a new buffer.
     ///
-    /// This simply wraps [`Deriver::len`] and [`Deriver::derive`].
+    /// This simply wraps [`Deriver::secret_len`] and [`Deriver::derive`].
     ///
-    /// [`Deriver::len`]: #method.len
+    /// [`Deriver::secret_len`]: #method.secret_len
     /// [`Deriver::derive`]: #method.derive
     pub fn derive_to_vec(&mut self) -> Result<Vec<u8>, ErrorStack> {
-        let len = self.len()?;
+        let len = self.secret_len()?;
         let mut buf = vec![0; len];
         let len = self.derive(&mut buf)?;
         buf.truncate(len);

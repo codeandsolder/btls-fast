@@ -26,9 +26,8 @@ impl<T, U> Index<T, U> {
         Index(idx, PhantomData)
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 }

@@ -377,9 +377,8 @@ impl X509Builder {
     /// Note that the version is zero-indexed; that is, a certificate corresponding to version 3 of
     /// the X.509 standard should pass `2` to this method.
     #[corresponds(X509_set_version)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_version(&mut self, version: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::X509_set_version(self.0.as_ptr(), version.into())) }
+    pub fn set_version(&mut self, version: libc::c_long) -> Result<(), ErrorStack> {
+        unsafe { cvt(ffi::X509_set_version(self.0.as_ptr(), version)) }
     }
 
     /// Sets the serial number of the certificate.
@@ -818,8 +817,7 @@ impl X509 {
                 if r.is_null() {
                     let err = ffi::ERR_peek_last_error();
 
-                    #[allow(clippy::useless_conversion)]
-                    if ffi::ERR_GET_LIB(err) == ffi::ERR_LIB_PEM.0.try_into().unwrap()
+                    if u32::try_from(ffi::ERR_GET_LIB(err)).ok() == Some(ffi::ERR_LIB_PEM.0)
                         && ffi::ERR_GET_REASON(err) == ffi::PEM_R_NO_START_LINE
                     {
                         ErrorStack::clear();
@@ -1302,9 +1300,8 @@ impl X509ReqBuilder {
 
     /// Set the numerical value of the version field.
     #[corresponds(X509_REQ_set_version)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_version(&mut self, version: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::X509_REQ_set_version(self.0.as_ptr(), version.into())) }
+    pub fn set_version(&mut self, version: libc::c_long) -> Result<(), ErrorStack> {
+        unsafe { cvt(ffi::X509_REQ_set_version(self.0.as_ptr(), version)) }
     }
 
     /// Set the issuer name.
@@ -1525,9 +1522,8 @@ impl X509VerifyError {
     }
 
     /// Return the integer representation of an [`X509VerifyError`].
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 
@@ -1535,9 +1531,8 @@ impl X509VerifyError {
     ///
     /// Returns empty string if the message was not UTF-8.
     #[corresponds(X509_verify_cert_error_string)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn error_string(&self) -> &'static str {
+    #[must_use = "The returned description is needed to report verification failure."]
+    pub fn error_string(self) -> &'static str {
         ffi::init();
 
         unsafe {

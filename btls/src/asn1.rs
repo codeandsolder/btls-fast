@@ -26,7 +26,7 @@
 //! ```
 use crate::ffi;
 use foreign_types::{ForeignType, ForeignTypeRef};
-use libc::{c_int, c_long, time_t};
+use libc::{c_int, c_long};
 use std::cmp::Ordering;
 use std::ffi::CString;
 use std::fmt;
@@ -327,39 +327,38 @@ impl Asn1Time {
         }
     }
 
-    #[corresponds(X509_gmtime_adj)]
-    fn from_period(period: c_long) -> Result<Asn1Time, ErrorStack> {
+    /// Creates a new time on the specified interval in days from now.
+    pub fn days_from_now(days: u32) -> Result<Self, ErrorStack> {
+        let days = c_int::try_from(days).map_err(ErrorStack::internal_error)?;
         ffi::init();
-
+        // SAFETY: A null output requests an allocated ASN1_TIME, and a null
+        // base time selects the current clock. The day offset fits C int.
         unsafe {
-            let handle = cvt_p(ffi::X509_gmtime_adj(ptr::null_mut(), period))?;
-            Ok(Asn1Time::from_ptr(handle))
+            let handle = cvt_p(ffi::X509_time_adj_ex(
+                ptr::null_mut(),
+                days,
+                0,
+                ptr::null_mut(),
+            ))?;
+            Ok(Self::from_ptr(handle))
         }
     }
 
-    /// Creates a new time on specified interval in days from now
-    pub fn days_from_now(days: u32) -> Result<Asn1Time, ErrorStack> {
-        // the type varies between platforms, so both into() and try_into() trigger Clippy lints
-        Self::from_period((days * 60 * 60 * 24) as _)
-    }
-
-    /// Creates a new time from the specified `time_t` value
-    #[corresponds(ASN1_TIME_set)]
-    pub fn from_unix(time: time_t) -> Result<Asn1Time, ErrorStack> {
+    /// Creates a new time from seconds since the Unix epoch.
+    #[corresponds(ASN1_TIME_set_posix)]
+    pub fn from_unix(time: i64) -> Result<Self, ErrorStack> {
         ffi::init();
-
+        // SAFETY: The POSIX API takes a fixed-width timestamp and allocates
+        // the ASN1_TIME when the output argument is null.
         unsafe {
-            // for higher musl version, need to convert i32 to i64
-            // https://github.com/rust-lang/libc/issues/1848
-            #[allow(clippy::useless_conversion)]
-            let handle = cvt_p(ffi::ASN1_TIME_set(ptr::null_mut(), time.into()))?;
-            Ok(Asn1Time::from_ptr(handle))
+            let handle = cvt_p(ffi::ASN1_TIME_set_posix(ptr::null_mut(), time))?;
+            Ok(Self::from_ptr(handle))
         }
     }
 
     /// Creates a new time corresponding to the specified X509 time string.
     ///
-    /// Behaves like [`Asn1Time::from_str`] except it additionally converts
+    /// Behaves like parsing with [`str::FromStr`] except it additionally converts
     /// GeneralizedTime to UTCTime if it is in the range where UTCTime is used.
     /// See RFC 5280, section 4.1.2.5.
     #[corresponds(ASN1_TIME_set_string_X509)]
@@ -370,13 +369,6 @@ impl Asn1Time {
             cvt(ffi::ASN1_TIME_set_string_X509(time.as_ptr(), s.as_ptr()))?;
         }
         Ok(time)
-    }
-
-    /// Creates a new time corresponding to the specified ASN1 time string.
-    #[corresponds(ASN1_TIME_set_string)]
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Result<Asn1Time, ErrorStack> {
-        s.parse()
     }
 }
 
@@ -608,14 +600,6 @@ impl PartialEq<Asn1IntegerRef> for Asn1Integer {
 }
 
 impl Asn1IntegerRef {
-    #[allow(clippy::unnecessary_cast)]
-    #[allow(missing_docs)]
-    #[deprecated(since = "0.10.6", note = "use to_bn instead")]
-    #[must_use]
-    pub fn get(&self) -> i64 {
-        unsafe { ffi::ASN1_INTEGER_get(self.as_ptr()) as i64 }
-    }
-
     /// Converts the integer to a `BigNum`.
     #[corresponds(ASN1_INTEGER_to_BN)]
     pub fn to_bn(&self) -> Result<BigNum, ErrorStack> {
@@ -715,15 +699,6 @@ impl Stackable for Asn1Object {
     type StackType = ffi::stack_st_ASN1_OBJECT;
 }
 
-impl Asn1Object {
-    /// Constructs an ASN.1 Object Identifier from a string representation of the OID.
-    #[corresponds(OBJ_txt2obj)]
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(txt: &str) -> Result<Asn1Object, ErrorStack> {
-        txt.parse()
-    }
-}
-
 impl str::FromStr for Asn1Object {
     type Err = ErrorStack;
 
@@ -796,7 +771,7 @@ mod tests {
 
     #[test]
     fn time_from_str() {
-        Asn1Time::from_str("99991231235959Z").unwrap();
+        "99991231235959Z".parse::<Asn1Time>().unwrap();
 
         let time: Asn1GeneralizedTime = "20250101120000Z".parse().unwrap();
         let display = time.to_string();
@@ -825,6 +800,26 @@ mod tests {
     }
 
     #[test]
+    fn large_day_offset_does_not_wrap_seconds() -> Result<(), ErrorStack> {
+        let now = Asn1Time::days_from_now(0)?;
+        let future = Asn1Time::days_from_now(50_000)?;
+        let diff = now.diff(&future)?;
+        // Both timestamps come from the current clock, so crossing a second
+        // boundary can change only the sub-day part.
+        assert!((49_999..=50_000).contains(&diff.days));
+        assert!(Asn1Time::days_from_now(u32::MAX).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn fixed_width_timestamp_supports_dates_after_2038() -> Result<(), ErrorStack> {
+        let actual = Asn1Time::from_unix(2_147_483_648)?;
+        let expected = "20380119031408Z".parse::<Asn1Time>()?;
+        assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
     fn time_from_unix() {
         let t = Asn1Time::from_unix(0).unwrap();
         assert_eq!("Jan  1 00:00:00 1970 GMT", t.to_string());
@@ -832,8 +827,8 @@ mod tests {
 
     #[test]
     fn time_eq() {
-        let a = Asn1Time::from_str("99991231235959Z").unwrap();
-        let b = Asn1Time::from_str("99991231235959Z").unwrap();
+        let a = "99991231235959Z".parse::<Asn1Time>().unwrap();
+        let b = "99991231235959Z".parse::<Asn1Time>().unwrap();
         let c = "99991231235958Z".parse::<Asn1Time>().unwrap();
         let a_ref = a.as_ref();
         let b_ref = b.as_ref();
@@ -850,9 +845,9 @@ mod tests {
 
     #[test]
     fn time_ord() {
-        let a = Asn1Time::from_str("99991231235959Z").unwrap();
+        let a = "99991231235959Z".parse::<Asn1Time>().unwrap();
         let b = <Asn1Time as str::FromStr>::from_str("99991231235959Z").unwrap();
-        let c = Asn1Time::from_str("99991231235958Z").unwrap();
+        let c = "99991231235958Z".parse::<Asn1Time>().unwrap();
         let a_ref = a.as_ref();
         let b_ref = b.as_ref();
         let c_ref = c.as_ref();
@@ -879,13 +874,14 @@ mod tests {
 
     #[test]
     fn object_from_str() {
-        let object = Asn1Object::from_str("2.16.840.1.101.3.4.2.1").unwrap();
+        let object = "2.16.840.1.101.3.4.2.1".parse::<Asn1Object>().unwrap();
         assert_eq!(object.nid(), Nid::SHA256);
     }
 
     #[test]
     fn object_from_str_with_invalid_input() {
-        Asn1Object::from_str("NOT AN OID")
+        "NOT AN OID"
+            .parse::<Asn1Object>()
             .map(|object| object.to_string())
             .expect_err("parsing invalid OID should fail");
     }

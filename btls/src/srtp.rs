@@ -58,9 +58,8 @@ impl SrtpProfileId {
     }
 
     /// Returns the integer representation of `SrtpProfileId`.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_ulong {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_ulong {
         self.0
     }
 }

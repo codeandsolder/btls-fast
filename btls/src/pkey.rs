@@ -96,33 +96,43 @@ impl Id {
     }
 
     /// Returns the integer representation of the `Id`.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 }
 
 /// A trait indicating that a key has parameters.
-#[allow(clippy::missing_safety_doc)]
+///
+/// # Safety
+/// The marker must only be used for keys whose native EVP_PKEY contains the algorithm parameters required by parameter operations.
 pub unsafe trait HasParams {}
 
+// SAFETY: Params is constructed only by native parameter constructors.
 unsafe impl HasParams for Params {}
 
+// SAFETY: A public key carries its algorithm parameters.
 unsafe impl<T> HasParams for T where T: HasPublic {}
 
 /// A trait indicating that a key has public components.
-#[allow(clippy::missing_safety_doc)]
+///
+/// # Safety
+/// The marker must only be used for keys containing all public components needed by native public-key operations.
 pub unsafe trait HasPublic {}
 
+// SAFETY: Public marks keys constructed or decoded with public components.
 unsafe impl HasPublic for Public {}
 
+// SAFETY: HasPrivate requires both private and public components.
 unsafe impl<T> HasPublic for T where T: HasPrivate {}
 
 /// A trait indicating that a key has private components.
-#[allow(clippy::missing_safety_doc)]
+///
+/// # Safety
+/// The marker must only be used for keys containing a valid private component and the corresponding public components.
 pub unsafe trait HasPrivate {}
 
+// SAFETY: Private marks keys constructed or decoded with private components.
 unsafe impl HasPrivate for Private {}
 
 generic_foreign_type_and_impl_send_sync! {

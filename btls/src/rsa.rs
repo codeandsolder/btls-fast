@@ -74,9 +74,8 @@ impl Padding {
     }
 
     /// Returns the integer representation of `Padding`.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -276,10 +275,9 @@ where
 
     /// Validates RSA parameters for correctness
     #[corresponds(RSA_check_key)]
-    #[allow(clippy::unnecessary_cast)]
     pub fn check_key(&self) -> Result<bool, ErrorStack> {
         unsafe {
-            let result = ffi::RSA_check_key(self.as_ptr()) as i32;
+            let result = ffi::RSA_check_key(self.as_ptr());
             if result == -1 {
                 Err(ErrorStack::get())
             } else {
@@ -327,10 +325,9 @@ where
 
     /// Returns the size of the modulus in bytes.
     #[corresponds(RSA_size)]
-    #[allow(clippy::unnecessary_cast)]
     #[must_use]
     pub fn size(&self) -> u32 {
-        unsafe { ffi::RSA_size(self.as_ptr()) as u32 }
+        unsafe { ffi::RSA_size(self.as_ptr()) }
     }
 
     /// Decrypts data using the public key, returning the number of decrypted bytes.

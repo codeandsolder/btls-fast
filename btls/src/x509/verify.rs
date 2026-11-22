@@ -1,6 +1,6 @@
 use crate::ffi;
 use foreign_types::{ForeignType, ForeignTypeRef};
-use libc::{c_int, c_uint, c_ulong, time_t};
+use libc::{c_int, c_uint, c_ulong};
 use openssl_macros::corresponds;
 use std::net::IpAddr;
 
@@ -172,13 +172,12 @@ impl X509VerifyParamRef {
         }
     }
 
-    /// Set the verification time, where time is of type time_t, traditionaly defined as seconds since the epoch
+    /// Set the verification time in seconds since the Unix epoch.
     #[corresponds(X509_VERIFY_PARAM_set_time_posix)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_time(&mut self, time: time_t) {
-        // libc and the C headers can disagree on time_t width on 32-bit musl.
-        // The POSIX entry point takes a fixed-width timestamp on every target.
-        unsafe { ffi::X509_VERIFY_PARAM_set_time_posix(self.as_ptr(), i64::from(time)) }
+    pub fn set_time(&mut self, time: i64) {
+        // SAFETY: The parameter object is live and uniquely borrowed; the
+        // POSIX API takes a fixed-width timestamp on every target.
+        unsafe { ffi::X509_VERIFY_PARAM_set_time_posix(self.as_ptr(), time) }
     }
 
     /// Set the verification depth

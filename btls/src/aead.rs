@@ -193,40 +193,35 @@ impl Algorithm {
 
     /// Returns the key length, in bytes, required by this algorithm.
     #[corresponds(EVP_AEAD_key_length)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn key_length(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn key_length(self) -> usize {
         unsafe { ffi::EVP_AEAD_key_length(self.0) }
     }
 
     /// Returns the maximum additional bytes produced when sealing.
     #[corresponds(EVP_AEAD_max_overhead)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn max_overhead(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn max_overhead(self) -> usize {
         unsafe { ffi::EVP_AEAD_max_overhead(self.0) }
     }
 
     /// Returns the maximum tag length for this algorithm.
     #[corresponds(EVP_AEAD_max_tag_len)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn max_tag_len(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn max_tag_len(self) -> usize {
         unsafe { ffi::EVP_AEAD_max_tag_len(self.0) }
     }
 
     /// Returns the nonce length, in bytes, required by this algorithm.
     #[corresponds(EVP_AEAD_nonce_length)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn nonce_len(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn nonce_len(self) -> usize {
         unsafe { ffi::EVP_AEAD_nonce_length(self.0) }
     }
 
     /// Returns the raw `EVP_AEAD` pointer.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub const fn as_ptr(&self) -> *const ffi::EVP_AEAD {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_ptr(self) -> *const ffi::EVP_AEAD {
         self.0
     }
 }
