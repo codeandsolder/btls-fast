@@ -4193,11 +4193,11 @@ impl SslRef {
     /// It is most commonly used in the Server Name Indication (SNI) callback.
     #[corresponds(SSL_set_SSL_CTX)]
     pub fn set_ssl_context(&mut self, ctx: &SslContextRef) -> Result<(), ErrorStack> {
-        assert_eq!(
-            self.ssl_context().has_x509_support(),
-            ctx.has_x509_support(),
-            "X.509 certificate support in old and new contexts doesn't match",
-        );
+        if self.ssl_context().has_x509_support() != ctx.has_x509_support() {
+            return Err(ErrorStack::internal_error_str(
+                "X.509 certificate support in old and new contexts doesn't match",
+            ));
+        }
 
         let changed = self.ssl_context().as_ptr() != ctx.as_ptr();
         unsafe { cvt_p(ffi::SSL_set_SSL_CTX(self.as_ptr(), ctx.as_ptr()))? };

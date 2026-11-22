@@ -163,6 +163,54 @@ mod tests {
     }
 
     #[test]
+    fn callback_indices_distinguish_roles_and_types() {
+        use crate::ssl::SslContext;
+        let registry = IndexRegistry::<SslContext, u8>::new();
+        assert!(registry.get::<u8>(1).is_none());
+        let first = registry
+            .register::<u8>(1, SslContext::new_ex_index)
+            .unwrap();
+        let second = registry
+            .register::<u8>(2, SslContext::new_ex_index)
+            .unwrap();
+        let different_type = registry
+            .register::<u16>(1, SslContext::new_ex_index)
+            .unwrap();
+        assert_ne!(first.as_raw(), second.as_raw());
+        assert_ne!(first.as_raw(), different_type.as_raw());
+        assert_eq!(registry.get::<u8>(1).unwrap().as_raw(), first.as_raw());
+        assert_eq!(
+            registry
+                .register::<u8>(1, SslContext::new_ex_index)
+                .unwrap()
+                .as_raw(),
+            first.as_raw()
+        );
+        assert!(registry.get::<u16>(2).is_none());
+    }
+
+    #[test]
+    fn failed_slot_allocation_is_retryable() {
+        use crate::ssl::SslContext;
+        static ATTEMPTS: AtomicUsize = AtomicUsize::new(0);
+        let slot = IndexSlot::<SslContext, u8>::new(|| {
+            if ATTEMPTS.fetch_add(1, Ordering::Relaxed) == 0 {
+                return Err(ErrorStack::internal_error_str(
+                    "simulated allocation failure",
+                ));
+            }
+            SslContext::new_ex_index()
+        });
+        assert!(slot.get().is_none());
+        assert!(slot.register().is_err());
+        assert!(slot.get().is_none());
+        let index = slot.register().unwrap().as_raw();
+        assert_eq!(slot.register().unwrap().as_raw(), index);
+        assert_eq!(slot.get().unwrap().as_raw(), index);
+        assert_eq!(ATTEMPTS.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
     fn failed_install_releases_box() {
         let drops = Arc::new(AtomicUsize::new(0));
         // SAFETY: no previous slot; the simulated setter fails without

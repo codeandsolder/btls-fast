@@ -884,7 +884,7 @@ where
 
     if !catch_native(|| {
         compressor
-            .decompress(input_slice, decompression_buffer.as_writer())
+            .decompress(input_slice, &mut decompression_buffer)
             .is_ok()
     })
     .unwrap_or(false)
@@ -926,42 +926,72 @@ impl std::io::Write for CryptoByteBuilder<'_> {
     }
 }
 
-struct CryptoBufferBuilder<'a> {
+// Own the native allocation until exactly its declared length has been
+// initialized. A write-only cursor avoids constructing an initialized slice
+// over CRYPTO_BUFFER_alloc's uninitialized memory.
+struct CryptoBufferBuilder {
     buffer: *mut ffi::CRYPTO_BUFFER,
-    cursor: std::io::Cursor<&'a mut [u8]>,
+    data: *mut u8,
+    capacity: usize,
+    written: usize,
 }
 
-impl<'a> CryptoBufferBuilder<'a> {
+impl CryptoBufferBuilder {
     fn with_capacity(capacity: usize) -> Result<Self, ErrorStack> {
-        let mut data: *mut u8 = ptr::null_mut();
+        if capacity > isize::MAX.unsigned_abs() {
+            return Err(ErrorStack::internal_error_str(
+                "certificate buffer too large",
+            ));
+        }
+        let mut data = ptr::null_mut();
+        // SAFETY: native allocation writes the data pointer and returns an owned buffer.
         let buffer = unsafe { crate::cvt_p(ffi::CRYPTO_BUFFER_alloc(&raw mut data, capacity))? };
-        Ok(CryptoBufferBuilder {
+        let owner = Self {
             buffer,
-            cursor: std::io::Cursor::new(unsafe { slice::from_raw_parts_mut(data, capacity) }),
-        })
-    }
-
-    fn as_writer(&mut self) -> &mut (impl std::io::Write + 'a) {
-        &mut self.cursor
+            data,
+            capacity,
+            written: 0,
+        };
+        if capacity != 0 && data.is_null() {
+            return Err(ErrorStack::internal_error_str(
+                "missing certificate buffer storage",
+            ));
+        }
+        Ok(owner)
     }
 
     fn build(mut self) -> Result<*mut ffi::CRYPTO_BUFFER, ErrorStack> {
-        let buffer_capacity = unsafe { ffi::CRYPTO_BUFFER_len(self.buffer) };
-        if self.cursor.position() != buffer_capacity as u64 {
-            // Make sure all bytes in buffer initialized as required by Boring SSL.
-            return Err(ErrorStack::internal_error_str("invalid len"));
+        if self.written != self.capacity {
+            return Err(ErrorStack::internal_error_str(
+                "incomplete certificate decompression",
+            ));
         }
-        // Drop is no-op if the buffer is null
         Ok(mem::replace(&mut self.buffer, ptr::null_mut()))
     }
 }
 
-impl Drop for CryptoBufferBuilder<'_> {
+impl std::io::Write for CryptoBufferBuilder {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let count = input.len().min(self.capacity - self.written);
+        if count != 0 {
+            // SAFETY: the owned native allocation is exclusively writable.
+            // The checked count stays inside it; the safe input cannot borrow it.
+            unsafe { ptr::copy_nonoverlapping(input.as_ptr(), self.data.add(self.written), count) };
+            self.written += count;
+        }
+        Ok(count)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Drop for CryptoBufferBuilder {
     fn drop(&mut self) {
         if !self.buffer.is_null() {
-            unsafe {
-                btls_sys::CRYPTO_BUFFER_free(self.buffer);
-            }
+            // SAFETY: the owner has not transferred the native buffer to BoringSSL.
+            unsafe { ffi::CRYPTO_BUFFER_free(self.buffer) };
         }
     }
 }
@@ -970,6 +1000,28 @@ impl Drop for CryptoBufferBuilder<'_> {
 mod boundary_tests {
     use super::*;
     use std::mem::MaybeUninit;
+
+    #[test]
+    fn decompression_requires_complete_initialized_buffer() {
+        use std::io::Write;
+        let mut short = CryptoBufferBuilder::with_capacity(4).unwrap();
+        short.write_all(b"ab").unwrap();
+        assert!(short.build().is_err());
+
+        let mut exact = CryptoBufferBuilder::with_capacity(4).unwrap();
+        exact.write_all(b"ab").unwrap();
+        assert_eq!(exact.write(b"cdef").unwrap(), 2);
+        assert_eq!(exact.write(b"excess").unwrap(), 0);
+        let buffer = exact.build().unwrap();
+        // SAFETY: build transferred ownership only after all four bytes were initialized.
+        unsafe {
+            assert_eq!(
+                slice::from_raw_parts(ffi::CRYPTO_BUFFER_data(buffer), 4),
+                b"abcd"
+            );
+            ffi::CRYPTO_BUFFER_free(buffer);
+        }
+    }
 
     #[test]
     fn initialized_callback_output_and_result_bounds() {

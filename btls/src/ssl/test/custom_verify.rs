@@ -277,3 +277,45 @@ fn retry() {
     assert_eq!(handshake.error().code(), ErrorCode::WANT_CERTIFICATE_VERIFY);
     handshake.handshake().unwrap_err();
 }
+
+#[test]
+fn copied_custom_verifier_survives_context_switch() {
+    use crate::ssl::{SslContextBuilder, SslMethod};
+    use std::sync::Arc;
+
+    fn policy(
+        called: Arc<AtomicBool>,
+        accept: bool,
+    ) -> impl Fn(&mut SslRef) -> Result<(), SslVerifyError> {
+        move |ssl| {
+            called.store(true, Ordering::SeqCst);
+            if accept {
+                check_peer_digest(ssl)
+            } else {
+                Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))
+            }
+        }
+    }
+
+    let called = Arc::new(AtomicBool::new(false));
+    let replacement_called = Arc::new(AtomicBool::new(false));
+    let server = Server::builder().build();
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, policy(called.clone(), true))
+        .unwrap();
+    let mut replacement = SslContextBuilder::new(SslMethod::tls()).unwrap();
+    replacement
+        .set_custom_verify_callback(
+            SslVerifyMode::PEER,
+            policy(replacement_called.clone(), false),
+        )
+        .unwrap();
+    let replacement = replacement.build();
+    let mut client = client.build().builder();
+    client.ssl().set_ssl_context(&replacement).unwrap();
+    client.connect();
+    assert!(called.load(Ordering::SeqCst));
+    assert!(!replacement_called.load(Ordering::SeqCst));
+}
