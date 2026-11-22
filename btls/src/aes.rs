@@ -65,30 +65,53 @@ impl Drop for AesSchedule {
     }
 }
 
-/// An AES encryption schedule, cleansed on drop.
-pub struct AesEncryptKey(AesSchedule);
+macro_rules! aes_schedule {
+    ($key:ident, $init:ident, $block:ident, $native_block:ident, $kind:literal, $operation:literal) => {
+        #[doc = $kind]
+        pub struct $key(AesSchedule);
 
-/// An AES decryption schedule, cleansed on drop.
-pub struct AesDecryptKey(AesSchedule);
+        impl $key {
+            /// Prepares the corresponding AES key schedule.
+            ///
+            /// # Errors
+            ///
+            /// Returns an error unless the key is 128, 192, or 256 bits.
+            #[corresponds($init)]
+            pub fn new(key: &[u8]) -> Result<Self, KeyError> {
+                AesSchedule::new_schedule(key, ffi::$init).map(Self)
+            }
+
+            #[doc = $operation]
+            #[corresponds($native_block)]
+            pub fn $block(&self, input: &[u8; 16], out: &mut [u8; 16]) {
+                // SAFETY: Both blocks are exactly 16 bytes. The constructor
+                // initializes the schedule for the matching native operation.
+                unsafe {
+                    ffi::$native_block(input.as_ptr(), out.as_mut_ptr(), &raw const self.0 .0)
+                }
+            }
+        }
+    };
+}
+
+aes_schedule!(
+    AesEncryptKey,
+    AES_set_encrypt_key,
+    encrypt_block,
+    AES_encrypt,
+    "An AES encryption schedule, cleansed on drop.",
+    "Encrypts one block."
+);
+aes_schedule!(
+    AesDecryptKey,
+    AES_set_decrypt_key,
+    decrypt_block,
+    AES_decrypt,
+    "An AES decryption schedule, cleansed on drop.",
+    "Decrypts one block."
+);
 
 impl AesEncryptKey {
-    /// Prepares an AES encryption schedule.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error unless the key is 128, 192, or 256 bits.
-    #[corresponds(AES_set_encrypt_key)]
-    pub fn new(key: &[u8]) -> Result<Self, KeyError> {
-        AesSchedule::new_schedule(key, ffi::AES_set_encrypt_key).map(Self)
-    }
-
-    /// Encrypts one block.
-    #[corresponds(AES_encrypt)]
-    pub fn encrypt_block(&self, input: &[u8; 16], out: &mut [u8; 16]) {
-        // SAFETY: Both blocks are exactly 16 bytes and the schedule is for encryption.
-        unsafe { ffi::AES_encrypt(input.as_ptr(), out.as_mut_ptr(), &raw const self.0 .0) }
-    }
-
     /// Wraps key material according to RFC 3394, returning the written length.
     ///
     /// # Errors
@@ -127,23 +150,6 @@ impl AesEncryptKey {
 }
 
 impl AesDecryptKey {
-    /// Prepares an AES decryption schedule.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error unless the key is 128, 192, or 256 bits.
-    #[corresponds(AES_set_decrypt_key)]
-    pub fn new(key: &[u8]) -> Result<Self, KeyError> {
-        AesSchedule::new_schedule(key, ffi::AES_set_decrypt_key).map(Self)
-    }
-
-    /// Decrypts one block.
-    #[corresponds(AES_decrypt)]
-    pub fn decrypt_block(&self, input: &[u8; 16], out: &mut [u8; 16]) {
-        // SAFETY: Both blocks are exactly 16 bytes and the schedule is for decryption.
-        unsafe { ffi::AES_decrypt(input.as_ptr(), out.as_mut_ptr(), &raw const self.0 .0) }
-    }
-
     /// Unwraps and authenticates RFC 3394 key material.
     ///
     /// # Errors
