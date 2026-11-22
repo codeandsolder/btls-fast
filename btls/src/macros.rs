@@ -66,7 +66,7 @@ macro_rules! private_key_to_pem {
                         -1,
                         None,
                         ptr::null_mut()))?;
-                Ok(bio.get_buf().to_owned())
+                Ok(bio.get_buf()?.to_owned())
             }
         }
 
@@ -91,7 +91,7 @@ macro_rules! private_key_to_pem {
                         try_int(passphrase.len())?,
                         None,
                         ptr::null_mut()))?;
-                Ok(bio.get_buf().to_owned())
+                Ok(bio.get_buf()?.to_owned())
             }
         }
     }
@@ -110,7 +110,7 @@ macro_rules! to_pem {
             unsafe {
                 let bio = crate::bio::MemBio::new()?;
                 cvt($f(bio.as_ptr(), self.as_ptr()))?;
-                Ok(bio.get_buf().to_owned())
+                Ok(bio.get_buf()?.to_owned())
             }
         }
     }
@@ -215,7 +215,6 @@ macro_rules! generic_foreign_type_and_impl_send_sync {
         $(#[$impl_attr:meta])*
         type CType = $ctype:ty;
         fn drop = $drop:expr;
-        $(fn clone = $clone:expr;)*
 
         $(#[$owned_attr:meta])*
         pub struct $owned:ident<T>;
@@ -223,9 +222,12 @@ macro_rules! generic_foreign_type_and_impl_send_sync {
         pub struct $borrowed:ident<T>;
     ) => {
         $(#[$owned_attr])*
-        pub struct $owned<T>(*mut $ctype, ::std::marker::PhantomData<T>);
+        pub struct $owned<T>(*mut $ctype, ::std::marker::PhantomData<fn() -> T>);
 
         $(#[$impl_attr])*
+        // SAFETY: the owned wrapper stores the exact native pointer, transfers
+        // ownership via into_ptr, and releases one owned reference through
+        // the paired native free function. The reference wrapper has no data.
         unsafe impl<T> ::foreign_types::ForeignType for $owned<T> {
             type CType = $ctype;
             type Ref = $borrowed<T>;
@@ -244,47 +246,20 @@ macro_rules! generic_foreign_type_and_impl_send_sync {
         impl<T> Drop for $owned<T> {
             #[inline]
             fn drop(&mut self) {
+                // SAFETY: from_ptr requires an owned native reference, and
+                // this destructor releases that reference exactly once.
                 unsafe { $drop(self.0) }
             }
         }
-
-        $(
-            impl<T> Clone for $owned<T> {
-                #[inline]
-                fn clone(&self) -> $owned<T> {
-                    unsafe {
-                        let handle: *mut $ctype = $clone(self.0);
-                        ::foreign_types::ForeignType::from_ptr(handle)
-                    }
-                }
-            }
-
-            impl<T> ::std::borrow::ToOwned for $borrowed<T> {
-                type Owned = $owned<T>;
-                #[inline]
-                fn to_owned(&self) -> $owned<T> {
-                    unsafe {
-                        let handle: *mut $ctype =
-                            $clone(::foreign_types::ForeignTypeRef::as_ptr(self));
-                        $crate::ForeignType::from_ptr(handle)
-                    }
-                }
-            }
-        )*
 
         impl<T> ::std::ops::Deref for $owned<T> {
             type Target = $borrowed<T>;
 
             #[inline]
             fn deref(&self) -> &$borrowed<T> {
+                // SAFETY: the owned native reference keeps the native key
+                // alive throughout the returned borrow.
                 unsafe { ::foreign_types::ForeignTypeRef::from_ptr(self.0) }
-            }
-        }
-
-        impl<T> ::std::ops::DerefMut for $owned<T> {
-            #[inline]
-            fn deref_mut(&mut self) -> &mut $borrowed<T> {
-                unsafe { ::foreign_types::ForeignTypeRef::from_ptr_mut(self.0) }
             }
         }
 
@@ -303,17 +278,27 @@ macro_rules! generic_foreign_type_and_impl_send_sync {
         }
 
         $(#[$borrowed_attr])*
-        pub struct $borrowed<T>(::foreign_types::Opaque, ::std::marker::PhantomData<T>);
+        pub struct $borrowed<T>(::foreign_types::Opaque, ::std::marker::PhantomData<fn() -> T>);
 
         $(#[$impl_attr])*
+        // SAFETY: the opaque zero-sized wrapper preserves the native address
+        // when constructed from a pointer; T is only a capability marker.
         unsafe impl<T> ::foreign_types::ForeignTypeRef for $borrowed<T> {
             type CType = $ctype;
         }
 
-        unsafe impl<T> Send for $owned<T>{}
-        unsafe impl<T> Send for $borrowed<T>{}
-        unsafe impl<T> Sync for $owned<T>{}
-        unsafe impl<T> Sync for $borrowed<T>{}
+        // SAFETY: this macro wraps native key types whose owned references
+        // can be released on any thread. T has no stored value.
+        unsafe impl<T> Send for $owned<T> {}
+        // SAFETY: the borrowed marker exposes no mutable native-key API;
+        // the referenced key may be accessed on another thread.
+        unsafe impl<T> Send for $borrowed<T> {}
+        // SAFETY: safe access after key construction is read-only, and
+        // BoringSSL synchronizes native reference counts and internal caches.
+        unsafe impl<T> Sync for $owned<T> {}
+        // SAFETY: shared key references expose read-only operations with
+        // the same native concurrency guarantees as the owned reference.
+        unsafe impl<T> Sync for $borrowed<T> {}
     };
 }
 

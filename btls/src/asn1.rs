@@ -105,7 +105,7 @@ impl fmt::Display for Asn1GeneralizedTimeRef {
                     self.as_ptr(),
                 ))
                 .ok()?;
-                str::from_utf8(mem_bio.get_buf()).ok()
+                str::from_utf8(mem_bio.get_buf().ok()?).ok()
             })
             .unwrap_or("error");
         f.write_str(msg)
@@ -333,7 +333,13 @@ impl fmt::Display for Asn1TimeRef {
             let print_result = cvt(ffi::ASN1_TIME_print(mem_bio.as_ptr(), self.as_ptr()));
             match print_result {
                 Err(_) => f.write_str("error"),
-                Ok(()) => f.write_str(str::from_utf8_unchecked(mem_bio.get_buf())),
+                Ok(()) => {
+                    let text = mem_bio
+                        .get_buf()
+                        .ok()
+                        .and_then(|bytes| str::from_utf8(bytes).ok());
+                    f.write_str(text.unwrap_or("error"))
+                }
             }
         }
     }

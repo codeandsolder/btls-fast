@@ -1182,8 +1182,10 @@ impl X509NameRef {
     pub fn print_ex(&self, flags: i32) -> Option<String> {
         unsafe {
             let bio = MemBio::new().ok()?;
-            ffi::X509_NAME_print_ex(bio.as_ptr(), self.as_ptr(), 0, flags as _);
-            let buf = bio.get_buf().to_vec();
+            if ffi::X509_NAME_print_ex(bio.as_ptr(), self.as_ptr(), 0, flags.try_into().ok()?) < 0 {
+                return None;
+            }
+            let buf = bio.get_buf().ok()?.to_vec();
             let res = String::from_utf8(buf);
             res.ok()
         }

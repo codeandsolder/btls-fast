@@ -131,6 +131,8 @@ impl Drop for NativeBuffer {
 
 pub trait ForeignTypeRefExt: ForeignTypeRef {
     unsafe fn from_const_ptr<'a>(ptr: *const Self::CType) -> &'a Self {
+        // SAFETY: the caller must provide a live, immutable native object
+        // for the returned lifetime; the reference does not modify it.
         unsafe { Self::from_ptr(ptr.cast_mut()) }
     }
 
@@ -138,7 +140,8 @@ pub trait ForeignTypeRefExt: ForeignTypeRef {
         if ptr.is_null() {
             None
         } else {
-            Some(unsafe { Self::from_const_ptr(ptr.cast_mut()) })
+            // SAFETY: the caller provides a live immutable object for non-null input.
+            Some(unsafe { Self::from_const_ptr(ptr) })
         }
     }
 }

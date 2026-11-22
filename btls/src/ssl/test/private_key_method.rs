@@ -267,6 +267,45 @@ fn test_sign_retry_complete_ok() {
     client.connect();
 }
 
+#[cfg(feature = "rpk")]
+#[test]
+fn raw_public_key_uses_credential_specific_method() {
+    use crate::ssl::{CertificateType, SslCredential};
+    let invoked = Arc::new(AtomicBool::new(false));
+    let called = invoked.clone();
+    let key = PKey::private_key_from_pem(KEY).unwrap();
+    let mut credential = SslCredential::new_raw_public_key().unwrap();
+    credential
+        .set_spki_bytes(Some(&key.public_key_to_der().unwrap()))
+        .unwrap();
+    credential
+        .set_private_key_method(Method::new().sign(move |_, input, algorithm, output| {
+            assert_eq!(algorithm, SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256);
+            called.store(true, Ordering::SeqCst);
+            Ok(sign_with_default_config(input, output))
+        }))
+        .unwrap();
+    let credential = credential.build();
+    // The context-wide handler has exactly the same Rust type but must not run.
+    let mut builder = builder_with_private_key_method(
+        Method::new().sign(|_, _, _, _| Err(PrivateKeyMethodError::FAILURE)),
+    );
+    builder.ctx().add_credential(&credential).unwrap();
+    drop(credential);
+    let server = builder.build();
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_server_certificate_types(&[CertificateType::RAW_PUBLIC_KEY])
+        .unwrap();
+    client
+        .ctx()
+        .set_verify_algorithm_prefs(&[SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256])
+        .unwrap();
+    client.connect();
+    assert!(invoked.load(Ordering::SeqCst));
+}
+
 fn sign_with_default_config(input: &[u8], output: &mut [u8]) -> usize {
     let pkey = PKey::private_key_from_pem(KEY).unwrap();
     let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
