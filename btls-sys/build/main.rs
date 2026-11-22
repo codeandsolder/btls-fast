@@ -240,9 +240,8 @@ fn get_boringssl_cmake_config(config: &Config) -> cmake::Config {
     let src_path = get_boringssl_source_path(config);
     let mut boringssl_cmake = cmake::Config::new(src_path);
 
-    // google/benchmark runs feature checks during BoringSSL configuration. Keep
-    // dependency builds from treating MSVC STL warnings as fatal in those probes.
-    boringssl_cmake.define("BENCHMARK_ENABLE_WERROR", "OFF");
+    // Cargo builds only libssl and libcrypto, not BoringSSL's test suite.
+    boringssl_cmake.define("BUILD_TESTING", "OFF");
 
     if config.features.prefix_symbols {
         boringssl_cmake.define("BORINGSSL_PREFIX", PREFIX.as_str());
@@ -671,8 +670,8 @@ fn build_boringssl_or_get_prebuilt(config: &Config) -> &Path {
 
         cache::apply(config, &mut cfg);
 
-        cfg.build_target("ssl").build();
-        let path = cfg.build_target("crypto").build();
+        // BoringSSL's ssl target already depends on crypto.
+        let path = cfg.build_target("ssl").build();
         let build_dir = path.join("build");
         if build_dir.exists() {
             build_dir

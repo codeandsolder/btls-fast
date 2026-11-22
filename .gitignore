@@ -33,3 +33,6 @@ keylog.txt
 .idea/
 AGENTS.md
 .agents/
+
+# Fork CI builds are reproducible.
+!/Cargo.lock
