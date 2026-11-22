@@ -55,7 +55,7 @@ impl AeadAdapter for Btls {
 
     fn new(key: &[u8; 16]) -> Result<Self, BoxError> {
         Ok(Self(AeadCtx::new_default_tag(
-            &Algorithm::aes_128_gcm(),
+            Algorithm::aes_128_gcm(),
             key,
         )?))
     }
@@ -63,13 +63,13 @@ impl AeadAdapter for Btls {
     fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) {
         let (payload, tag) = record.split_at_mut(record.len() - TAG_LEN);
         self.0
-            .seal_in_place_mut(&nonce, payload, tag, aad)
+            .seal_in_place(&nonce, payload, tag, aad)
             .expect("btls failed to seal a record");
     }
 
     fn open(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> bool {
         let (payload, tag) = record.split_at_mut(record.len() - TAG_LEN);
-        self.0.open_in_place_mut(&nonce, payload, tag, aad).is_ok()
+        self.0.open_in_place(&nonce, payload, tag, aad).is_ok()
     }
 }
 

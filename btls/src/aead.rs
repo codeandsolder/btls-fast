@@ -1,6 +1,6 @@
 //! Authenticated encryption with detached authentication tags.
 //!
-//! This module wraps BoringSSL's `EVP_AEAD` interface and is intended for
+//! This module wraps `BoringSSL`'s `EVP_AEAD` interface and is intended for
 //! protocols that keep ciphertext and authentication tag in separate buffers.
 //!
 //! # Overview
@@ -59,16 +59,16 @@
 //! use btls::aead::{AeadCtx, Algorithm};
 //!
 //! let algorithm = Algorithm::aes_128_gcm();
-//! let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+//! let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
 //! let nonce = [0u8; 12];
 //! let aad = b"record-header";
 //! let mut payload = b"hello world".to_vec();
 //! let mut tag = vec![0u8; algorithm.max_overhead()];
 //!
-//! ctx.seal_in_place_mut(&nonce, payload.as_mut_slice(), &mut tag, aad)
+//! ctx.seal_in_place(&nonce, payload.as_mut_slice(), &mut tag, aad)
 //!     .unwrap();
 //!
-//! ctx.open_in_place_mut(&nonce, payload.as_mut_slice(), &tag, aad)
+//! ctx.open_in_place(&nonce, payload.as_mut_slice(), &tag, aad)
 //!     .unwrap();
 //!
 //! assert_eq!(payload.as_slice(), b"hello world");
@@ -83,12 +83,16 @@ use crate::error::ErrorStack;
 use crate::ffi;
 use crate::{cvt, cvt_p};
 
+// EVP_AEAD_DEFAULT_TAG_LENGTH is the native zero sentinel, not a zero-length tag.
+const DEFAULT_TAG_LENGTH: usize = 0;
+const _: () = assert!(ffi::EVP_AEAD_DEFAULT_TAG_LENGTH == 0);
+
 /// Represents a specific AEAD algorithm.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Algorithm(*const ffi::EVP_AEAD);
 
 impl Algorithm {
-    /// Creates an [`Algorithm`] from a raw BoringSSL pointer.
+    /// Creates an [`Algorithm`] from a raw `BoringSSL` pointer.
     ///
     /// # Safety
     ///
@@ -103,6 +107,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_aes_128_gcm)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_aes_128_gcm()) }
     }
 
@@ -110,6 +115,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_aes_256_gcm)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_aes_256_gcm()) }
     }
 
@@ -117,6 +123,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_chacha20_poly1305)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn chacha20_poly1305() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_chacha20_poly1305()) }
     }
 
@@ -124,6 +131,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_xchacha20_poly1305)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn xchacha20_poly1305() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_xchacha20_poly1305()) }
     }
 
@@ -140,6 +148,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_aes_128_gcm_tls12)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm_tls12() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_aes_128_gcm_tls12()) }
     }
 
@@ -156,6 +165,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_aes_256_gcm_tls12)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm_tls12() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_aes_256_gcm_tls12()) }
     }
 
@@ -172,6 +182,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_aes_128_gcm_tls13)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_128_gcm_tls13() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_aes_128_gcm_tls13()) }
     }
 
@@ -188,6 +199,7 @@ impl Algorithm {
     #[corresponds(EVP_aead_aes_256_gcm_tls13)]
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
     pub fn aes_256_gcm_tls13() -> Self {
+        // SAFETY: this native getter returns a static immutable algorithm descriptor.
         unsafe { Self(ffi::EVP_aead_aes_256_gcm_tls13()) }
     }
 
@@ -195,6 +207,7 @@ impl Algorithm {
     #[corresponds(EVP_AEAD_key_length)]
     #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
     pub fn key_length(self) -> usize {
+        // SAFETY: Algorithm holds a live static descriptor, read only by this getter.
         unsafe { ffi::EVP_AEAD_key_length(self.0) }
     }
 
@@ -202,6 +215,7 @@ impl Algorithm {
     #[corresponds(EVP_AEAD_max_overhead)]
     #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
     pub fn max_overhead(self) -> usize {
+        // SAFETY: Algorithm holds a live static descriptor, read only by this getter.
         unsafe { ffi::EVP_AEAD_max_overhead(self.0) }
     }
 
@@ -209,6 +223,7 @@ impl Algorithm {
     #[corresponds(EVP_AEAD_max_tag_len)]
     #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
     pub fn max_tag_len(self) -> usize {
+        // SAFETY: Algorithm holds a live static descriptor, read only by this getter.
         unsafe { ffi::EVP_AEAD_max_tag_len(self.0) }
     }
 
@@ -216,6 +231,7 @@ impl Algorithm {
     #[corresponds(EVP_AEAD_nonce_length)]
     #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
     pub fn nonce_len(self) -> usize {
+        // SAFETY: Algorithm holds a live static descriptor, read only by this getter.
         unsafe { ffi::EVP_AEAD_nonce_length(self.0) }
     }
 
@@ -226,14 +242,16 @@ impl Algorithm {
     }
 }
 
+// SAFETY: descriptors are immutable, static native objects.
 unsafe impl Send for Algorithm {}
+// SAFETY: querying a descriptor never mutates it.
 unsafe impl Sync for Algorithm {}
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::EVP_AEAD_CTX;
     fn drop = ffi::EVP_AEAD_CTX_free;
 
-    /// An AEAD encryption/decryption context wrapping BoringSSL's `EVP_AEAD_CTX`.
+    /// An AEAD encryption/decryption context wrapping `BoringSSL`'s `EVP_AEAD_CTX`.
     ///
     /// Holds the keying material for a specific [`Algorithm`]. Use
     /// [`AeadCtx::new_default_tag`] for the common case, or [`AeadCtx::new`]
@@ -248,14 +266,20 @@ impl AeadCtx {
     /// Creates a new AEAD context.
     ///
     /// `tag_len` controls the default tag length used by the context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported algorithm/key/tag combination or native allocation failure.
     #[corresponds(EVP_AEAD_CTX_new)]
-    pub fn new(algorithm: &Algorithm, key: &[u8], tag_len: usize) -> Result<Self, ErrorStack> {
+    pub fn new(algorithm: Algorithm, key: &[u8], tag_len: usize) -> Result<Self, ErrorStack> {
         ffi::init();
 
         if key.len() != algorithm.key_length() {
             return Err(ErrorStack::internal_error_str("invalid key size"));
         }
 
+        // SAFETY: key length matches the live descriptor. The native constructor
+        // copies the key and returns an owned initialized context or null.
         unsafe {
             cvt_p(ffi::EVP_AEAD_CTX_new(
                 algorithm.as_ptr(),
@@ -273,8 +297,12 @@ impl AeadCtx {
     /// This is the recommended constructor for most use cases. The full tag
     /// length provides the strongest authentication guarantee for the algorithm.
     /// Use [`AeadCtx::new`] instead when your protocol requires a truncated tag.
-    pub fn new_default_tag(algorithm: &Algorithm, key: &[u8]) -> Result<Self, ErrorStack> {
-        Self::new(algorithm, key, ffi::EVP_AEAD_DEFAULT_TAG_LENGTH as usize)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported algorithm/key combination or native allocation failure.
+    pub fn new_default_tag(algorithm: Algorithm, key: &[u8]) -> Result<Self, ErrorStack> {
+        Self::new(algorithm, key, DEFAULT_TAG_LENGTH)
     }
 }
 
@@ -284,9 +312,15 @@ impl AeadCtxRef {
     ///
     /// This is useful for sizing `out_tag` buffers precisely rather than relying
     /// on the worst-case [`Algorithm::max_overhead`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the length combination is unsupported by the native algorithm.
     #[corresponds(EVP_AEAD_CTX_tag_len)]
     pub fn tag_len(&self, in_len: usize, extra_in_len: usize) -> Result<usize, ErrorStack> {
         let mut out_tag_len: usize = 0;
+        // SAFETY: the context is live and the output slot is writable; the
+        // native getter computes lengths without running a cryptographic operation.
         unsafe {
             cvt(ffi::EVP_AEAD_CTX_tag_len(
                 self.as_ptr(),
@@ -331,7 +365,7 @@ impl AeadCtxRef {
     /// use btls::aead::{AeadCtx, Algorithm};
     ///
     /// let algorithm = Algorithm::chacha20_poly1305();
-    /// let mut ctx = AeadCtx::new(&algorithm, &[7u8; 32], algorithm.max_tag_len()).unwrap();
+    /// let mut ctx = AeadCtx::new(algorithm, &[7u8; 32], algorithm.max_tag_len()).unwrap();
     ///
     /// let nonce = [1u8; 12];
     /// let aad = b"frame-header";
@@ -343,7 +377,7 @@ impl AeadCtxRef {
     /// let mut detached = vec![0u8; extra.len() + algorithm.max_overhead()];
     ///
     /// let detached_written = ctx
-    ///     .seal_scatter_mut(
+    ///     .seal_scatter(
     ///         &nonce,
     ///         main.as_mut_slice(),
     ///         detached.as_mut_slice(),
@@ -361,13 +395,17 @@ impl AeadCtxRef {
     /// full_ciphertext.extend_from_slice(&detached_written[..extra_ct_len]);
     ///
     /// // `open_gather` takes ciphertext and detached tag separately.
-    /// ctx.open_gather_mut(&nonce, full_ciphertext.as_mut_slice(), tag, aad)
+    /// ctx.open_gather(&nonce, full_ciphertext.as_mut_slice(), tag, aad)
     ///     .unwrap();
     ///
     /// assert_eq!(full_ciphertext.as_slice(), b"hello world");
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid nonce or input lengths, insufficient output capacity, rejected nonce sequence, or native failure.
     #[corresponds(EVP_AEAD_CTX_seal_scatter)]
-    pub fn seal_scatter_mut<'a>(
+    pub fn seal_scatter<'a>(
         &mut self,
         nonce: &[u8],
         in_out: &mut [u8],
@@ -375,14 +413,13 @@ impl AeadCtxRef {
         extra_in: Option<&[u8]>,
         associated_data: &[u8],
     ) -> Result<&'a mut [u8], ErrorStack> {
-        self.raw_seal_scatter(nonce, in_out, out_tag, extra_in, associated_data)
+        // SAFETY: the exclusive receiver covers the native state mutation.
+        unsafe { self.raw_seal_scatter(nonce, in_out, out_tag, extra_in, associated_data) }
     }
 
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Non-thread-safe when used with TLS due to interior mutability in BoringSSL. Use `seal_scatter_mut` instead."
-    )]
-    pub fn seal_scatter<'a>(
+    // SAFETY requirement: either the caller exclusively borrows this context,
+    // or the native algorithm guarantees concurrent seal/open operations.
+    unsafe fn raw_seal_scatter<'a>(
         &self,
         nonce: &[u8],
         in_out: &mut [u8],
@@ -390,23 +427,13 @@ impl AeadCtxRef {
         extra_in: Option<&[u8]>,
         associated_data: &[u8],
     ) -> Result<&'a mut [u8], ErrorStack> {
-        self.raw_seal_scatter(nonce, in_out, out_tag, extra_in, associated_data)
-    }
+        let (extra_in_ptr, extra_in_len) =
+            extra_in.map_or((ptr::null(), 0), |buf| (buf.as_ptr(), buf.len()));
 
-    /// Seals through `&self`, which is only sound for stateless AEADs or with exclusive access.
-    fn raw_seal_scatter<'a>(
-        &self,
-        nonce: &[u8],
-        in_out: &mut [u8],
-        out_tag: &'a mut [u8],
-        extra_in: Option<&[u8]>,
-        associated_data: &[u8],
-    ) -> Result<&'a mut [u8], ErrorStack> {
-        let (extra_in_ptr, extra_in_len) = extra_in
-            .map(|buf| (buf.as_ptr(), buf.len()))
-            .unwrap_or((ptr::null(), 0));
-
-        let mut out_tag_len = out_tag.len();
+        let mut out_tag_len = 0;
+        // SAFETY: the caller establishes the context access contract. All
+        // native input/output lengths follow the Rust slices; exact in-place
+        // overlap is explicitly permitted by EVP_AEAD_CTX_seal_scatter.
         unsafe {
             cvt(ffi::EVP_AEAD_CTX_seal_scatter(
                 self.as_ptr(),
@@ -425,7 +452,9 @@ impl AeadCtxRef {
             ))?;
         }
 
-        Ok(&mut out_tag[..out_tag_len])
+        out_tag
+            .get_mut(..out_tag_len)
+            .ok_or_else(|| ErrorStack::internal_error_str("invalid AEAD output length"))
     }
 
     /// Decrypts `in_out` in place and verifies `in_tag` and
@@ -443,39 +472,33 @@ impl AeadCtxRef {
     /// - `in_tag`: Detached tag bytes produced by
     ///   [`seal_scatter`](AeadCtxRef::seal_scatter).
     /// - `associated_data`: The same AAD that was passed during encryption.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input lengths, authentication failure, or native failure. The native operation clears plaintext output on failure.
     #[corresponds(EVP_AEAD_CTX_open_gather)]
-    pub fn open_gather_mut(
+    pub fn open_gather(
         &mut self,
         nonce: &[u8],
         in_out: &mut [u8],
         in_tag: &[u8],
         associated_data: &[u8],
     ) -> Result<(), ErrorStack> {
-        self.raw_open_gather(nonce, in_out, in_tag, associated_data)
+        // SAFETY: the exclusive receiver covers the native state mutation.
+        unsafe { self.raw_open_gather(nonce, in_out, in_tag, associated_data) }
     }
 
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Non-thread-safe when used with TLS due to interior mutability in BoringSSL. Use `open_gather_mut` instead."
-    )]
-    pub fn open_gather(
+    // SAFETY requirement: either the caller exclusively borrows this context,
+    // or the native algorithm guarantees concurrent seal/open operations.
+    unsafe fn raw_open_gather(
         &self,
         nonce: &[u8],
         in_out: &mut [u8],
         in_tag: &[u8],
         associated_data: &[u8],
     ) -> Result<(), ErrorStack> {
-        self.raw_open_gather(nonce, in_out, in_tag, associated_data)
-    }
-
-    /// Opens through `&self`, which is only sound for stateless AEADs or with exclusive access.
-    fn raw_open_gather(
-        &self,
-        nonce: &[u8],
-        in_out: &mut [u8],
-        in_tag: &[u8],
-        associated_data: &[u8],
-    ) -> Result<(), ErrorStack> {
+        // SAFETY: context access is established by the caller, and the native
+        // operation permits exact in-place aliasing and respects slice lengths.
         unsafe {
             cvt(ffi::EVP_AEAD_CTX_open_gather(
                 self.as_ptr(),
@@ -510,28 +533,18 @@ impl AeadCtxRef {
     ///   authenticated but not encrypted.
     ///
     /// Returns the sub-slice of `tag` that was written to.
-    pub fn seal_in_place_mut<'a>(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid nonce, insufficient tag capacity, rejected nonce sequence, or native failure.
+    pub fn seal_in_place<'a>(
         &mut self,
         nonce: &[u8],
         buffer: &mut [u8],
         tag: &'a mut [u8],
         associated_data: &[u8],
     ) -> Result<&'a mut [u8], ErrorStack> {
-        self.seal_scatter_mut(nonce, buffer, tag, None, associated_data)
-    }
-
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Non-thread-safe when used with TLS due to interior mutability in BoringSSL. Use `seal_in_place_mut` instead."
-    )]
-    pub fn seal_in_place<'a>(
-        &self,
-        nonce: &[u8],
-        buffer: &mut [u8],
-        tag: &'a mut [u8],
-        associated_data: &[u8],
-    ) -> Result<&'a mut [u8], ErrorStack> {
-        self.raw_seal_scatter(nonce, buffer, tag, None, associated_data)
+        self.seal_scatter(nonce, buffer, tag, None, associated_data)
     }
 
     /// Decrypts `buffer` in place, verifying the authentication `tag` and
@@ -547,35 +560,25 @@ impl AeadCtxRef {
     /// - `tag`: The authentication tag produced by
     ///   [`seal_in_place`](AeadCtxRef::seal_in_place).
     /// - `associated_data`: The same AAD that was passed during encryption.
-    pub fn open_in_place_mut(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input lengths, authentication failure, or native failure.
+    pub fn open_in_place(
         &mut self,
         nonce: &[u8],
         buffer: &mut [u8],
         tag: &[u8],
         associated_data: &[u8],
     ) -> Result<(), ErrorStack> {
-        self.open_gather_mut(nonce, buffer, tag, associated_data)
-    }
-
-    #[doc(hidden)]
-    #[deprecated(
-        note = "Non-thread-safe when used with TLS due to interior mutability in BoringSSL. Use `open_in_place_mut` instead."
-    )]
-    pub fn open_in_place(
-        &self,
-        nonce: &[u8],
-        buffer: &mut [u8],
-        tag: &[u8],
-        associated_data: &[u8],
-    ) -> Result<(), ErrorStack> {
-        self.raw_open_gather(nonce, buffer, tag, associated_data)
+        self.open_gather(nonce, buffer, tag, associated_data)
     }
 }
 
 /// An AEAD context for an algorithm that keeps no state between operations, so it seals and
 /// opens through `&self` and can be shared between threads.
 ///
-/// BoringSSL allows concurrent seal and open calls on one context of a generic AEAD, but not
+/// `BoringSSL` allows concurrent seal and open calls on one context of a generic AEAD, but not
 /// of the TLS-specific ones, which is why [`AeadCtx`] requires `&mut self`.
 pub struct StatelessAeadCtx(AeadCtx);
 
@@ -585,15 +588,19 @@ impl StatelessAeadCtx {
     /// such as the stateful TLS-specific ones, are rejected.
     ///
     /// `tag_len` controls the default tag length used by the context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported algorithm/key/tag combination or native allocation failure.
     #[corresponds(EVP_AEAD_CTX_new)]
-    pub fn new(algorithm: &Algorithm, key: &[u8], tag_len: usize) -> Result<Self, ErrorStack> {
+    pub fn new(algorithm: Algorithm, key: &[u8], tag_len: usize) -> Result<Self, ErrorStack> {
         let stateless = [
             Algorithm::aes_128_gcm(),
             Algorithm::aes_256_gcm(),
             Algorithm::chacha20_poly1305(),
             Algorithm::xchacha20_poly1305(),
         ];
-        if !stateless.contains(algorithm) {
+        if !stateless.contains(&algorithm) {
             return Err(ErrorStack::internal_error_str(
                 "AEAD keeps state between operations",
             ));
@@ -602,11 +609,19 @@ impl StatelessAeadCtx {
     }
 
     /// Like [`Self::new`], with the algorithm's full tag length.
-    pub fn new_default_tag(algorithm: &Algorithm, key: &[u8]) -> Result<Self, ErrorStack> {
-        Self::new(algorithm, key, ffi::EVP_AEAD_DEFAULT_TAG_LENGTH as usize)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported algorithm/key combination or native allocation failure.
+    pub fn new_default_tag(algorithm: Algorithm, key: &[u8]) -> Result<Self, ErrorStack> {
+        Self::new(algorithm, key, DEFAULT_TAG_LENGTH)
     }
 
-    /// Like [`AeadCtxRef::seal_in_place_mut`], through a shared reference.
+    /// Like [`AeadCtxRef::seal_in_place`], through a shared reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid nonce, insufficient tag capacity, rejected nonce sequence, or native failure.
     #[corresponds(EVP_AEAD_CTX_seal_scatter)]
     pub fn seal_in_place<'a>(
         &self,
@@ -615,12 +630,18 @@ impl StatelessAeadCtx {
         tag: &'a mut [u8],
         associated_data: &[u8],
     ) -> Result<&'a mut [u8], ErrorStack> {
-        // The algorithm keeps no state, so the context is never written to.
-        self.0
-            .raw_seal_scatter(nonce, buffer, tag, None, associated_data)
+        // SAFETY: construction validates the native algorithm against the stateless set.
+        unsafe {
+            self.0
+                .raw_seal_scatter(nonce, buffer, tag, None, associated_data)
+        }
     }
 
-    /// Like [`AeadCtxRef::open_in_place_mut`], through a shared reference.
+    /// Like [`AeadCtxRef::open_in_place`], through a shared reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input lengths, authentication failure, or native failure.
     #[corresponds(EVP_AEAD_CTX_open_gather)]
     pub fn open_in_place(
         &self,
@@ -629,8 +650,8 @@ impl StatelessAeadCtx {
         tag: &[u8],
         associated_data: &[u8],
     ) -> Result<(), ErrorStack> {
-        // The algorithm keeps no state, so the context is never written to.
-        self.0.raw_open_gather(nonce, buffer, tag, associated_data)
+        // SAFETY: construction validates the native algorithm against the stateless set.
+        unsafe { self.0.raw_open_gather(nonce, buffer, tag, associated_data) }
     }
 }
 
@@ -645,13 +666,13 @@ mod tests {
         let nonce = [0; 12];
         let mut expected = *b"hello";
         let mut expected_tag = [0; 16];
-        AeadCtx::new_default_tag(&algorithm, &key)
+        AeadCtx::new_default_tag(algorithm, &key)
             .unwrap()
-            .seal_in_place_mut(&nonce, &mut expected, &mut expected_tag, b"ad")
+            .seal_in_place(&nonce, &mut expected, &mut expected_tag, b"ad")
             .unwrap();
 
         // Threads seal with one shared context, as they would with a mutable one.
-        let ctx = StatelessAeadCtx::new_default_tag(&algorithm, &key).unwrap();
+        let ctx = StatelessAeadCtx::new_default_tag(algorithm, &key).unwrap();
         std::thread::scope(|scope| {
             for _ in 0..2 {
                 scope.spawn(|| {
@@ -668,22 +689,22 @@ mod tests {
         assert_eq!(&expected, b"hello");
 
         let tls13 = Algorithm::aes_128_gcm_tls13();
-        assert!(StatelessAeadCtx::new_default_tag(&tls13, &key).is_err());
+        assert!(StatelessAeadCtx::new_default_tag(tls13, &key).is_err());
     }
 
     #[test]
     fn in_out() {
         let algorithm = Algorithm::aes_128_gcm();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let nonce = [0u8; 12];
         let associated_data = b"this is authenticated";
         let mut buffer = b"ABCDE".to_vec();
 
         let mut tag = [0u8; 16];
-        ctx.seal_in_place_mut(&nonce, buffer.as_mut_slice(), &mut tag, associated_data)
+        ctx.seal_in_place(&nonce, buffer.as_mut_slice(), &mut tag, associated_data)
             .unwrap();
 
-        ctx.open_in_place_mut(&nonce, buffer.as_mut_slice(), &tag, associated_data)
+        ctx.open_in_place(&nonce, buffer.as_mut_slice(), &tag, associated_data)
             .unwrap();
 
         assert_eq!(b"ABCDE", buffer.as_slice());
@@ -692,18 +713,18 @@ mod tests {
     #[test]
     fn xchacha_in_out() {
         let algorithm = Algorithm::xchacha20_poly1305();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 32]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 32]).unwrap();
         let nonce = [0u8; 24];
         let associated_data = b"xchacha";
         let mut buffer = b"payload".to_vec();
 
         let mut tag = [0u8; 16];
         let tag_written = ctx
-            .seal_in_place_mut(&nonce, buffer.as_mut_slice(), &mut tag, associated_data)
+            .seal_in_place(&nonce, buffer.as_mut_slice(), &mut tag, associated_data)
             .unwrap();
         let tag_len = tag_written.len();
 
-        ctx.open_in_place_mut(
+        ctx.open_in_place(
             &nonce,
             buffer.as_mut_slice(),
             &tag[..tag_len],
@@ -717,7 +738,7 @@ mod tests {
     #[test]
     fn seal_scatter_with_extra_in() {
         let algorithm = Algorithm::chacha20_poly1305();
-        let mut ctx = AeadCtx::new(&algorithm, &[7u8; 32], algorithm.max_tag_len()).unwrap();
+        let mut ctx = AeadCtx::new(algorithm, &[7u8; 32], algorithm.max_tag_len()).unwrap();
 
         let nonce = [1u8; 12];
         let aad = b"frame-header";
@@ -726,7 +747,7 @@ mod tests {
         let mut detached = vec![0u8; extra.len() + algorithm.max_overhead()];
 
         let detached_written = ctx
-            .seal_scatter_mut(
+            .seal_scatter(
                 &nonce,
                 main.as_mut_slice(),
                 detached.as_mut_slice(),
@@ -740,7 +761,7 @@ mod tests {
         let mut full_ciphertext = main;
         full_ciphertext.extend_from_slice(&detached_written[..extra_ct_len]);
 
-        ctx.open_gather_mut(&nonce, full_ciphertext.as_mut_slice(), tag, aad)
+        ctx.open_gather(&nonce, full_ciphertext.as_mut_slice(), tag, aad)
             .unwrap();
 
         assert_eq!(full_ciphertext.as_slice(), b"hello world");
@@ -748,14 +769,14 @@ mod tests {
 
     #[test]
     fn new_rejects_invalid_key_length() {
-        let result = AeadCtx::new_default_tag(&Algorithm::aes_128_gcm(), &[0u8; 15]);
+        let result = AeadCtx::new_default_tag(Algorithm::aes_128_gcm(), &[0u8; 15]);
         assert!(result.is_err());
     }
 
     #[test]
     fn tag_len_returns_expected_value() {
         let algorithm = Algorithm::aes_128_gcm();
-        let ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
 
         let tag_len = ctx.tag_len(0, 0).unwrap();
         assert_eq!(tag_len, algorithm.max_overhead());
@@ -767,34 +788,34 @@ mod tests {
         // (AES-GCM accepts variable-length nonces per spec, so it is not
         // suitable for testing nonce-length rejection.)
         let algorithm = Algorithm::chacha20_poly1305();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 32]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 32]).unwrap();
         let mut payload = [0u8; 8];
         let mut tag = [0u8; 16];
 
-        let result = ctx.seal_in_place_mut(&[0u8; 11], &mut payload, &mut tag, b"");
+        let result = ctx.seal_in_place(&[0u8; 11], &mut payload, &mut tag, b"");
         assert!(result.is_err());
     }
 
     #[test]
     fn seal_rejects_insufficient_tag_buffer() {
         let algorithm = Algorithm::aes_128_gcm();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut payload = [0u8; 8];
 
         // AES-128-GCM produces a 16-byte tag; an 8-byte buffer must be rejected.
         let mut short_tag = [0u8; 8];
-        let result = ctx.seal_in_place_mut(&[0u8; 12], &mut payload, &mut short_tag, b"");
+        let result = ctx.seal_in_place(&[0u8; 12], &mut payload, &mut short_tag, b"");
         assert!(result.is_err());
     }
 
     #[test]
     fn open_rejects_invalid_nonce_length() {
         let algorithm = Algorithm::chacha20_poly1305();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 32]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 32]).unwrap();
         let mut payload = [0u8; 8];
         let tag = [0u8; 16];
 
-        let result = ctx.open_in_place_mut(&[0u8; 11], &mut payload, &tag, b"");
+        let result = ctx.open_in_place(&[0u8; 11], &mut payload, &tag, b"");
         assert!(result.is_err());
     }
 
@@ -802,8 +823,8 @@ mod tests {
     /// directional — the seal context tracks nonce state, so we use a
     /// separate open context with the generic algorithm).
     fn tls_seal_open_round_trip(algorithm: Algorithm, generic: Algorithm, key: &[u8]) {
-        let mut seal_ctx = AeadCtx::new_default_tag(&algorithm, key).unwrap();
-        let mut open_ctx = AeadCtx::new_default_tag(&generic, key).unwrap();
+        let mut seal_ctx = AeadCtx::new_default_tag(algorithm, key).unwrap();
+        let mut open_ctx = AeadCtx::new_default_tag(generic, key).unwrap();
 
         let nonce = [0u8; 12];
         let aad = b"tls-record";
@@ -812,14 +833,14 @@ mod tests {
 
         let mut tag = vec![0u8; algorithm.max_overhead()];
         seal_ctx
-            .seal_in_place_mut(&nonce, &mut payload, &mut tag, aad)
+            .seal_in_place(&nonce, &mut payload, &mut tag, aad)
             .unwrap();
 
         // Ciphertext should differ from plaintext.
         assert_ne!(payload.as_slice(), original.as_slice());
 
         open_ctx
-            .open_in_place_mut(&nonce, &mut payload, &tag, aad)
+            .open_in_place(&nonce, &mut payload, &tag, aad)
             .unwrap();
 
         assert_eq!(payload.as_slice(), original.as_slice());
@@ -873,46 +894,46 @@ mod tests {
     #[test]
     fn tls12_rejects_nonce_reuse() {
         let algorithm = Algorithm::aes_128_gcm_tls12();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut payload = b"hello".to_vec();
         let mut tag = [0u8; 16];
 
         // First seal with counter 0 succeeds.
-        ctx.seal_in_place_mut(&nonce_with_counter(0), &mut payload, &mut tag, b"")
+        ctx.seal_in_place(&nonce_with_counter(0), &mut payload, &mut tag, b"")
             .unwrap();
 
         // Sealing again with the same counter (0) must fail — nonces must be
         // strictly monotonically increasing.
         let mut payload2 = b"world".to_vec();
-        let result = ctx.seal_in_place_mut(&nonce_with_counter(0), &mut payload2, &mut tag, b"");
+        let result = ctx.seal_in_place(&nonce_with_counter(0), &mut payload2, &mut tag, b"");
         assert!(result.is_err());
     }
 
     #[test]
     fn tls12_rejects_nonce_going_backwards() {
         let algorithm = Algorithm::aes_128_gcm_tls12();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut tag = [0u8; 16];
 
         // Seal with counter 5, then try counter 3.
         let mut p1 = b"hello".to_vec();
-        ctx.seal_in_place_mut(&nonce_with_counter(5), &mut p1, &mut tag, b"")
+        ctx.seal_in_place(&nonce_with_counter(5), &mut p1, &mut tag, b"")
             .unwrap();
 
         let mut p2 = b"world".to_vec();
-        let result = ctx.seal_in_place_mut(&nonce_with_counter(3), &mut p2, &mut tag, b"");
+        let result = ctx.seal_in_place(&nonce_with_counter(3), &mut p2, &mut tag, b"");
         assert!(result.is_err());
     }
 
     #[test]
     fn tls12_accepts_monotonic_nonces() {
         let algorithm = Algorithm::aes_128_gcm_tls12();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut tag = [0u8; 16];
 
         for counter in 0..5u64 {
             let mut payload = b"test".to_vec();
-            ctx.seal_in_place_mut(&nonce_with_counter(counter), &mut payload, &mut tag, b"")
+            ctx.seal_in_place(&nonce_with_counter(counter), &mut payload, &mut tag, b"")
                 .unwrap();
         }
     }
@@ -920,19 +941,18 @@ mod tests {
     #[test]
     fn tls13_rejects_nonce_reuse() {
         let algorithm = Algorithm::aes_128_gcm_tls13();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut tag = [0u8; 16];
 
         // TLS 1.3 nonce: sequence XOR mask. First call sets the mask.
         let nonce0 = [0u8; 12];
         let mut p1 = b"hello".to_vec();
-        ctx.seal_in_place_mut(&nonce0, &mut p1, &mut tag, b"")
-            .unwrap();
+        ctx.seal_in_place(&nonce0, &mut p1, &mut tag, b"").unwrap();
 
         // Second call with the same nonce implies counter went backwards
         // (counter 0 again), which must fail.
         let mut p2 = b"world".to_vec();
-        let result = ctx.seal_in_place_mut(&nonce0, &mut p2, &mut tag, b"");
+        let result = ctx.seal_in_place(&nonce0, &mut p2, &mut tag, b"");
         assert!(result.is_err());
     }
 
@@ -941,34 +961,32 @@ mod tests {
         // Generic AES-GCM does NOT enforce nonce monotonicity — it is the
         // caller's responsibility. Contrast with the tls12/tls13 variants.
         let algorithm = Algorithm::aes_128_gcm();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut tag = [0u8; 16];
         let nonce = nonce_with_counter(0);
 
         let mut p1 = b"hello".to_vec();
-        ctx.seal_in_place_mut(&nonce, &mut p1, &mut tag, b"")
-            .unwrap();
+        ctx.seal_in_place(&nonce, &mut p1, &mut tag, b"").unwrap();
 
         // Same nonce again — generic GCM accepts it (even though this is
         // cryptographically unsafe, the AEAD layer does not reject it).
         let mut p2 = b"world".to_vec();
-        ctx.seal_in_place_mut(&nonce, &mut p2, &mut tag, b"")
-            .unwrap();
+        ctx.seal_in_place(&nonce, &mut p2, &mut tag, b"").unwrap();
     }
 
     #[test]
     fn generic_gcm_accepts_nonce_going_backwards() {
         let algorithm = Algorithm::aes_128_gcm();
-        let mut ctx = AeadCtx::new_default_tag(&algorithm, &[0u8; 16]).unwrap();
+        let mut ctx = AeadCtx::new_default_tag(algorithm, &[0u8; 16]).unwrap();
         let mut tag = [0u8; 16];
 
         let mut p1 = b"hello".to_vec();
-        ctx.seal_in_place_mut(&nonce_with_counter(5), &mut p1, &mut tag, b"")
+        ctx.seal_in_place(&nonce_with_counter(5), &mut p1, &mut tag, b"")
             .unwrap();
 
         // Counter 3 after 5 — generic GCM accepts it.
         let mut p2 = b"world".to_vec();
-        ctx.seal_in_place_mut(&nonce_with_counter(3), &mut p2, &mut tag, b"")
+        ctx.seal_in_place(&nonce_with_counter(3), &mut p2, &mut tag, b"")
             .unwrap();
     }
 }
