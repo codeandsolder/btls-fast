@@ -1,0 +1,22 @@
+name: Strict Rust
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  strict-rust:
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@b86db41201ef1d28dee5776b27f27806b5d502f2 # main
+    with:
+      cargo-args: "--locked --workspace --all-targets --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation"
+      checkout-submodules: "recursive"
+      allow-test-panics: true
