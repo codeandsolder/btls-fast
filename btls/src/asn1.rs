@@ -815,7 +815,7 @@ mod tests {
     fn fixed_width_timestamp_supports_dates_after_2038() -> Result<(), ErrorStack> {
         let actual = Asn1Time::from_unix(2_147_483_648)?;
         let expected = "20380119031408Z".parse::<Asn1Time>()?;
-        assert_eq!(actual, expected);
+        assert_eq!(actual.to_string(), expected.to_string());
         Ok(())
     }
 

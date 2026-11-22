@@ -227,8 +227,8 @@ fn client_session_resumes_within_scope_and_domain() {
 #[test]
 fn client_session_is_not_offered_after_its_chain_expires() {
     // A foobar.com leaf from the test root that expired a day ago.
-    let day: libc::time_t = 24 * 60 * 60;
-    let now: libc::time_t = SystemTime::now()
+    let day: i64 = 24 * 60 * 60;
+    let now: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()

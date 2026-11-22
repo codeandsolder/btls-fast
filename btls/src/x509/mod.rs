@@ -42,6 +42,18 @@ use crate::x509::verify::{X509CheckFlags, X509VerifyParam, X509VerifyParamRef};
 use crate::{cvt, cvt_n, cvt_p};
 use crate::{ffi, free_data_box};
 
+// Both certificate builders expose the same native version-setting contract.
+macro_rules! version_setter {
+    ($(#[$attr:meta])* $setter:ident) => {
+        $(#[$attr])*
+        #[corresponds($setter)]
+        pub fn set_version(&mut self, version: c_long) -> Result<(), ErrorStack> {
+            // SAFETY: The builder owns a live native object and is exclusively borrowed.
+            unsafe { cvt(ffi::$setter(self.0.as_ptr(), version)) }
+        }
+    };
+}
+
 pub mod extension;
 pub mod store;
 pub mod verify;
@@ -267,10 +279,7 @@ impl X509StoreContextRef {
         unsafe {
             ffi::X509_STORE_CTX_set_error(
                 self.as_ptr(),
-                result
-                    .err()
-                    .as_ref()
-                    .map_or(ffi::X509_V_OK, X509VerifyError::as_raw),
+                result.err().map_or(ffi::X509_V_OK, X509VerifyError::as_raw),
             );
         }
     }
@@ -372,14 +381,10 @@ impl X509Builder {
         unsafe { cvt(X509_set1_notBefore(self.0.as_ptr(), not_before.as_ptr())) }
     }
 
-    /// Sets the version of the certificate.
-    ///
-    /// Note that the version is zero-indexed; that is, a certificate corresponding to version 3 of
-    /// the X.509 standard should pass `2` to this method.
-    #[corresponds(X509_set_version)]
-    pub fn set_version(&mut self, version: libc::c_long) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::X509_set_version(self.0.as_ptr(), version)) }
-    }
+    version_setter!(
+        /// Sets the zero-indexed version of the certificate (2 for X.509 v3).
+        X509_set_version
+    );
 
     /// Sets the serial number of the certificate.
     #[corresponds(X509_set_serialNumber)]
@@ -1298,11 +1303,10 @@ impl X509ReqBuilder {
         }
     }
 
-    /// Set the numerical value of the version field.
-    #[corresponds(X509_REQ_set_version)]
-    pub fn set_version(&mut self, version: libc::c_long) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::X509_REQ_set_version(self.0.as_ptr(), version)) }
-    }
+    version_setter!(
+        /// Sets the numerical value of the request version field.
+        X509_REQ_set_version
+    );
 
     /// Set the issuer name.
     #[corresponds(X509_REQ_set_subject_name)]
