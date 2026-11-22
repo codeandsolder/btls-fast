@@ -307,7 +307,7 @@ fn configure_target_platform(
                     io::Error::other("Please set ANDROID_NDK_HOME for Android build")
                 })?;
             for (name, value) in cmake_params_android(config) {
-                eprintln!("android arch={} add {}={}", config.target_arch, name, value);
+                eprintln!("android arch={} add {name}={value}", config.target_arch);
                 boringssl_cmake.define(name, value);
             }
             let toolchain_file = android_ndk_home.join("build/cmake/android.toolchain.cmake");
@@ -321,14 +321,14 @@ fn configure_target_platform(
 
         "macos" => {
             for (name, value) in cmake_params_apple(config) {
-                eprintln!("macos arch={} add {}={}", config.target_arch, name, value);
+                eprintln!("macos arch={} add {name}={value}", config.target_arch);
                 boringssl_cmake.define(name, value);
             }
         }
 
         "ios" => {
             for (name, value) in cmake_params_apple(config) {
-                eprintln!("ios arch={} add {}={}", config.target_arch, name, value);
+                eprintln!("ios arch={} add {name}={value}", config.target_arch);
                 boringssl_cmake.define(name, value);
             }
 
@@ -351,7 +351,7 @@ fn configure_target_platform(
             // Unlike the `ios` arm above, no bitcode flag: bitcode was deprecated in
             // Xcode 14 and the tvOS targets postdate it, so the SDK never wants it.
             for (name, value) in cmake_params_apple(config) {
-                eprintln!("tvos arch={} add {}={}", config.target_arch, name, value);
+                eprintln!("tvos arch={} add {name}={value}", config.target_arch);
                 boringssl_cmake.define(name, value);
             }
         }
