@@ -564,7 +564,20 @@ where
     callback(ssl, &line);
 }
 
-pub(super) unsafe extern "C" fn raw_sign<M>(
+// The caller must ensure that nonempty input points to readable bytes for
+// the returned lifetime, and that output storage does not overlap it.
+unsafe fn private_key_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+    if len == 0 {
+        return Some(&[]);
+    }
+    if ptr.is_null() || len > isize::MAX.unsigned_abs() {
+        return None;
+    }
+    // SAFETY: the caller provides the readable input allocation.
+    Some(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
+pub(super) unsafe extern "C" fn raw_sign<M, const CREDENTIAL: bool>(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
@@ -576,8 +589,11 @@ pub(super) unsafe extern "C" fn raw_sign<M>(
 where
     M: PrivateKeyMethod,
 {
-    // SAFETY: btls provides valid inputs.
-    let input = unsafe { slice::from_raw_parts(in_, in_len) };
+    // SAFETY: the native private-key callback supplies readable input for
+    // the duration of the call.
+    let Some(input) = (unsafe { private_key_input(in_, in_len) }) else {
+        return PrivateKeyMethodError::FAILURE.0;
+    };
 
     let signature_algorithm = SslSignatureAlgorithm(signature_algorithm);
 
@@ -586,10 +602,10 @@ where
     };
 
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, callback) }
+    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_decrypt<M>(
+pub(super) unsafe extern "C" fn raw_decrypt<M, const CREDENTIAL: bool>(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
@@ -600,16 +616,19 @@ pub(super) unsafe extern "C" fn raw_decrypt<M>(
 where
     M: PrivateKeyMethod,
 {
-    // SAFETY: btls provides valid inputs.
-    let input = unsafe { slice::from_raw_parts(in_, in_len) };
+    // SAFETY: the native private-key callback supplies readable input for
+    // the duration of the call.
+    let Some(input) = (unsafe { private_key_input(in_, in_len) }) else {
+        return PrivateKeyMethodError::FAILURE.0;
+    };
 
     let callback = |method: &M, ssl: &mut _, output: &mut _| method.decrypt(ssl, input, output);
 
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, callback) }
+    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_complete<M>(
+pub(super) unsafe extern "C" fn raw_complete<M, const CREDENTIAL: bool>(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
@@ -619,10 +638,10 @@ where
     M: PrivateKeyMethod,
 {
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M>(ssl, out, out_len, max_out, M::complete) }
+    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, M::complete) }
 }
 
-unsafe fn raw_private_key_callback<M>(
+unsafe fn raw_private_key_callback<M, const CREDENTIAL: bool>(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
@@ -632,25 +651,77 @@ unsafe fn raw_private_key_callback<M>(
 where
     M: PrivateKeyMethod,
 {
-    // SAFETY: btls provides valid inputs.
+    if ssl.is_null()
+        || out_len.is_null()
+        || max_out > isize::MAX.unsigned_abs()
+        || (max_out != 0 && out.is_null())
+    {
+        return PrivateKeyMethodError::FAILURE.0;
+    }
+
+    // SAFETY: the native callback holds exclusive use of SSL and provides a
+    // writable length result and max_out bytes of disjoint output storage.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let output = unsafe { slice::from_raw_parts_mut(out, max_out) };
-    let out_len = unsafe { &mut *out_len };
+    // SAFETY: use a raw write, because the output length need not be initialized.
+    unsafe { out_len.write(0) };
+    let output = if max_out == 0 {
+        &mut []
+    } else {
+        // SAFETY: initialize all bytes before exposing the output as a safe
+        // slice, even if the native caller has left the buffer uninitialized.
+        unsafe {
+            out.write_bytes(0, max_out);
+            slice::from_raw_parts_mut(out, max_out)
+        }
+    };
 
-    let ssl_context = ssl.ssl_context().to_owned();
-    let method = ssl_context
-        .ex_data(SslContext::cached_ex_index::<M>())
-        .expect("BUG: private key method missing");
+    // Hold a separate Arc while calling application code, rather than borrow
+    // data through an SSL/credential whose configuration the callback can change.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let method: Option<Arc<M>> = if CREDENTIAL {
+            #[cfg(feature = "credential")]
+            {
+                // SAFETY: BoringSSL exposes the currently selected credential
+                // for use during a private-key callback. Its typed ex-data
+                // slot was allocated for Arc<M> by the credential builder.
+                unsafe {
+                    let cred = ffi::SSL_get0_selected_credential(ssl.as_ptr());
+                    let index = super::SslCredential::registered_ex_index::<Arc<M>>()?;
+                    if cred.is_null() {
+                        return None;
+                    }
+                    ffi::SSL_CREDENTIAL_get_ex_data(cred, index.as_raw())
+                        .cast::<Arc<M>>()
+                        .as_ref()
+                        .cloned()
+                }
+            }
+            #[cfg(not(feature = "credential"))]
+            {
+                None
+            }
+        } else {
+            ssl.ssl_context()
+                .ex_data(SslContext::cached_ex_index::<Arc<M>>())
+                .cloned()
+        };
+        Some(callback(method.as_deref()?, ssl, output))
+    }));
 
-    match callback(method, ssl, output) {
-        Ok(written) => {
-            assert!(written <= max_out);
-
-            *out_len = written;
-
+    match result {
+        Ok(Some(Ok(written))) if written <= max_out => {
+            // SAFETY: out_len is the native caller's writable output slot.
+            unsafe { out_len.write(written) };
             ffi::ssl_private_key_result_t::ssl_private_key_success
         }
-        Err(err) => err.0,
+        Ok(Some(Err(err))) => err.0,
+        Ok(_) => PrivateKeyMethodError::FAILURE.0,
+        Err(payload) => {
+            // Native code cannot carry a Rust unwind. Do not drop arbitrary
+            // panic payloads here: their destructor could itself panic.
+            mem::forget(payload);
+            PrivateKeyMethodError::FAILURE.0
+        }
     }
 }
 

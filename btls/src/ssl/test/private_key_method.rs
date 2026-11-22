@@ -130,6 +130,35 @@ fn test_sign_failure() {
 }
 
 #[test]
+fn invalid_private_key_output_fails_handshake() {
+    let checked_output = Arc::new(AtomicBool::new(false));
+    let checked = checked_output.clone();
+    let mut builder =
+        builder_with_private_key_method(Method::new().sign(move |_, _, _, output| {
+            checked.store(output.iter().all(|&byte| byte == 0), Ordering::SeqCst);
+            Ok(output.len() + 1)
+        }));
+    builder.should_error();
+    let server = builder.build();
+    server.client_with_root_ca().connect_err();
+    assert!(checked_output.load(Ordering::SeqCst));
+}
+
+#[test]
+fn private_key_callback_panic_fails_handshake() {
+    let invoked = Arc::new(AtomicBool::new(false));
+    let called = invoked.clone();
+    let mut builder = builder_with_private_key_method(Method::new().sign(move |_, _, _, _| {
+        called.store(true, Ordering::SeqCst);
+        panic!("application signature callback failed");
+    }));
+    builder.should_error();
+    let server = builder.build();
+    server.client_with_root_ca().connect_err();
+    assert!(invoked.load(Ordering::SeqCst));
+}
+
+#[test]
 fn test_sign_retry_complete_failure() {
     let called_complete = Arc::new(AtomicUsize::new(0));
     let called_complete_clone = called_complete.clone();

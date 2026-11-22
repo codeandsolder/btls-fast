@@ -1947,14 +1947,14 @@ impl SslContextBuilder {
         M: PrivateKeyMethod,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<M>(), method);
+            self.replace_ex_data(SslContext::cached_ex_index::<Arc<M>>(), Arc::new(method));
 
             ffi::SSL_CTX_set_private_key_method(
                 self.as_ptr(),
                 &ffi::SSL_PRIVATE_KEY_METHOD {
-                    sign: Some(callbacks::raw_sign::<M>),
-                    decrypt: Some(callbacks::raw_decrypt::<M>),
-                    complete: Some(callbacks::raw_complete::<M>),
+                    sign: Some(callbacks::raw_sign::<M, false>),
+                    decrypt: Some(callbacks::raw_decrypt::<M, false>),
+                    complete: Some(callbacks::raw_complete::<M, false>),
                 },
             );
         }

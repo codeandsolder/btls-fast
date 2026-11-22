@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::ffi::{c_int, c_void};
 use std::mem;
 use std::ptr;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 
 static SSL_CREDENTIAL_INDEXES: LazyLock<Mutex<HashMap<TypeId, c_int>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -55,19 +55,29 @@ impl SslCredential {
         }
     }
 
-    // FIXME should return a result?
-    pub(crate) fn cached_ex_index<T>() -> Index<Self, T>
+    pub(crate) fn cached_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
     where
         T: 'static + Sync + Send,
     {
-        unsafe {
-            let idx = *SSL_CREDENTIAL_INDEXES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Self::new_ex_index::<T>().unwrap().as_raw());
-            Index::from_raw(idx)
-        }
+        use std::collections::hash_map::Entry;
+        let mut indexes = SSL_CREDENTIAL_INDEXES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let idx = match indexes.entry(TypeId::of::<T>()) {
+            Entry::Occupied(entry) => *entry.get(),
+            Entry::Vacant(entry) => *entry.insert(Self::new_ex_index::<T>()?.as_raw()),
+        };
+        // SAFETY: each type ID is associated only with an index allocated for T.
+        Ok(unsafe { Index::from_raw(idx) })
+    }
+
+    pub(crate) fn registered_ex_index<T: 'static>() -> Option<Index<Self, T>> {
+        let indexes = SSL_CREDENTIAL_INDEXES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let &idx = indexes.get(&TypeId::of::<T>())?;
+        // SAFETY: only cached_ex_index can insert a slot for T.
+        Some(unsafe { Index::from_raw(idx) })
     }
 }
 
@@ -93,11 +103,12 @@ impl SslCredentialRef {
         &mut self,
         index: Index<SslCredential, T>,
     ) -> Option<&mut T> {
-        let data = ffi::SSL_CREDENTIAL_get_ex_data(self.as_ptr(), index.as_raw());
-        if data.is_null() {
-            None
-        } else {
-            Some(&mut *data.cast::<T>())
+        // SAFETY: the caller guarantees unique access to the credential and
+        // the typed index identifies the allocation of T.
+        unsafe {
+            ffi::SSL_CREDENTIAL_get_ex_data(self.as_ptr(), index.as_raw())
+                .cast::<T>()
+                .as_mut()
         }
     }
 
@@ -108,17 +119,25 @@ impl SslCredentialRef {
         &mut self,
         index: Index<SslCredential, T>,
         data: T,
-    ) -> Option<T> {
-        if let Some(old) = self.ex_data_mut(index) {
-            return Some(mem::replace(old, data));
+    ) -> Result<Option<T>, ErrorStack> {
+        // SAFETY: the caller holds exclusive access to this credential.
+        if let Some(old) = unsafe { self.ex_data_mut(index) } {
+            return Ok(Some(mem::replace(old, data)));
         }
 
+        // Keep ownership until the native setter has accepted the pointer.
+        let mut data = Box::new(data);
+        // SAFETY: the pointer identifies the owned value of T; the registered
+        // native free callback takes ownership only after a successful setter.
         unsafe {
-            let data = Box::into_raw(Box::new(data)).cast::<c_void>();
-            ffi::SSL_CREDENTIAL_set_ex_data(self.as_ptr(), index.as_raw(), data);
+            cvt_0i(ffi::SSL_CREDENTIAL_set_ex_data(
+                self.as_ptr(),
+                index.as_raw(),
+                ptr::from_mut(&mut *data).cast::<c_void>(),
+            ))?;
         }
-
-        None
+        let _ = Box::into_raw(data);
+        Ok(None)
     }
 }
 
@@ -133,7 +152,12 @@ impl SslCredentialBuilder {
     ///
     /// Any previous value will be returned and replaced by the new one.
     #[corresponds(SSL_CREDENTIAL_set_ex_data)]
-    pub fn replace_ex_data<T>(&mut self, index: Index<SslCredential, T>, data: T) -> Option<T> {
+    pub fn replace_ex_data<T>(
+        &mut self,
+        index: Index<SslCredential, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        // SAFETY: only the builder owns the credential before publication.
         unsafe { self.0.replace_ex_data(index, data) }
     }
 
@@ -158,14 +182,17 @@ impl SslCredentialBuilder {
         M: PrivateKeyMethod,
     {
         unsafe {
-            self.replace_ex_data(SslCredential::cached_ex_index::<M>(), method);
+            self.replace_ex_data(
+                SslCredential::cached_ex_index::<Arc<M>>()?,
+                Arc::new(method),
+            )?;
 
             cvt_0i(ffi::SSL_CREDENTIAL_set_private_key_method(
                 self.0.as_ptr(),
                 &ffi::SSL_PRIVATE_KEY_METHOD {
-                    sign: Some(callbacks::raw_sign::<M>),
-                    decrypt: Some(callbacks::raw_decrypt::<M>),
-                    complete: Some(callbacks::raw_complete::<M>),
+                    sign: Some(callbacks::raw_sign::<M, true>),
+                    decrypt: Some(callbacks::raw_decrypt::<M, true>),
+                    complete: Some(callbacks::raw_complete::<M, true>),
                 },
             ))
             .map(|_| ())
@@ -207,7 +234,8 @@ impl SslCredentialBuilder {
 }
 
 unsafe fn get_new_ssl_credential_idx(f: ffi::CRYPTO_EX_free) -> c_int {
-    ffi::SSL_CREDENTIAL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f)
+    // SAFETY: the free callback matches the type attached to the new slot.
+    unsafe { ffi::SSL_CREDENTIAL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 
 #[cfg(all(test, feature = "rpk"))]

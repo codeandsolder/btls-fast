@@ -108,6 +108,26 @@ impl<T> ToOwned for RsaRef<T> {
     }
 }
 
+// Each capability-specific entry point delegates to the same bounds-checked
+// transform. The caller selects only operations supported by its key type.
+macro_rules! rsa_transform {
+    ($(#[$meta:meta])* $name:ident, $native:path) => {
+        $(#[$meta])*
+        ///
+        /// # Errors
+        ///
+        /// The input is invalid, the padding is unsupported, or the output is too small.
+        pub fn $name(
+            &self,
+            from: &[u8],
+            to: &mut [u8],
+            padding: Padding,
+        ) -> Result<usize, ErrorStack> {
+            self.transform(from, to, padding, $native)
+        }
+    };
+}
+
 impl<T: HasPublic> RsaRef<T> {
     fn transform(
         &self,
@@ -168,32 +188,14 @@ where
         ffi::i2d_RSAPrivateKey
     }
 
-    /// Decrypts data using the private key, returning the number of output bytes.
-    ///
-    /// # Errors
-    ///
-    /// The input is invalid, the padding is unsupported, or the output is too small.
-    pub fn private_decrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        self.transform(from, to, padding, ffi::RSA_private_decrypt)
+    rsa_transform! {
+        /// Decrypts data using the private key, returning the number of output bytes.
+        private_decrypt, ffi::RSA_private_decrypt
     }
 
-    /// Encrypts data using the private key, returning the number of output bytes.
-    ///
-    /// # Errors
-    ///
-    /// The input is invalid, the padding is unsupported, or the output is too small.
-    pub fn private_encrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        self.transform(from, to, padding, ffi::RSA_private_encrypt)
+    rsa_transform! {
+        /// Encrypts data using the private key, returning the number of output bytes.
+        private_encrypt, ffi::RSA_private_encrypt
     }
 
     /// Returns a reference to the private exponent of the key.
@@ -339,32 +341,14 @@ where
         unsafe { ffi::RSA_size(self.as_ptr()) }
     }
 
-    /// Decrypts data using the public key, returning the number of output bytes.
-    ///
-    /// # Errors
-    ///
-    /// The input is invalid, the padding is unsupported, or the output is too small.
-    pub fn public_decrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        self.transform(from, to, padding, ffi::RSA_public_decrypt)
+    rsa_transform! {
+        /// Decrypts data using the public key, returning the number of output bytes.
+        public_decrypt, ffi::RSA_public_decrypt
     }
 
-    /// Encrypts data using the public key, returning the number of output bytes.
-    ///
-    /// # Errors
-    ///
-    /// The input is invalid, the padding is unsupported, or the output is too small.
-    pub fn public_encrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        self.transform(from, to, padding, ffi::RSA_public_encrypt)
+    rsa_transform! {
+        /// Encrypts data using the public key, returning the number of output bytes.
+        public_encrypt, ffi::RSA_public_encrypt
     }
 
     /// Returns a reference to the modulus of the key.
