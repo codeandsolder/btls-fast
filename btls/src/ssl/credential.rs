@@ -1,7 +1,7 @@
 #[cfg(feature = "rpk")]
 use crate::cvt_p;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::{Index, IndexRegistry};
 use crate::pkey::{PKeyRef, Private};
 use crate::ssl::callbacks;
 use crate::ssl::PrivateKeyMethod;
@@ -9,14 +9,12 @@ use crate::{cvt_0i, cvt_n};
 use crate::{ffi, free_data_box};
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
-use std::any::TypeId;
-use std::collections::HashMap;
 use std::ffi::c_int;
 use std::ptr;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
-static SSL_CREDENTIAL_INDEXES: LazyLock<Mutex<HashMap<TypeId, c_int>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static SSL_CREDENTIAL_INDEXES: LazyLock<IndexRegistry<SslCredential, ()>> =
+    LazyLock::new(IndexRegistry::new);
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::SSL_CREDENTIAL;
@@ -54,29 +52,13 @@ impl SslCredential {
         }
     }
 
-    pub(crate) fn cached_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
-    where
-        T: 'static + Sync + Send,
+    pub(super) fn register_callback<T: 'static + Send + Sync>() -> Result<Index<Self, T>, ErrorStack>
     {
-        use std::collections::hash_map::Entry;
-        let mut indexes = SSL_CREDENTIAL_INDEXES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let idx = match indexes.entry(TypeId::of::<T>()) {
-            Entry::Occupied(entry) => *entry.get(),
-            Entry::Vacant(entry) => *entry.insert(Self::new_ex_index::<T>()?.as_raw()),
-        };
-        // SAFETY: each type ID is associated only with an index allocated for T.
-        Ok(unsafe { Index::from_raw(idx) })
+        SSL_CREDENTIAL_INDEXES.register((), Self::new_ex_index)
     }
 
-    pub(crate) fn registered_ex_index<T: 'static>() -> Option<Index<Self, T>> {
-        let indexes = SSL_CREDENTIAL_INDEXES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let &idx = indexes.get(&TypeId::of::<T>())?;
-        // SAFETY: only cached_ex_index can insert a slot for T.
-        Some(unsafe { Index::from_raw(idx) })
+    pub(super) fn registered_ex_index<T: 'static + Send + Sync>() -> Option<Index<Self, T>> {
+        SSL_CREDENTIAL_INDEXES.get(())
     }
 }
 
@@ -159,7 +141,7 @@ impl SslCredentialBuilder {
     {
         unsafe {
             self.replace_ex_data(
-                SslCredential::cached_ex_index::<Arc<M>>()?,
+                SslCredential::register_callback::<Arc<M>>()?,
                 Arc::new(method),
             )?;
 

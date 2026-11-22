@@ -45,11 +45,14 @@ fn resume_session() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-        // The server sends multiple session tickets but we only care to retrieve one.
-        let _ = SESSION_TICKET.set(session);
-    });
+    client
+        .ctx()
+        .set_new_session_callback(|_, session| {
+            NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
+            // The server sends multiple session tickets but we only care to retrieve one.
+            let _ = SESSION_TICKET.set(session);
+        })
+        .unwrap();
     let ssl_stream = client.connect();
 
     assert!(!ssl_stream.ssl().session_reused());
@@ -107,10 +110,14 @@ fn client_session_cache_apis() {
         .set_custom_verify_callback(SslVerifyMode::PEER, move |_| {
             callback_verify_count.fetch_add(1, Ordering::SeqCst);
             Ok::<_, SslVerifyError>(())
-        });
-    client.ctx().set_new_session_callback(move |_, session| {
-        callback_sessions.lock().unwrap().push(session);
-    });
+        })
+        .unwrap();
+    client
+        .ctx()
+        .set_new_session_callback(move |_, session| {
+            callback_sessions.lock().unwrap().push(session);
+        })
+        .unwrap();
     let client = client.build();
 
     let first = client.builder().connect();
@@ -152,9 +159,11 @@ fn client_session_resumes_within_scope_and_domain() {
         connector.set_ca_file("test/root-ca.pem").unwrap();
         connector.set_session_id_context(scope).unwrap();
         let sessions = sessions.clone();
-        connector.set_client_session_callback(move |_, session| {
-            sessions.lock().unwrap().push(session);
-        });
+        connector
+            .set_client_session_callback(move |_, session| {
+                sessions.lock().unwrap().push(session);
+            })
+            .unwrap();
         connector.build()
     };
     let issue = |connector: &SslConnector, configure: fn(&mut ConnectConfiguration)| {
@@ -267,7 +276,9 @@ fn client_session_is_not_offered_after_its_chain_expires() {
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_ca_file("test/root-ca.pem").unwrap();
     let issued = sessions.clone();
-    connector.set_client_session_callback(move |_, session| issued.lock().unwrap().push(session));
+    connector
+        .set_client_session_callback(move |_, session| issued.lock().unwrap().push(session))
+        .unwrap();
     let connector = connector.build();
 
     // Verified as of a time inside the validity period.
@@ -302,7 +313,8 @@ fn custom_callback_success() {
     unsafe {
         server
             .ctx()
-            .set_ticket_key_callback(test_success_tickey_key_callback);
+            .set_ticket_key_callback(test_success_tickey_key_callback)
+            .unwrap();
     };
     let server = server.build();
 
@@ -310,11 +322,14 @@ fn custom_callback_success() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-        // The server sends multiple session tickets but we only care to retrieve one.
-        let _ = SESSION_TICKET.set(session);
-    });
+    client
+        .ctx()
+        .set_new_session_callback(|_, session| {
+            NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
+            // The server sends multiple session tickets but we only care to retrieve one.
+            let _ = SESSION_TICKET.set(session);
+        })
+        .unwrap();
     let ssl_stream = client.connect();
 
     assert!(!ssl_stream.ssl().session_reused());
@@ -347,7 +362,8 @@ fn custom_callback_unrecognized_decryption_ticket() {
     unsafe {
         server
             .ctx()
-            .set_ticket_key_callback(test_noop_tickey_key_callback);
+            .set_ticket_key_callback(test_noop_tickey_key_callback)
+            .unwrap();
     };
     let server = server.build();
 
@@ -355,11 +371,14 @@ fn custom_callback_unrecognized_decryption_ticket() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-        // The server sends multiple session tickets but we only care to retrieve one.
-        let _ = SESSION_TICKET.set(session);
-    });
+    client
+        .ctx()
+        .set_new_session_callback(|_, session| {
+            NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
+            // The server sends multiple session tickets but we only care to retrieve one.
+            let _ = SESSION_TICKET.set(session);
+        })
+        .unwrap();
     let ssl_stream = client.connect();
 
     assert!(!ssl_stream.ssl().session_reused());

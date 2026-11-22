@@ -2,11 +2,10 @@
 
 use super::connector::{CLIENT_SESSION_INDEX, SESSION_PEER_INDEX};
 use super::{
-    AlpnError, CertificateCompressor, ClientHello, ClientSession, GetSessionPendingError,
-    PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction, SelectCertError, SniError, Ssl,
-    SslAlert, SslContext, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
+    AlpnError, CallbackRole, CertificateCompressor, ClientHello, ClientSession,
+    GetSessionPendingError, PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction,
+    SelectCertError, SniError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
     SslInfoCallbackValue, SslRef, SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
-    SESSION_CTX_INDEX,
 };
 use crate::error::ErrorStack;
 use crate::ffi;
@@ -32,10 +31,14 @@ where
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
-    let Some(ssl_context) = ctx.ssl().map(|ssl| ssl.ssl_context().to_owned()) else {
+    let Some(ssl_context) = ctx
+        .ssl()
+        .and_then(SslRef::session_context)
+        .map(ToOwned::to_owned)
+    else {
         return 0;
     };
-    let Some(verify) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+    let Some(verify) = ssl_context.callback::<F>(CallbackRole::Verify) else {
         return 0;
     };
     catch_native(|| c_int::from(verify(preverify_ok != 0, ctx))).unwrap_or(0)
@@ -49,13 +52,13 @@ where
     F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
 {
     let callback = |ssl: &mut SslRef| {
-        let custom_verify_idx = SslContext::cached_ex_index::<F>();
-
-        let ssl_context = ssl.ssl_context().to_owned();
-        let callback = ssl_context
-            .ex_data(custom_verify_idx)
-            .expect("BUG: custom verify callback missing");
-
+        let context = ssl
+            .session_context()
+            .map(ToOwned::to_owned)
+            .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
+        let callback = context
+            .callback::<F>(CallbackRole::CustomVerify)
+            .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
         callback(ssl)
     };
 
@@ -75,7 +78,7 @@ where
     let Some(ssl_context) = ctx.ssl().map(|ssl| ssl.ssl_context().to_owned()) else {
         return 0;
     };
-    let Some(verify) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+    let Some(verify) = ssl_context.callback::<F>(CallbackRole::CertVerify) else {
         return 0;
     };
     catch_native(|| c_int::from(verify(ctx))).unwrap_or(0)
@@ -90,9 +93,9 @@ where
 {
     let callback = |ssl: &mut SslRef| {
         let callback = ssl
-            .ex_data(Ssl::cached_ex_index::<Arc<F>>())
-            .expect("BUG: ssl verify callback missing")
-            .clone();
+            .callback::<Arc<F>>(CallbackRole::CustomVerify)
+            .cloned()
+            .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
 
         callback(ssl)
     };
@@ -198,8 +201,10 @@ where
         return 0;
     }
     psk_result(psk_capacity, || {
-        let context = ssl.ssl_context().to_owned();
-        let Some(callback) = context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
+            return Ok(0);
+        };
+        let Some(callback) = context.callback::<F>(CallbackRole::PskClient) else {
             return Ok(0);
         };
         let len = callback(ssl, hint, identity, psk)?;
@@ -238,8 +243,10 @@ where
         return 0;
     };
     psk_result(capacity, || {
-        let context = ssl.ssl_context().to_owned();
-        let Some(callback) = context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
+            return Ok(0);
+        };
+        let Some(callback) = context.callback::<F>(CallbackRole::PskServer) else {
             return Ok(0);
         };
         callback(ssl, identity, psk)
@@ -258,7 +265,7 @@ where
 
     let Some(callback) = ctx
         .ssl()
-        .and_then(|ssl| ssl.ex_data(Ssl::cached_ex_index::<Arc<F>>()).cloned())
+        .and_then(|ssl| ssl.callback::<Arc<F>>(CallbackRole::Verify).cloned())
     else {
         return 0;
     };
@@ -363,8 +370,8 @@ where
     // even if SNI has switched the connection's current context.
     let result = catch_native(|| {
         let Some(callback) = ssl
-            .ex_data(*SESSION_CTX_INDEX)
-            .and_then(|ctx| ctx.ex_data(SslContext::cached_ex_index::<F>()))
+            .session_context()
+            .and_then(|ctx| ctx.callback::<F>(CallbackRole::TicketKey))
         else {
             return TicketKeyCallbackResult::Error;
         };
@@ -402,7 +409,7 @@ where
     };
     let result = catch_native(|| {
         let context = ssl.ssl_context().to_owned();
-        let Some(callback) = context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        let Some(callback) = context.callback::<F>(CallbackRole::Alpn) else {
             return Err(AlpnError::ALERT_FATAL);
         };
         let selected = callback(ssl, protos)?;
@@ -454,7 +461,7 @@ where
 
     let ssl_context = client_hello.ssl().ssl_context().to_owned();
     let result = catch_native(|| {
-        let Some(callback) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        let Some(callback) = ssl_context.callback::<F>(CallbackRole::SelectCert) else {
             return Err(SelectCertError(
                 ffi::ssl_select_cert_result_t::ssl_select_cert_error,
             ));
@@ -482,7 +489,7 @@ where
 
     let ssl_context = ssl.ssl_context().to_owned();
     let ret = catch_native(|| {
-        let Some(callback) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        let Some(callback) = ssl_context.callback::<F>(CallbackRole::Status) else {
             return Err(ErrorStack::internal_error_str("missing OCSP callback"));
         };
         callback(ssl)
@@ -521,20 +528,12 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     let session = unsafe { SslSession::from_ptr(session) };
 
-    let callback = ssl
-        .ex_data(*SESSION_CTX_INDEX)
-        .expect("BUG: session context missing")
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: new session callback missing");
-
-    // SAFETY: We can make `callback` outlive `ssl` because it is a callback
-    // stored in the session context set in `Ssl::new` so it is always
-    // guaranteed to outlive the lifetime of this function's scope.
-    let callback = unsafe { &*ptr::from_ref::<F>(callback) };
-
-    callback(ssl, session);
-
-    // the return code doesn't indicate error vs success, but whether or not we consumed the session
+    if let Some(context) = ssl.session_context().map(ToOwned::to_owned) {
+        if let Some(callback) = context.callback::<F>(CallbackRole::NewSession) {
+            catch_native(|| callback(ssl, session));
+        }
+    }
+    // The Rust owner consumes the reference, even without a callback.
     1
 }
 
@@ -548,24 +547,17 @@ pub(super) unsafe extern "C" fn raw_client_session(
 
     // Sessions from connections not created by `ConnectConfiguration::into_ssl` have no recorded
     // peer and are dropped.
-    let Some(peer) = ssl.ex_data(*SESSION_PEER_INDEX).cloned() else {
+    let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() else {
         return 1;
     };
-    let Some(callback) = ssl
-        .ex_data(*SESSION_CTX_INDEX)
-        .and_then(|context| context.ex_data(*CLIENT_SESSION_INDEX))
-    else {
+    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
+        return 1;
+    };
+    let Some(callback) = context.slot_data(&CLIENT_SESSION_INDEX) else {
         return 1;
     };
     let session = ClientSession::new(session, peer, ssl);
-
-    // SAFETY: The callback is stored in the session context set in `Ssl::new`, which outlives
-    // this function's scope.
-    let callback = unsafe { &*std::ptr::from_ref(callback) };
-
-    (callback.callback)(ssl, session);
-
-    // The return value only reports that the session reference was consumed.
+    catch_native(|| (callback.callback)(ssl, session));
     1
 }
 
@@ -579,11 +571,11 @@ pub(super) unsafe extern "C" fn raw_remove_session<F>(
     let ctx = unsafe { SslContextRef::from_ptr(ctx) };
     let session = unsafe { SslSessionRef::from_ptr(session) };
 
-    let callback = ctx
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: remove session callback missing");
+    let Some(callback) = ctx.callback::<F>(CallbackRole::RemoveSession) else {
+        return;
+    };
 
-    callback(ctx, session);
+    catch_native(|| callback(ctx, session));
 }
 
 type DataPtr = *const c_uchar;
@@ -600,32 +592,31 @@ where
         + Sync
         + Send,
 {
-    // SAFETY: btls provides valid inputs.
+    let Ok(len) = usize::try_from(len) else {
+        return ptr::null_mut();
+    };
+    if ssl.is_null() || copy.is_null() {
+        return ptr::null_mut();
+    }
+    // SAFETY: native supplies the session ID and exclusively borrowed SSL.
+    let Some(data) = (unsafe { native_input(data, len) }) else {
+        return ptr::null_mut();
+    };
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let data = unsafe { slice::from_raw_parts(data, len as usize) };
-    let copy = unsafe { &mut *copy };
-
-    let callback = ssl
-        .ex_data(*SESSION_CTX_INDEX)
-        .expect("BUG: session context missing")
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: get session callback missing");
-
-    // SAFETY: We can make `callback` outlive `ssl` because it is a callback
-    // stored in the session context set in `Ssl::new` so it is always
-    // guaranteed to outlive the lifetime of this function's scope.
-    let callback = unsafe { &*ptr::from_ref::<F>(callback) };
-
-    match callback(ssl, data) {
-        Ok(Some(session)) => {
-            let p = session.into_ptr();
-
-            *copy = 0;
-
-            p
+    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
+        return ptr::null_mut();
+    };
+    let Some(callback) = context.callback::<F>(CallbackRole::GetSession) else {
+        return ptr::null_mut();
+    };
+    match catch_native(|| callback(ssl, data)) {
+        Some(Ok(Some(session))) => {
+            // SAFETY: native supplies writable storage; transfer the owned reference.
+            unsafe { copy.write(0) };
+            session.into_ptr()
         }
-        Ok(None) => ptr::null_mut(),
-        Err(GetSessionPendingError) => unsafe { ffi::SSL_magic_pending_session_ptr() },
+        Some(Err(GetSessionPendingError)) => unsafe { ffi::SSL_magic_pending_session_ptr() },
+        _ => ptr::null_mut(),
     }
 }
 
@@ -637,12 +628,11 @@ where
     let ssl = unsafe { SslRef::from_ptr(ssl.cast_mut()) };
     let line = unsafe { CStr::from_ptr(line).to_string_lossy() };
 
-    let callback = ssl
-        .ssl_context()
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: get session callback missing");
+    let Some(callback) = ssl.ssl_context().callback::<F>(CallbackRole::Keylog) else {
+        return;
+    };
 
-    callback(ssl, &line);
+    catch_native(|| callback(ssl, &line));
 }
 
 // The caller must ensure that nonempty input points to readable bytes for
@@ -777,7 +767,7 @@ where
             }
         } else {
             ssl.ssl_context()
-                .ex_data(SslContext::cached_ex_index::<Arc<M>>())
+                .callback::<Arc<M>>(CallbackRole::PrivateKey)
                 .cloned()
         };
         Some(callback(method.as_deref()?, ssl, output))
@@ -810,9 +800,9 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
     let ssl = unsafe { SslRef::from_ptr(mut_ref) };
     let ssl_context = ssl.ssl_context();
 
-    let callback = ssl_context
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: info callback missing");
+    let Some(callback) = ssl_context.callback::<F>(CallbackRole::Info) else {
+        return;
+    };
 
     let value = match mode {
         ffi::SSL_CB_READ_ALERT | ffi::SSL_CB_WRITE_ALERT => {
@@ -821,7 +811,7 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
         _ => SslInfoCallbackValue::Unit,
     };
 
-    callback(ssl, SslInfoCallbackMode(mode), value);
+    catch_native(|| callback(ssl, SslInfoCallbackMode(mode), value));
 }
 
 pub(super) unsafe extern "C" fn raw_ssl_cert_compress<C>(
@@ -841,13 +831,18 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context();
-    let compressor = ssl_context
-        .ex_data(SslContext::cached_ex_index::<C>())
-        .expect("BUG: certificate compression missed");
+    let Some(compressor) = ssl_context
+        .callback::<Option<C>>(CallbackRole::Compression)
+        .and_then(Option::as_ref)
+    else {
+        return 0;
+    };
 
-    let input_slice = unsafe { slice::from_raw_parts(input, input_len) };
+    let Some(input_slice) = (unsafe { native_input(input, input_len) }) else {
+        return 0;
+    };
     let mut writer = CryptoByteBuilder::from_ptr(out);
-    if compressor.compress(input_slice, &mut writer).is_err() {
+    if !catch_native(|| compressor.compress(input_slice, &mut writer).is_ok()).unwrap_or(false) {
         return 0;
     }
 
@@ -872,19 +867,27 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context();
-    let compressor = ssl_context
-        .ex_data(SslContext::cached_ex_index::<C>())
-        .expect("BUG: certificate compression missed");
+    let Some(compressor) = ssl_context
+        .callback::<Option<C>>(CallbackRole::Compression)
+        .and_then(Option::as_ref)
+    else {
+        return 0;
+    };
 
     let Ok(mut decompression_buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
         return 0;
     };
 
-    let input_slice = unsafe { slice::from_raw_parts(input, input_len) };
+    let Some(input_slice) = (unsafe { native_input(input, input_len) }) else {
+        return 0;
+    };
 
-    if compressor
-        .decompress(input_slice, decompression_buffer.as_writer())
-        .is_err()
+    if !catch_native(|| {
+        compressor
+            .decompress(input_slice, decompression_buffer.as_writer())
+            .is_ok()
+    })
+    .unwrap_or(false)
     {
         return 0;
     }
@@ -893,7 +896,7 @@ where
         return 0;
     };
 
-    unsafe { *out = crypto_buffer };
+    unsafe { out.write(crypto_buffer) };
     1
 }
 

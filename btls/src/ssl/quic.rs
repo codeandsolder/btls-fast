@@ -109,9 +109,16 @@ impl SslContextBuilder {
     /// callbacks look `method` up in its current context. A context switched in during the
     /// handshake, such as by [`SslRef::set_ssl_context`], must therefore hold a method of the
     /// same type, or the handshake fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if callback storage cannot be allocated or the native QUIC method cannot be installed.
     #[corresponds(SSL_CTX_set_quic_method)]
     pub fn set_quic_method<M: QuicMethod>(&mut self, method: M) -> Result<(), ErrorStack> {
-        self.replace_ex_data(SslContext::cached_ex_index::<M>(), method);
+        self.set_ex_data(
+            SslContext::register_callback::<M>(super::CallbackRole::Quic)?,
+            method,
+        )?;
         // A promoted constant, so the table lives for the whole program.
         let table: &'static ffi::SSL_QUIC_METHOD = &QuicMethodTable::<M>::METHOD;
         unsafe { cvt(ffi::SSL_CTX_set_quic_method(self.as_ptr(), table)) }
@@ -312,10 +319,12 @@ fn with_method<M: QuicMethod>(
     // SAFETY: BoringSSL passes the callbacks the `SSL` they run for.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     let ssl_context = ssl.ssl_context().to_owned();
-    let Some(method) = ssl_context.ex_data(SslContext::cached_ex_index::<M>()) else {
+    let Some(method) = ssl_context.callback::<M>(super::CallbackRole::Quic) else {
         return 0;
     };
-    f(method, ssl).is_ok().into()
+    crate::util::catch_native(|| f(method, ssl).is_ok())
+        .unwrap_or(false)
+        .into()
 }
 
 /// Pushes `SSL_R_QUIC_INTERNAL_ERROR` for a failed secret callback. BoringSSL does so for the

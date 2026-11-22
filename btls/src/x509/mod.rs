@@ -20,7 +20,6 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::ptr;
 use std::str;
-use std::sync::LazyLock;
 
 use crate::asn1::{
     Asn1BitStringRef, Asn1IntegerRef, Asn1Object, Asn1ObjectRef, Asn1StringRef, Asn1TimeRef,
@@ -67,8 +66,8 @@ struct ContextInputs {
     chain: Stack<X509>,
 }
 
-static CONTEXT_INPUTS_INDEX: LazyLock<Result<Index<X509StoreContext, ContextInputs>, ErrorStack>> =
-    LazyLock::new(X509StoreContext::new_ex_index);
+static CONTEXT_INPUTS_INDEX: IndexSlot<X509StoreContext, ContextInputs> =
+    IndexSlot::new(X509StoreContext::new_ex_index);
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::X509_STORE_CTX;
@@ -249,7 +248,7 @@ impl X509StoreContext {
         cert_chain: Stack<X509>,
     ) -> Result<(), ErrorStack> {
         // Allocate the typed slot and owner before modifying native context.
-        let index = *CONTEXT_INPUTS_INDEX.as_ref().map_err(Clone::clone)?;
+        let index = CONTEXT_INPUTS_INDEX.register()?;
         let inputs = Box::new(ContextInputs {
             trust,
             cert,

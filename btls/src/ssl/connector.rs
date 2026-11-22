@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreign_types::ForeignTypeRef;
@@ -9,7 +9,7 @@ use openssl_macros::corresponds;
 
 use crate::dh::Dh;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::IndexSlot;
 use crate::ffi;
 use crate::ssl::{
     HandshakeError, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod, SslMode,
@@ -20,12 +20,12 @@ use crate::x509::{X509Ref, X509};
 use std::net::IpAddr;
 
 use super::callbacks::raw_client_session;
-use super::{MidHandshakeSslStream, SESSION_CTX_INDEX};
+use super::MidHandshakeSslStream;
 
-pub(super) static CLIENT_SESSION_INDEX: LazyLock<Index<SslContext, ClientSessionCallback>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
-pub(super) static SESSION_PEER_INDEX: LazyLock<Index<Ssl, SessionPeer>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
+pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
+    IndexSlot::new(Ssl::new_ex_index);
 static NEXT_ISSUER: AtomicU64 = AtomicU64::new(1);
 
 const FFDHE_2048: &str = "
@@ -164,8 +164,12 @@ impl SslConnectorBuilder {
     /// Client session caching is enabled. Only connections created by
     /// [`ConnectConfiguration::into_ssl`] report sessions. This shares BoringSSL's new session
     /// callback with [`SslContextBuilder::set_new_session_callback`]; the last one set wins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_new_cb)]
-    pub fn set_client_session_callback<F>(&mut self, callback: F)
+    pub fn set_client_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, ClientSession) + 'static + Sync + Send,
     {
@@ -173,13 +177,14 @@ impl SslConnectorBuilder {
             issuer: NEXT_ISSUER.fetch_add(1, Ordering::Relaxed),
             callback: Box::new(callback),
         };
-        self.replace_ex_data(*CLIENT_SESSION_INDEX, callback);
+        self.set_ex_data(CLIENT_SESSION_INDEX.register()?, callback)?;
         unsafe {
             let mode =
                 ffi::SSL_CTX_get_session_cache_mode(self.as_ptr()) | ffi::SSL_SESS_CACHE_CLIENT;
             ffi::SSL_CTX_set_session_cache_mode(self.as_ptr(), mode);
             ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(raw_client_session));
         }
+        Ok(())
     }
 }
 
@@ -326,7 +331,7 @@ where
 /// Returns the token of the client session callback installed on `context`.
 fn issuer(context: &SslContextRef) -> Option<u64> {
     context
-        .ex_data(*CLIENT_SESSION_INDEX)
+        .slot_data(&CLIENT_SESSION_INDEX)
         .map(|callback| callback.issuer)
 }
 
@@ -402,15 +407,15 @@ impl ConnectConfiguration {
 
         let reports_sessions = self
             .ssl
-            .ex_data(*SESSION_CTX_INDEX)
-            .is_some_and(|context| context.ex_data(*CLIENT_SESSION_INDEX).is_some());
+            .session_context()
+            .is_some_and(|context| context.slot_data(&CLIENT_SESSION_INDEX).is_some());
         if reports_sessions {
             let peer = SessionPeer {
                 domain: domain.into(),
                 sni,
                 verify_hostname: self.verify_hostname,
             };
-            self.ssl.set_ex_data(*SESSION_PEER_INDEX, peer);
+            self.ssl.set_ex_data(SESSION_PEER_INDEX.register()?, peer)?;
         }
 
         if let Some(session) = self

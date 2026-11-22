@@ -15,7 +15,8 @@ fn handshake(request: Option<u16>, server_enabled: bool) -> (Option<Vec<u8>>, bo
                 .map(ToOwned::to_owned);
             captured_tx.send(extension).unwrap();
             Ok(())
-        });
+        })
+        .unwrap();
     server.ssl_cb(move |ssl| ssl.set_server_padding_enabled(server_enabled));
     let server = server.build();
 

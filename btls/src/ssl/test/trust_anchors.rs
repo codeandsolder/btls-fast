@@ -44,7 +44,8 @@ fn capture_trust_anchors_extension(config: RequestConfig<'_>) -> Option<Vec<u8>>
                 .map(ToOwned::to_owned);
             captured_tx.send(extension).unwrap();
             Ok(())
-        });
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client();
@@ -166,7 +167,8 @@ fn peer_available_trust_anchors_for_retry() {
             );
             seen_tx.send(seen).unwrap();
             Ok(())
-        });
+        })
+        .unwrap();
     client.connect();
 
     assert_eq!(seen_rx.recv().unwrap(), (false, CONTEXT_IDS.to_vec()));

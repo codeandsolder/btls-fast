@@ -59,8 +59,6 @@
 //! ```
 use foreign_types::{ForeignType, ForeignTypeRef, Opaque};
 use openssl_macros::corresponds;
-use std::any::TypeId;
-use std::collections::HashMap;
 use std::convert::TryInto;
 use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 use std::ffi::{CStr, CString};
@@ -75,12 +73,12 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::slice;
 use std::str;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use crate::dh::DhRef;
 use crate::ec::EcKeyRef;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::{replace_boxed, Index, IndexRegistry, IndexSlot};
 use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
@@ -298,9 +296,8 @@ impl SslMethod {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
     #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub unsafe fn tls_with_buffer() -> Self {
         unsafe {
@@ -345,9 +342,8 @@ impl SslMethod {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
     pub const unsafe fn assume_x509(&mut self) {
         self.is_x509_method = true;
     }
@@ -518,24 +514,46 @@ impl NameType {
     }
 }
 
-static INDEXES: LazyLock<Mutex<HashMap<TypeId, c_int>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static SSL_INDEXES: LazyLock<Mutex<HashMap<TypeId, c_int>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static SESSION_CTX_INDEX: LazyLock<Index<Ssl, SslContext>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
-static X509_FLAG_INDEX: LazyLock<Index<SslContext, bool>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum CallbackRole {
+    CertVerify,
+    Verify,
+    CustomVerify,
+    ServerName,
+    TicketKey,
+    Alpn,
+    SelectCert,
+    Compression,
+    PrivateKey,
+    Status,
+    PskClient,
+    PskServer,
+    NewSession,
+    RemoveSession,
+    GetSession,
+    Keylog,
+    Info,
+    Quic,
+    EchGrease,
+}
+
+static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
+    LazyLock::new(IndexRegistry::new);
+static SSL_CALLBACKS: LazyLock<IndexRegistry<Ssl, CallbackRole>> =
+    LazyLock::new(IndexRegistry::new);
+
+static SESSION_CTX_INDEX: IndexSlot<Ssl, SslContext> = IndexSlot::new(Ssl::new_ex_index);
+static X509_FLAG_INDEX: IndexSlot<SslContext, bool> = IndexSlot::new(SslContext::new_ex_index);
 
 type CertVerifyFn = unsafe extern "C" fn(*mut ffi::X509_STORE_CTX, *mut c_void) -> c_int;
 
-// Verify stores and the cert verify trampoline, which BoringSSL cannot return.
-static VERIFY_STORE_INDEX: LazyLock<Index<SslContext, X509Store>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
-static SSL_VERIFY_STORE_INDEX: LazyLock<Index<Ssl, Option<X509Store>>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
-static CERT_VERIFY_INDEX: LazyLock<Index<SslContext, CertVerifyFn>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
+// Native getters are unavailable for these mirrored configuration values.
+static VERIFY_STORE_INDEX: IndexSlot<SslContext, Option<X509Store>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static SSL_VERIFY_STORE_INDEX: IndexSlot<Ssl, Option<X509Store>> =
+    IndexSlot::new(Ssl::new_ex_index);
+static CERT_VERIFY_INDEX: IndexSlot<SslContext, Option<CertVerifyFn>> =
+    IndexSlot::new(SslContext::new_ex_index);
 
 /// An error returned from the SNI callback.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1143,7 +1161,7 @@ impl SslContextBuilder {
             let mut builder = Self::from_ptr(ctx);
 
             if method.is_x509_method {
-                builder.ctx.assume_x509();
+                builder.ctx.assume_x509()?;
             }
 
             Ok(builder)
@@ -1172,13 +1190,10 @@ impl SslContextBuilder {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
-    pub unsafe fn assume_x509(&mut self) {
-        unsafe {
-            self.ctx.assume_x509();
-        }
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
+    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
+        unsafe { self.ctx.assume_x509() }
     }
 
     /// Returns a pointer to the raw OpenSSL value.
@@ -1206,21 +1221,24 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `SslContext` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_cert_verify_callback)]
-    pub fn set_cert_verify_callback<F>(&mut self, callback: F)
+    pub fn set_cert_verify_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
         self.ctx.check_x509();
 
-        // NOTE(jlarisch): Q: Why don't we wrap the callback in an Arc, since
-        // `set_verify_callback` does?
-        // A: I don't think that Arc is necessary, and I don't think one is necessary here.
-        // There's no way to get a mutable reference to the `Ssl` or `SslContext`, which
-        // is what you need to register a new callback.
-        // See the NOTE in `ssl_raw_verify` for confirmation.
-        self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
-        self.replace_ex_data(*CERT_VERIFY_INDEX, raw_cert_verify::<F> as CertVerifyFn);
+        let target = self.ensure_slot(&CERT_VERIFY_INDEX)?;
+        self.set_ex_data(
+            SslContext::register_callback::<F>(CallbackRole::CertVerify)?,
+            callback,
+        )?;
+        self.set_ex_data(target, Some(raw_cert_verify::<F> as CertVerifyFn))?;
+        // SAFETY: both registered native callback slots are initialized.
         unsafe {
             ffi::SSL_CTX_set_cert_verify_callback(
                 self.as_ptr(),
@@ -1228,6 +1246,7 @@ impl SslContextBuilder {
                 ptr::null_mut(),
             );
         }
+        Ok(())
     }
 
     /// Configures the certificate verification method for new connections.
@@ -1266,21 +1285,33 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_verify)]
-    pub fn set_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
         self.ctx.check_x509();
 
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Verify)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(raw_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Configures certificate verification.
@@ -1297,19 +1328,31 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_custom_verify)]
-    pub fn set_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_custom_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::CustomVerify)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_custom_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(raw_custom_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Configures whether resumed client sessions use the custom verification callback.
@@ -1331,8 +1374,12 @@ impl SslContextBuilder {
     /// with `set_ssl_context`
     ///
     // FIXME tlsext prefix?
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_tlsext_servername_callback)]
-    pub fn set_servername_callback<F>(&mut self, callback: F)
+    pub fn set_servername_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + 'static + Sync + Send,
     {
@@ -1343,15 +1390,22 @@ impl SslContextBuilder {
             // context's ex data. Instead, pass the pointer directly as the servername arg. It's
             // still stored in ex data to manage the lifetime.
 
-            let callback_index = SslContext::cached_ex_index::<F>();
+            let callback_index = SslContext::register_callback::<F>(CallbackRole::ServerName)?;
 
-            self.ctx.replace_ex_data(callback_index, callback);
-            let callback = self.ctx.ex_data(callback_index).unwrap();
+            self.ctx.replace_ex_data(callback_index, callback)?;
+            let callback = self
+                .ctx
+                .ex_data(callback_index)
+                .ok_or_else(|| ErrorStack::internal_error_str("missing SNI callback"))?;
 
             let arg = ptr::from_ref(callback).cast_mut().cast();
-            ffi::SSL_CTX_set_tlsext_servername_arg(self.as_ptr(), arg);
-            ffi::SSL_CTX_set_tlsext_servername_callback(self.as_ptr(), Some(raw_sni::<F>));
+            cvt(ffi::SSL_CTX_set_tlsext_servername_arg(self.as_ptr(), arg))?;
+            cvt(ffi::SSL_CTX_set_tlsext_servername_callback(
+                self.as_ptr(),
+                Some(raw_sni::<F>),
+            ))?;
         }
+        Ok(())
     }
 
     /// Configures a custom session ticket key callback for session resumption.
@@ -1376,8 +1430,12 @@ impl SslContextBuilder {
     /// and hmac context. See the [`SSL_CTX_set_tlsext_ticket_key_cb`] docs for additional info.
     ///
     /// [`SSL_CTX_set_tlsext_ticket_key_cb`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_set_tlsext_ticket_key_cb
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_tlsext_ticket_key_cb)]
-    pub unsafe fn set_ticket_key_callback<F>(&mut self, callback: F)
+    pub unsafe fn set_ticket_key_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(
                 &SslRef,
@@ -1392,9 +1450,16 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
-            ffi::SSL_CTX_set_tlsext_ticket_key_cb(self.as_ptr(), Some(raw_ticket_key::<F>))
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::TicketKey)?,
+                callback,
+            )?;
+            cvt(ffi::SSL_CTX_set_tlsext_ticket_key_cb(
+                self.as_ptr(),
+                Some(raw_ticket_key::<F>),
+            ))?
         };
+        Ok(())
     }
 
     /// Sets the certificate verification depth.
@@ -1413,15 +1478,15 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_set1_verify_cert_store)]
     pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
-
+        let index = self.ensure_slot(&VERIFY_STORE_INDEX)?;
+        // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
             cvt(ffi::SSL_CTX_set1_verify_cert_store(
                 self.as_ptr(),
                 cert_store.as_ptr(),
-            ))?;
-        }
-        self.replace_ex_data(*VERIFY_STORE_INDEX, cert_store);
-        Ok(())
+            ))?
+        };
+        self.set_ex_data(index, Some(cert_store))
     }
 
     /// Replaces the context's certificate store, and keeps it immutable.
@@ -1848,19 +1913,27 @@ impl SslContextBuilder {
     ///
     /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos
     /// [`select_next_proto`]: fn.select_next_proto.html
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_alpn_select_cb)]
-    pub fn set_alpn_select_callback<F>(&mut self, callback: F)
+    pub fn set_alpn_select_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + 'static + Sync + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Alpn)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_alpn_select_cb(
                 self.as_ptr(),
                 Some(callbacks::raw_alpn_select::<F>),
                 ptr::null_mut(),
             );
         }
+        Ok(())
     }
 
     /// Sets a callback that is called before most ClientHello processing and before the decision whether
@@ -1872,14 +1945,18 @@ impl SslContextBuilder {
     /// [`SslContextBuilder::set_select_certificate_callback_with_action`],
     /// [`SslContextBuilder::set_async_select_certificate_callback`], or
     /// [`SslContextBuilder::set_async_select_certificate_callback_with_action`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_select_certificate_cb)]
-    pub fn set_select_certificate_callback<F>(&mut self, callback: F)
+    pub fn set_select_certificate_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(ClientHello<'_>) -> Result<(), SelectCertError> + Sync + Send + 'static,
     {
         self.set_select_certificate_callback_with_action(move |client_hello| {
             callback(client_hello).map(|()| SelectCertAction::Success)
-        });
+        })
     }
 
     /// Sets an action-aware callback that is called before most ClientHello processing and before
@@ -1895,23 +1972,38 @@ impl SslContextBuilder {
     /// [`SslContextBuilder::set_select_certificate_callback_with_action`],
     /// [`SslContextBuilder::set_async_select_certificate_callback`], or
     /// [`SslContextBuilder::set_async_select_certificate_callback_with_action`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_select_certificate_cb)]
-    pub fn set_select_certificate_callback_with_action<F>(&mut self, callback: F)
+    pub fn set_select_certificate_callback_with_action<F>(
+        &mut self,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(ClientHello<'_>) -> Result<SelectCertAction, SelectCertError> + Sync + Send + 'static,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::SelectCert)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_select_certificate_cb(
                 self.as_ptr(),
                 Some(callbacks::raw_select_cert::<F>),
             );
         }
+        Ok(())
     }
 
     /// Registers a certificate compression algorithm.
     ///
     /// [`SSL_CTX_add_cert_compression_alg`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_add_cert_compression_alg
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if callback storage cannot be allocated or the algorithm cannot be registered.
     #[corresponds(SSL_CTX_add_cert_compression_alg)]
     pub fn add_certificate_compression_algorithm<C>(
         &mut self,
@@ -1923,6 +2015,13 @@ impl SslContextBuilder {
         const {
             assert!(C::CAN_COMPRESS || C::CAN_DECOMPRESS, "Either compression or decompression must be supported for algorithm to be registered");
         };
+        let index = SslContext::register_callback::<Option<C>>(CallbackRole::Compression)?;
+        if self.ctx.ex_data(index).is_some_and(Option::is_some) {
+            return Err(ErrorStack::internal_error_str(
+                "compression algorithm already registered",
+            ));
+        }
+        self.set_ex_data(index, None)?;
         let success = unsafe {
             ffi::SSL_CTX_add_cert_compression_alg(
                 self.as_ptr(),
@@ -1946,20 +2045,26 @@ impl SslContextBuilder {
         if !success {
             return Err(ErrorStack::get());
         }
-        self.replace_ex_data(SslContext::cached_ex_index::<C>(), compressor);
-        Ok(())
+        self.set_ex_data(index, Some(compressor))
     }
 
     /// Configures a custom private key method on the context.
     ///
     /// See [`PrivateKeyMethod`] for more details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_private_key_method)]
-    pub fn set_private_key_method<M>(&mut self, method: M)
+    pub fn set_private_key_method<M>(&mut self, method: M) -> Result<(), ErrorStack>
     where
         M: PrivateKeyMethod,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<Arc<M>>(), Arc::new(method));
+            self.replace_ex_data(
+                SslContext::register_callback::<Arc<M>>(CallbackRole::PrivateKey)?,
+                Arc::new(method),
+            )?;
 
             ffi::SSL_CTX_set_private_key_method(
                 self.as_ptr(),
@@ -1970,6 +2075,7 @@ impl SslContextBuilder {
                 },
             );
         }
+        Ok(())
     }
 
     /// Checks for consistency between the private key and certificate.
@@ -2028,7 +2134,10 @@ impl SslContextBuilder {
         F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Status)?,
+                callback,
+            )?;
             cvt(ffi::SSL_CTX_set_tlsext_status_cb(
                 self.as_ptr(),
                 Some(raw_tlsext_status::<F>),
@@ -2041,8 +2150,12 @@ impl SslContextBuilder {
     /// The callback will be called with the SSL context, an identity hint if one was provided
     /// by the server, a mutable slice for each of the identity and pre-shared key bytes. The
     /// identity must be written as a null-terminated C string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_psk_client_callback)]
-    pub fn set_psk_client_callback<F>(&mut self, callback: F)
+    pub fn set_psk_client_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
             + 'static
@@ -2050,20 +2163,13 @@ impl SslContextBuilder {
             + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::PskClient)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_psk_client_callback(self.as_ptr(), Some(raw_client_psk::<F>));
         }
-    }
-
-    #[deprecated(since = "0.10.10", note = "renamed to `set_psk_client_callback`")]
-    pub fn set_psk_callback<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
-            + 'static
-            + Sync
-            + Send,
-    {
-        self.set_psk_client_callback(callback);
+        Ok(())
     }
 
     /// Sets the callback for providing an identity and pre-shared key for a TLS-PSK server.
@@ -2071,8 +2177,12 @@ impl SslContextBuilder {
     /// The callback will be called with the SSL context, an identity provided by the client,
     /// and, a mutable slice for the pre-shared key bytes. The callback returns the number of
     /// bytes in the pre-shared key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_psk_server_callback)]
-    pub fn set_psk_server_callback<F>(&mut self, callback: F)
+    pub fn set_psk_server_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8]) -> Result<usize, ErrorStack>
             + 'static
@@ -2080,9 +2190,13 @@ impl SslContextBuilder {
             + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::PskServer)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_psk_server_callback(self.as_ptr(), Some(raw_server_psk::<F>));
         }
+        Ok(())
     }
 
     /// Sets the callback which is called when new sessions are negotiated.
@@ -2099,32 +2213,48 @@ impl SslContextBuilder {
     ///
     /// [`SslRef::session`]: struct.SslRef.html#method.session
     /// [`set_session_cache_mode`]: #method.set_session_cache_mode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_new_cb)]
-    pub fn set_new_session_callback<F>(&mut self, callback: F)
+    pub fn set_new_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, SslSession) + 'static + Sync + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::NewSession)?,
+                callback,
+            )?;
             ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(callbacks::raw_new_session::<F>));
         }
+        Ok(())
     }
 
     /// Sets the callback which is called when sessions are removed from the context.
     ///
     /// Sessions can be removed because they have timed out or because they are considered faulty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_remove_cb)]
-    pub fn set_remove_session_callback<F>(&mut self, callback: F)
+    pub fn set_remove_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslContextRef, &SslSessionRef) + 'static + Sync + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::RemoveSession)?,
+                callback,
+            )?;
             ffi::SSL_CTX_sess_set_remove_cb(
                 self.as_ptr(),
                 Some(callbacks::raw_remove_session::<F>),
             );
         }
+        Ok(())
     }
 
     /// Sets the callback which is called when a client proposed to resume a session but it was not
@@ -2137,18 +2267,26 @@ impl SslContextBuilder {
     /// # Safety
     ///
     /// The returned [`SslSession`] must not be associated with a different [`SslContext`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_get_cb)]
-    pub unsafe fn set_get_session_callback<F>(&mut self, callback: F)
+    pub unsafe fn set_get_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError>
             + 'static
             + Sync
             + Send,
     {
-        self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+        self.replace_ex_data(
+            SslContext::register_callback::<F>(CallbackRole::GetSession)?,
+            callback,
+        )?;
         unsafe {
             ffi::SSL_CTX_sess_set_get_cb(self.as_ptr(), Some(callbacks::raw_get_session::<F>));
         }
+        Ok(())
     }
 
     /// Sets the TLS key logging callback.
@@ -2156,15 +2294,23 @@ impl SslContextBuilder {
     /// The callback is invoked whenever TLS key material is generated, and is passed a line of NSS
     /// SSLKEYLOGFILE-formatted text. This can be used by tools like Wireshark to decrypt message
     /// traffic. The line does not contain a trailing newline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_keylog_callback)]
-    pub fn set_keylog_callback<F>(&mut self, callback: F)
+    pub fn set_keylog_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslRef, &str) + 'static + Sync + Send,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Keylog)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_keylog_callback(self.as_ptr(), Some(callbacks::raw_keylog::<F>));
         }
+        Ok(())
     }
 
     /// Sets the session caching mode use for connections made with the context.
@@ -2187,26 +2333,44 @@ impl SslContextBuilder {
         unsafe { ffi::SSL_CTX_set_timeout(self.as_ptr(), timeout) }
     }
 
-    /// Sets the extra data at the specified index.
+    /// Sets or overwrites the extra data at the specified registered index.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `SslContext::new_ex_index` method to create an `Index`.
-    #[corresponds(SSL_CTX_set_ex_data)]
-    pub fn set_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) {
-        unsafe {
-            self.ctx.replace_ex_data(index, data);
-        }
+    /// # Errors
+    ///
+    /// The native context cannot allocate storage for this index.
+    pub fn set_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<SslContext, T>,
+        data: T,
+    ) -> Result<(), ErrorStack> {
+        drop(self.replace_ex_data(index, data)?);
+        Ok(())
     }
 
-    /// Sets or overwrites the extra data at the specified index.
+    /// Replaces the extra data, returning the previous owned value if any.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `SslContext::new_ex_index` method to create an `Index`.
+    /// # Errors
     ///
-    /// Any previous value will be returned and replaced by the new one.
+    /// The native context cannot allocate storage for this index.
     #[corresponds(SSL_CTX_set_ex_data)]
-    pub fn replace_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) -> Option<T> {
+    pub fn replace_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<SslContext, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        // SAFETY: the unpublished builder guarantees a uniquely owned context.
         unsafe { self.ctx.replace_ex_data(index, data) }
+    }
+
+    fn ensure_slot<T: 'static + Send + Sync>(
+        &mut self,
+        slot: &IndexSlot<SslContext, Option<T>>,
+    ) -> Result<Index<SslContext, Option<T>>, ErrorStack> {
+        let index = slot.register()?;
+        if self.ctx.ex_data(index).is_none() {
+            self.set_ex_data(index, None)?;
+        }
+        Ok(index)
     }
 
     /// Sets the context's session cache size limit, returning the previous limit.
@@ -2441,15 +2605,23 @@ impl SslContextBuilder {
     }
 
     /// Sets the context's info callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_info_callback)]
-    pub fn set_info_callback<F>(&mut self, callback: F)
+    pub fn set_info_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslRef, SslInfoCallbackMode, SslInfoCallbackValue) + Send + Sync + 'static,
     {
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Info)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_info_callback(self.as_ptr(), Some(callbacks::raw_info_callback::<F>));
         }
+        Ok(())
     }
 
     /// Registers a list of ECH keys on the context. This list should contain new and old
@@ -2556,19 +2728,10 @@ impl SslContext {
         }
     }
 
-    // FIXME should return a result?
-    fn cached_ex_index<T>() -> Index<Self, T>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            let idx = *INDEXES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Self::new_ex_index::<T>().unwrap().as_raw());
-            Index::from_raw(idx)
-        }
+    fn register_callback<T: 'static + Send + Sync>(
+        role: CallbackRole,
+    ) -> Result<Index<Self, T>, ErrorStack> {
+        CONTEXT_CALLBACKS.register(role, Self::new_ex_index)
     }
 
     /// Gets the list of supported ciphers for protocols before TLSv1.3.
@@ -2642,53 +2805,39 @@ impl SslContextRef {
         }
     }
 
-    /// Returns a reference to the extra data at the specified index.
+    /// Returns a reference to the extra data at the registered index.
     #[corresponds(SSL_CTX_get_ex_data)]
     #[must_use = "Use the returned application data, or handle an empty slot."]
-    pub fn ex_data<T>(&self, index: Index<SslContext, T>) -> Option<&T> {
-        unsafe {
-            let data = ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw());
-            if data.is_null() {
-                None
-            } else {
-                Some(&*(data as *const T))
-            }
-        }
-    }
-
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslContextBuilder.
-    #[corresponds(SSL_CTX_get_ex_data)]
-    unsafe fn ex_data_mut<T>(&mut self, index: Index<SslContext, T>) -> Option<&mut T> {
+    pub fn ex_data<T: 'static + Send + Sync>(&self, index: Index<SslContext, T>) -> Option<&T> {
+        // SAFETY: the typed index identifies a live boxed T owned by this context.
         unsafe {
             ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
-                .as_mut()
+                .as_ref()
         }
     }
 
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslContextBuilder.
-    #[corresponds(SSL_CTX_set_ex_data)]
-    unsafe fn set_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) {
-        unsafe {
-            let data = Box::into_raw(Box::new(data));
-            ffi::SSL_CTX_set_ex_data(self.as_ptr(), index.as_raw(), data.cast());
-        }
+    fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<SslContext, T>) -> Option<&T> {
+        self.ex_data(slot.get()?)
     }
 
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslContextBuilder.
-    #[corresponds(SSL_CTX_set_ex_data)]
-    unsafe fn replace_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) -> Option<T> {
+    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
+        self.ex_data(CONTEXT_CALLBACKS.get(role)?)
+    }
+
+    // The caller must establish exclusive context ownership, as on a builder.
+    unsafe fn replace_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<SslContext, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        let ctx = self.as_ptr();
+        // SAFETY: the caller establishes exclusive ownership and the matching
+        // typed slot; native storage accepts the pointer only on success.
         unsafe {
-            if let Some(old) = self.ex_data_mut(index) {
-                return Some(mem::replace(old, data));
-            }
-
-            self.set_ex_data(index, data);
-
-            None
+            replace_boxed(ffi::SSL_CTX_get_ex_data(ctx, index.as_raw()), data, |ptr| {
+                cvt(ffi::SSL_CTX_set_ex_data(ctx, index.as_raw(), ptr))
+            })
         }
     }
 
@@ -2745,19 +2894,21 @@ impl SslContextRef {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
-    pub unsafe fn assume_x509(&mut self) {
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
+    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
         unsafe {
-            self.replace_ex_data(*X509_FLAG_INDEX, true);
+            self.replace_ex_data(X509_FLAG_INDEX.register()?, true)?;
         }
+        Ok(())
     }
 
     /// Returns `true` if context is configured for X.509 certificates.
     #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn has_x509_support(&self) -> bool {
-        self.ex_data(*X509_FLAG_INDEX).copied().unwrap_or_default()
+        self.slot_data(&X509_FLAG_INDEX)
+            .copied()
+            .unwrap_or_default()
     }
 
     #[track_caller]
@@ -3273,19 +3424,10 @@ impl Ssl {
         }
     }
 
-    // FIXME should return a result?
-    fn cached_ex_index<T>() -> Index<Self, T>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            let idx = *SSL_INDEXES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Self::new_ex_index::<T>().unwrap().as_raw());
-            Index::from_raw(idx)
-        }
+    fn register_callback<T: 'static + Send + Sync>(
+        role: CallbackRole,
+    ) -> Result<Index<Self, T>, ErrorStack> {
+        SSL_CALLBACKS.register(role, Self::new_ex_index)
     }
 
     /// Creates a new [`Ssl`].
@@ -3294,7 +3436,7 @@ impl Ssl {
         unsafe {
             let ptr = cvt_p(ffi::SSL_new(ctx.as_ptr()))?;
             let mut ssl = Self::from_ptr(ptr);
-            ssl.set_ex_data(*SESSION_CTX_INDEX, ctx.to_owned());
+            ssl.set_ex_data(SESSION_CTX_INDEX.register()?, ctx.to_owned())?;
 
             Ok(ssl)
         }
@@ -3520,8 +3662,16 @@ impl SslRef {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_set_verify)]
-    pub fn set_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
@@ -3529,28 +3679,35 @@ impl SslRef {
 
         unsafe {
             // this needs to be in an Arc since the callback can register a new callback!
-            self.replace_ex_data(Ssl::cached_ex_index(), Arc::new(callback));
+            self.replace_ex_data(
+                Ssl::register_callback(CallbackRole::Verify)?,
+                Arc::new(callback),
+            )?;
             ffi::SSL_set_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(ssl_raw_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Sets a custom certificate store for verifying peer certificates.
     #[corresponds(SSL_set1_verify_cert_store)]
     pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509();
-
+        let index = SSL_VERIFY_STORE_INDEX.register()?;
+        if self.ex_data(index).is_none() {
+            self.set_ex_data(index, None)?;
+        }
+        // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
             cvt(ffi::SSL_set1_verify_cert_store(
                 self.as_ptr(),
                 cert_store.as_ptr(),
-            ))?;
-        }
-        self.set_ex_data(*SSL_VERIFY_STORE_INDEX, Some(cert_store));
-        Ok(())
+            ))?
+        };
+        self.set_ex_data(index, Some(cert_store))
     }
 
     /// Like [`SslContextBuilder::set_custom_verify_callback`].
@@ -3558,22 +3715,32 @@ impl SslRef {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_set_custom_verify)]
-    pub fn set_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_custom_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
-        self.ssl_context().check_x509();
-
         unsafe {
             // this needs to be in an Arc since the callback can register a new callback!
-            self.replace_ex_data(Ssl::cached_ex_index(), Arc::new(callback));
+            self.replace_ex_data(
+                Ssl::register_callback(CallbackRole::CustomVerify)?,
+                Arc::new(callback),
+            )?;
             ffi::SSL_set_custom_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(ssl_raw_custom_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Like [`SslContextBuilder::set_tmp_dh`].
@@ -4049,7 +4216,10 @@ impl SslRef {
         unsafe { cvt_p(ffi::SSL_set_SSL_CTX(self.as_ptr(), ctx.as_ptr()))? };
         // BoringSSL copied the new context's certificate settings, dropping a per-connection store.
         if changed {
-            if let Some(store) = self.ex_data_mut(*SSL_VERIFY_STORE_INDEX) {
+            if let Some(store) = SSL_VERIFY_STORE_INDEX
+                .get()
+                .and_then(|index| self.ex_data_mut(index))
+            {
                 *store = None;
             }
         }
@@ -4116,10 +4286,10 @@ impl SslRef {
         };
 
         let store: &X509StoreRef = match (
-            self.ex_data(*SSL_VERIFY_STORE_INDEX),
-            context.ex_data(*VERIFY_STORE_INDEX),
+            self.slot_data(&SSL_VERIFY_STORE_INDEX),
+            context.slot_data(&VERIFY_STORE_INDEX),
         ) {
-            (Some(Some(store)), _) | (_, Some(store)) => store,
+            (Some(Some(store)), _) | (_, Some(Some(store))) => store,
             _ => context.cert_store(),
         };
 
@@ -4159,8 +4329,11 @@ impl SslRef {
                     if let Some(callback) = ffi::SSL_get_verify_callback(self.as_ptr()) {
                         ffi::X509_STORE_CTX_set_verify_cb(ctx, Some(callback));
                     }
-                    match context.ex_data(*CERT_VERIFY_INDEX) {
-                        Some(&callback) => callback(ctx, ptr::null_mut()),
+                    match context
+                        .slot_data(&CERT_VERIFY_INDEX)
+                        .and_then(|callback| *callback)
+                    {
+                        Some(callback) => callback(ctx, ptr::null_mut()),
                         None => ffi::X509_verify_cert(ctx),
                     }
                 };
@@ -4323,65 +4496,78 @@ impl SslRef {
         unsafe { SSL_is_server(self.as_ptr()) != 0 }
     }
 
-    /// Sets the extra data at the specified index.
+    /// Sets or overwrites the extra data at a registered index.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `Ssl::new_ex_index` method to create an `Index`.
+    /// # Errors
     ///
-    /// Note that if this method is called multiple times with the same index, any previous
-    /// value stored in the `SslContextBuilder` will be leaked.
-    #[corresponds(SSL_set_ex_data)]
-    pub fn set_ex_data<T>(&mut self, index: Index<Ssl, T>, data: T) {
-        if let Some(old) = self.ex_data_mut(index) {
-            *old = data;
-            return;
-        }
+    /// The native SSL cannot allocate storage for the index.
+    pub fn set_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<Ssl, T>,
+        data: T,
+    ) -> Result<(), ErrorStack> {
+        drop(self.replace_ex_data(index, data)?);
+        Ok(())
+    }
 
+    /// Replaces the extra data and returns the previous owned value, if any.
+    ///
+    /// # Errors
+    ///
+    /// The native SSL cannot allocate storage for the index.
+    #[corresponds(SSL_set_ex_data)]
+    pub fn replace_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<Ssl, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        let ssl = self.as_ptr();
+        // SAFETY: self establishes exclusive SSL access and the registered
+        // index establishes the type of its boxed allocation.
         unsafe {
-            let data = Box::into_raw(Box::new(data));
-            ffi::SSL_set_ex_data(self.as_ptr(), index.as_raw(), data.cast());
+            replace_boxed(ffi::SSL_get_ex_data(ssl, index.as_raw()), data, |ptr| {
+                cvt(ffi::SSL_set_ex_data(ssl, index.as_raw(), ptr))
+            })
         }
     }
 
-    /// Sets or overwrites the extra data at the specified index.
-    ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `Ssl::new_ex_index` method to create an `Index`.
-    ///
-    /// The previous value, if any, will be returned.
-    #[corresponds(SSL_set_ex_data)]
-    pub fn replace_ex_data<T>(&mut self, index: Index<Ssl, T>, data: T) -> Option<T> {
-        if let Some(old) = self.ex_data_mut(index) {
-            return Some(mem::replace(old, data));
-        }
-
-        self.set_ex_data(index, data);
-
-        None
-    }
-
-    /// Returns a reference to the extra data at the specified index.
+    /// Returns a reference to registered application data.
     #[corresponds(SSL_get_ex_data)]
     #[must_use = "Use the returned application data, or handle an empty slot."]
-    pub fn ex_data<T>(&self, index: Index<Ssl, T>) -> Option<&T> {
+    pub fn ex_data<T: 'static + Send + Sync>(&self, index: Index<Ssl, T>) -> Option<&T> {
+        // SAFETY: the registered typed index identifies a live boxed T.
         unsafe {
-            let data = ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw());
-            if data.is_null() {
-                None
-            } else {
-                Some(&*(data as *const T))
-            }
+            ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw())
+                .cast::<T>()
+                .as_ref()
         }
     }
 
-    /// Returns a mutable reference to the extra data at the specified index.
+    /// Returns a mutable reference to registered application data.
     #[corresponds(SSL_get_ex_data)]
-    pub fn ex_data_mut<T>(&mut self, index: Index<Ssl, T>) -> Option<&mut T> {
+    pub fn ex_data_mut<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<Ssl, T>,
+    ) -> Option<&mut T> {
+        // SAFETY: the typed index identifies the boxed allocation, and the
+        // exclusive SSL borrow prevents a concurrent mutable access.
         unsafe {
             ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
                 .as_mut()
         }
+    }
+
+    fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<Ssl, T>) -> Option<&T> {
+        self.ex_data(slot.get()?)
+    }
+
+    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
+        self.ex_data(SSL_CALLBACKS.get(role)?)
+    }
+
+    fn session_context(&self) -> Option<&SslContextRef> {
+        self.slot_data(&SESSION_CTX_INDEX).map(|owner| &**owner)
     }
 
     /// Copies the contents of the last Finished message sent to the peer into the provided buffer.

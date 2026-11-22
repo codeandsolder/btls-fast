@@ -97,7 +97,7 @@ impl PrivateKeyMethod for Method {
 fn builder_with_private_key_method(method: Method) -> Builder {
     let mut builder = Server::builder();
 
-    builder.ctx().set_private_key_method(method);
+    builder.ctx().set_private_key_method(method).unwrap();
 
     builder
 }
@@ -310,7 +310,8 @@ fn raw_public_key_uses_credential_specific_method() {
             } else {
                 Err(SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))
             }
-        });
+        })
+        .unwrap();
     client.connect();
     assert!(invoked.load(Ordering::SeqCst));
 }

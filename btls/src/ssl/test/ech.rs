@@ -81,7 +81,8 @@ fn ech_disable_from_select_certificate_callback() {
                 } else {
                     Ok(SelectCertAction::Success)
                 }
-            });
+            })
+            .unwrap();
 
         builder.build()
     };
@@ -126,7 +127,8 @@ fn ech_disable_repeatedly_fails_after_outer_client_hello() {
                 } else {
                     Err(SelectCertError::ERROR)
                 }
-            });
+            })
+            .unwrap();
 
         builder.build()
     };
@@ -164,8 +166,9 @@ fn ech_disable_from_async_select_certificate_callback() {
                         }
                     }) as BoxSelectCertActionFinish)
                 }))
-            });
-        builder.ssl_cb(|ssl| ssl.set_task_waker(Some(Waker::noop().clone())));
+            })
+            .unwrap();
+        builder.ssl_cb(|ssl| ssl.set_task_waker(Some(Waker::noop().clone())).unwrap());
 
         builder.build()
     };

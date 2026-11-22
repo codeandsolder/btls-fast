@@ -208,15 +208,18 @@ fn boringssl_patch_ffdhe_named_groups_are_advertised() {
         .set_max_proto_version(Some(SslVersion::TLS1_2))
         .unwrap();
     server.ctx().set_cipher_list("AES128-GCM-SHA256").unwrap();
-    server.ctx().set_select_certificate_callback({
-        let supported_groups = Arc::clone(&supported_groups);
-        move |client_hello| {
-            *supported_groups.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::SUPPORTED_GROUPS)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let supported_groups = Arc::clone(&supported_groups);
+            move |client_hello| {
+                *supported_groups.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::SUPPORTED_GROUPS)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -313,23 +316,26 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
         .set_max_proto_version(Some(SslVersion::TLS1_3))
         .unwrap();
     unsafe { ffi::SSL_CTX_set_early_data_enabled(server.ctx().as_ptr(), 1) };
-    server.ctx().set_select_certificate_callback({
-        let extensions = Arc::clone(&extensions);
-        move |client_hello| {
-            extensions.lock().unwrap().push((
-                client_hello
-                    .get_extension(ExtensionType::PRE_SHARED_KEY)
-                    .is_some(),
-                client_hello
-                    .get_extension(ExtensionType::PSK_KEY_EXCHANGE_MODES)
-                    .is_some(),
-                client_hello
-                    .get_extension(ExtensionType::EARLY_DATA)
-                    .is_some(),
-            ));
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let extensions = Arc::clone(&extensions);
+            move |client_hello| {
+                extensions.lock().unwrap().push((
+                    client_hello
+                        .get_extension(ExtensionType::PRE_SHARED_KEY)
+                        .is_some(),
+                    client_hello
+                        .get_extension(ExtensionType::PSK_KEY_EXCHANGE_MODES)
+                        .is_some(),
+                    client_hello
+                        .get_extension(ExtensionType::EARLY_DATA)
+                        .is_some(),
+                ));
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut first_client = server.client_with_root_ca();
@@ -345,15 +351,18 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
     first_client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    first_client.ctx().set_new_session_callback({
-        let session = Arc::clone(&session);
-        move |_, new_session| {
-            let mut session = session.lock().unwrap();
-            if session.is_none() {
-                *session = Some(new_session.to_der().unwrap());
+    first_client
+        .ctx()
+        .set_new_session_callback({
+            let session = Arc::clone(&session);
+            move |_, new_session| {
+                let mut session = session.lock().unwrap();
+                if session.is_none() {
+                    *session = Some(new_session.to_der().unwrap());
+                }
             }
-        }
-    });
+        })
+        .unwrap();
     let first_stream = first_client.connect();
     assert!(!first_stream.ssl().session_reused());
 
@@ -433,19 +442,22 @@ fn boringssl_patch_clienthello_extensions_are_sent() {
     // ClientHello knobs. The expected bytes document patch-owned extension
     // encoding, not upstream BoringSSL's native extension surface.
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let record_size_limit = Arc::clone(&record_size_limit);
-        let delegated_credential = Arc::clone(&delegated_credential);
-        move |client_hello| {
-            *record_size_limit.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::RECORD_SIZE_LIMIT)
-                .map(ToOwned::to_owned);
-            *delegated_credential.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::DELEGATED_CREDENTIAL)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let record_size_limit = Arc::clone(&record_size_limit);
+            let delegated_credential = Arc::clone(&delegated_credential);
+            move |client_hello| {
+                *record_size_limit.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::RECORD_SIZE_LIMIT)
+                    .map(ToOwned::to_owned);
+                *delegated_credential.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::DELEGATED_CREDENTIAL)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -660,13 +672,16 @@ fn record_size_limit_patch_keeps_configured_extension_position() {
     for limit in [16_385, 0] {
         let types = Arc::new(Mutex::new(Vec::new()));
         let mut server = Server::builder();
-        server.ctx().set_select_certificate_callback({
-            let types = Arc::clone(&types);
-            move |client_hello| {
-                *types.lock().unwrap() = client_hello_extension_types(client_hello.as_bytes());
-                Ok(())
-            }
-        });
+        server
+            .ctx()
+            .set_select_certificate_callback({
+                let types = Arc::clone(&types);
+                move |client_hello| {
+                    *types.lock().unwrap() = client_hello_extension_types(client_hello.as_bytes());
+                    Ok(())
+                }
+            })
+            .unwrap();
         let server = server.build();
         let mut client = server.client_with_root_ca();
         client
@@ -703,13 +718,16 @@ fn boringssl_patch_f5_padding_fills_clienthello() {
     // header included, is padded to 512.
     let hello = Arc::new(Mutex::new(Vec::new()));
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let hello = Arc::clone(&hello);
-        move |client_hello| {
-            *hello.lock().unwrap() = client_hello.as_bytes().to_vec();
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let hello = Arc::clone(&hello);
+            move |client_hello| {
+                *hello.lock().unwrap() = client_hello.as_bytes().to_vec();
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
     let mut client = server.client_with_root_ca();
     client.ctx().set_curves_list("X25519").unwrap();
@@ -767,15 +785,18 @@ fn boringssl_patch_allows_duplicate_signature_algorithms() {
         .expect("0008-boringssl-sigalgs.patch should allow duplicate signing algorithm prefs");
 
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let signature_algorithms = Arc::clone(&signature_algorithms);
-        move |client_hello| {
-            *signature_algorithms.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::SIGNATURE_ALGORITHMS)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let signature_algorithms = Arc::clone(&signature_algorithms);
+            move |client_hello| {
+                *signature_algorithms.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::SIGNATURE_ALGORITHMS)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -811,15 +832,18 @@ fn boring_pq_can_disable_second_keyshare() {
     // boring-pq.patch adds SSL_use_second_keyshare so our fork can suppress the
     // extra PQ keyshare; this is patch behavior, not upstream BoringSSL policy.
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let client_key_share = Arc::clone(&client_key_share);
-        move |client_hello| {
-            *client_key_share.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::KEY_SHARE)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let client_key_share = Arc::clone(&client_key_share);
+            move |client_hello| {
+                *client_key_share.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::KEY_SHARE)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca().build().builder();

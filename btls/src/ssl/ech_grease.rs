@@ -181,7 +181,7 @@ impl EchGreaseSizeInfo<'_> {
     /// let mut builder = SslConnector::builder(SslMethod::tls())?;
     /// builder.set_ech_grease_callback(|_, info| {
     ///     info.boringssl_parameters(EchGreaseAead::AES_128_GCM)
-    /// });
+    /// })?;
     /// # Ok(())
     /// # }
     /// ```
@@ -345,16 +345,15 @@ where
     let ssl = unsafe { SslRef::from_ptr(info.ssl.cast_mut()) };
     let callback = if CONTEXT {
         ssl.ssl_context()
-            .ex_data(SslContext::cached_ex_index::<Option<Callback<F>>>())
+            .callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)
     } else {
-        ssl.ex_data(Ssl::cached_ex_index::<Option<Callback<F>>>())
+        ssl.callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)
     };
     let Some(Some(callback)) = callback else {
         return 0;
     };
-    // Like the other SSL callbacks, a panic aborts at this extern "C" boundary.
-    match (callback.0)(ssl, EchGreaseSizeInfo(info)) {
-        Ok(parameters) => {
+    match crate::util::catch_native(|| (callback.0)(ssl, EchGreaseSizeInfo(info))) {
+        Some(Ok(parameters)) => {
             unsafe {
                 *out = ffi::SSL_ECH_GREASE_PARAMETERS {
                     aead_id: parameters.aead.0,
@@ -364,10 +363,11 @@ where
             };
             1
         }
-        Err(error) => {
+        Some(Err(error)) => {
             error.put();
             0
         }
+        None => 0,
     }
 }
 
@@ -379,8 +379,7 @@ impl SslContextBuilder {
     /// Does not enable [`GREASE`](SslRef::set_enable_ech_grease) or change real
     /// ECH or TLS cipher preferences. An installed policy decides every GREASE ClientHello: it
     /// can neither skip one nor defer to BoringSSL's random draw. Errors or
-    /// oversized output fail the handshake; panics abort, as with other SSL
-    /// callbacks.
+    /// oversized output or a callback panic fail the handshake.
     /// See [`EchGreaseSizeInfo::max_payload_length`] for sizing limits. Arbitrary
     /// lengths need not follow [RFC 9849]'s recommended distribution;
     /// [`EchGreaseSizeInfo::boringssl_parameters`] reproduces BoringSSL's draw and
@@ -390,18 +389,22 @@ impl SslContextBuilder {
     /// is freed, even after replacement.
     ///
     /// [RFC 9849]: https://www.rfc-editor.org/rfc/rfc9849.html#section-6.2.1
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if callback storage cannot be allocated or the native policy rejects the update.
     #[corresponds(SSL_CTX_set_ech_grease_callback)]
-    pub fn set_ech_grease_callback<F>(&mut self, callback: F)
+    pub fn set_ech_grease_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslRef, EchGreaseSizeInfo<'_>) -> Result<EchGreaseParameters, ErrorStack>
             + Send
             + Sync
             + 'static,
     {
-        let _old = self.replace_ex_data(
-            SslContext::cached_ex_index::<Option<Callback<F>>>(),
+        self.set_ex_data(
+            SslContext::register_callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)?,
             Some(Callback(callback)),
-        );
+        )?;
         unsafe {
             ffi::SSL_CTX_set_ech_grease_callback(
                 self.as_ptr(),
@@ -409,6 +412,7 @@ impl SslContextBuilder {
                 ptr::null_mut(),
             );
         }
+        Ok(())
     }
 
     /// Removes the context policy, restoring BoringSSL's default parameters.
@@ -429,6 +433,10 @@ impl SslRef {
     /// The same sizing, error and panic rules apply.
     /// Callbacks of other closure types may remain stored until this connection
     /// is freed, even after replacement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if callback storage cannot be allocated or the native policy rejects the update.
     #[corresponds(SSL_set_ech_grease_callback)]
     pub fn set_ech_grease_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
@@ -438,9 +446,9 @@ impl SslRef {
             + 'static,
     {
         let ssl = self.as_ptr();
-        let index = Ssl::cached_ex_index::<Option<Callback<F>>>();
+        let index = Ssl::register_callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)?;
         if self.ex_data(index).is_none() {
-            self.set_ex_data(index, None);
+            self.set_ex_data(index, None)?;
         }
         let slot = self
             .ex_data_mut(index)

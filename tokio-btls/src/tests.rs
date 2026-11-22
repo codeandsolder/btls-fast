@@ -582,9 +582,11 @@ async fn first_server_write_carries_tickets() {
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_session_cache_mode(SslSessionCacheMode::CLIENT);
     let counter = tickets.clone();
-    connector.set_new_session_callback(move |_, _| {
-        counter.fetch_add(1, Ordering::Relaxed);
-    });
+    connector
+        .set_new_session_callback(move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
+        .unwrap();
     let (mut client, mut server) = tls_pair_from(connector, SslVersion::TLS1_3, None, None).await;
 
     // The server defers its tickets to the first write, which seals them ahead of the data.
@@ -789,7 +791,9 @@ async fn early_data_budget_keeps_full_records() {
     connector.set_early_data_enabled(true);
     connector.set_ca_file("tests/cert.pem").unwrap();
     let latest = session.clone();
-    connector.set_client_session_callback(move |_, new| *latest.lock().unwrap() = Some(new));
+    connector
+        .set_client_session_callback(move |_, new| *latest.lock().unwrap() = Some(new))
+        .unwrap();
     let connector = connector.build();
 
     // The first connection leaves a ticket that allows early data.

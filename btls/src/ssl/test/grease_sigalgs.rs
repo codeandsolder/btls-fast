@@ -24,15 +24,18 @@ fn capture_signature_algorithms(enabled: bool) -> Vec<u16> {
     let signature_algorithms = Arc::new(Mutex::new(None));
 
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let signature_algorithms = Arc::clone(&signature_algorithms);
-        move |client_hello| {
-            *signature_algorithms.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::SIGNATURE_ALGORITHMS)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let signature_algorithms = Arc::clone(&signature_algorithms);
+            move |client_hello| {
+                *signature_algorithms.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::SIGNATURE_ALGORITHMS)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client();

@@ -27,7 +27,8 @@ fn untrusted_callback_override_bad() {
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, |_| {
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REVOKED))
-        });
+        })
+        .unwrap();
 
     client.connect_err();
 }
@@ -43,7 +44,8 @@ fn untrusted_callback_override_ok() {
             assert!(ssl.peer_cert_chain().is_some());
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -77,7 +79,8 @@ fn untrusted_with_set_cert() {
                 .unwrap();
 
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))
-        });
+        })
+        .unwrap();
 
     client.connect_err();
 }
@@ -107,7 +110,8 @@ fn trusted_with_set_cert() {
                 .unwrap();
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -123,7 +127,8 @@ fn trusted_callback_override_ok() {
             assert!(ssl.peer_certificate().is_some());
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -141,7 +146,8 @@ fn trusted_callback_override_bad() {
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, |_| {
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))
-        });
+        })
+        .unwrap();
 
     client.connect_err();
 }
@@ -157,7 +163,8 @@ fn callback() {
         .ctx()
         .set_verify_callback(SslVerifyMode::PEER, |_, _| {
             panic!("verify callback should not be called");
-        });
+        })
+        .unwrap();
 
     client
         .ctx()
@@ -170,7 +177,8 @@ fn callback() {
             assert_eq!(hex::encode(digest), expected);
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
@@ -187,7 +195,8 @@ fn ssl_callback() {
         .ssl()
         .set_verify_callback(SslVerifyMode::PEER, |_, _| {
             panic!("verify callback should not be called");
-        });
+        })
+        .unwrap();
 
     client
         .ssl()
@@ -200,7 +209,8 @@ fn ssl_callback() {
             assert_eq!(hex::encode(digest), expected);
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
@@ -216,7 +226,8 @@ fn both_callback() {
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, |_| {
             panic!("verify callback should not be called");
-        });
+        })
+        .unwrap();
 
     let mut client = client.build().builder();
     let expected = super::TEST_CERT_DIGEST;
@@ -232,7 +243,8 @@ fn both_callback() {
             assert_eq!(hex::encode(digest), expected);
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
@@ -265,7 +277,8 @@ fn retry() {
             }
 
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REVOKED))
-        });
+        })
+        .unwrap();
 
     let HandshakeError::WouldBlock(handshake) = client.connect_err() else {
         panic!("should be WouldBlock");

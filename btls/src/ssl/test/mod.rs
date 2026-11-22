@@ -309,9 +309,12 @@ fn test_dtls_1_3_version() {
 #[test]
 fn test_alpn_server_advertise_multiple() {
     let mut server = Server::builder();
-    server.ctx().set_alpn_select_callback(|_, client| {
-        ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client).ok_or(ssl::AlpnError::NOACK)
-    });
+    server
+        .ctx()
+        .set_alpn_select_callback(|_, client| {
+            ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client).ok_or(ssl::AlpnError::NOACK)
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client();
@@ -325,7 +328,8 @@ fn alpn_rejects_unoffered_protocol() {
     let mut server = Server::builder();
     server
         .ctx()
-        .set_alpn_select_callback(|_, _| Ok(b"unoffered"));
+        .set_alpn_select_callback(|_, _| Ok(b"unoffered"))
+        .unwrap();
     server.should_error();
     let server = server.build();
     let mut client = server.client();
@@ -336,10 +340,13 @@ fn alpn_rejects_unoffered_protocol() {
 #[test]
 fn test_alpn_server_select_none_fatal() {
     let mut server = Server::builder();
-    server.ctx().set_alpn_select_callback(|_, client| {
-        ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client)
-            .ok_or(ssl::AlpnError::ALERT_FATAL)
-    });
+    server
+        .ctx()
+        .set_alpn_select_callback(|_, client| {
+            ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client)
+                .ok_or(ssl::AlpnError::ALERT_FATAL)
+        })
+        .unwrap();
     server.should_error();
     let server = server.build();
 
@@ -351,9 +358,12 @@ fn test_alpn_server_select_none_fatal() {
 #[test]
 fn test_alpn_server_select_none() {
     let mut server = Server::builder();
-    server.ctx().set_alpn_select_callback(|_, client| {
-        ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client).ok_or(ssl::AlpnError::NOACK)
-    });
+    server
+        .ctx()
+        .set_alpn_select_callback(|_, client| {
+            ssl::select_next_proto(b"\x08http/1.1\x08spdy/3.1", client).ok_or(ssl::AlpnError::NOACK)
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client();
@@ -376,13 +386,17 @@ fn application_settings() {
     ) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
         let (tx, rx) = std::sync::mpsc::channel();
         let mut builder = Server::builder();
-        builder.ctx().set_alpn_select_callback(move |ssl, client| {
-            let proto = ssl::select_next_proto(b"\x02h2", client).ok_or(ssl::AlpnError::NOACK)?;
-            if let Some(settings) = server {
-                ssl.add_application_settings(proto, settings).unwrap();
-            }
-            Ok(proto)
-        });
+        builder
+            .ctx()
+            .set_alpn_select_callback(move |ssl, client| {
+                let proto =
+                    ssl::select_next_proto(b"\x02h2", client).ok_or(ssl::AlpnError::NOACK)?;
+                if let Some(settings) = server {
+                    ssl.add_application_settings(proto, settings).unwrap();
+                }
+                Ok(proto)
+            })
+            .unwrap();
         builder.ssl_cb(move |ssl| ssl.set_alps_use_new_codepoint(new_codepoint[1]));
         builder.io_cb(move |s| {
             let received = s.ssl().peer_application_settings().map(ToOwned::to_owned);
@@ -448,7 +462,8 @@ fn test_select_cert_ok() {
     let mut server = Server::builder();
     server
         .ctx()
-        .set_select_certificate_callback(|_client_hello| Ok(()));
+        .set_select_certificate_callback(|_client_hello| Ok(()))
+        .unwrap();
     let server = server.build();
 
     let client = server.client();
@@ -467,7 +482,8 @@ fn test_select_cert_last_setter_wins() {
         .set_select_certificate_callback(move |_client_hello| {
             old_calls_clone.fetch_add(1, Ordering::Relaxed);
             Ok(())
-        });
+        })
+        .unwrap();
 
     let action_calls_clone = action_calls.clone();
     server
@@ -475,7 +491,8 @@ fn test_select_cert_last_setter_wins() {
         .set_select_certificate_callback_with_action(move |_client_hello| {
             action_calls_clone.fetch_add(1, Ordering::Relaxed);
             Ok(ssl::SelectCertAction::Success)
-        });
+        })
+        .unwrap();
 
     let server = server.build();
     server.client().connect();
@@ -534,7 +551,8 @@ fn test_select_cert_error() {
     server.should_error();
     server
         .ctx()
-        .set_select_certificate_callback(|_client_hello| Err(ssl::SelectCertError::ERROR));
+        .set_select_certificate_callback(|_client_hello| Err(ssl::SelectCertError::ERROR))
+        .unwrap();
     let server = server.build();
 
     let client = server.client();
@@ -555,7 +573,8 @@ fn test_select_cert_disable_ech_without_ech_fails() {
             } else {
                 Err(ssl::SelectCertError::ERROR)
             }
-        });
+        })
+        .unwrap();
     let server = server.build();
 
     let client = server.client();
@@ -568,17 +587,20 @@ fn test_select_cert_unknown_extension() {
     let mut server = Server::builder();
     let unknown_extension = Arc::new(std::sync::Mutex::new(Some(vec![])));
 
-    server.ctx().set_select_certificate_callback({
-        let unknown = unknown_extension.clone();
-        move |client_hello| {
-            let ext = client_hello
-                .get_extension(ExtensionType::SERVER_NAME)
-                .map(ToOwned::to_owned);
-            assert!(ext.is_none());
-            *unknown.lock().unwrap() = ext;
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let unknown = unknown_extension.clone();
+            move |client_hello| {
+                let ext = client_hello
+                    .get_extension(ExtensionType::SERVER_NAME)
+                    .map(ToOwned::to_owned);
+                assert!(ext.is_none());
+                *unknown.lock().unwrap() = ext;
+                Ok(())
+            }
+        })
+        .unwrap();
 
     let server = server.build();
     let client = server.client();
@@ -591,18 +613,21 @@ fn test_select_cert_unknown_extension() {
 fn test_select_cert_alpn_extension() {
     let mut server = Server::builder();
     let alpn_extension = Arc::new(std::sync::Mutex::new(None));
-    server.ctx().set_select_certificate_callback({
-        let alpn = alpn_extension.clone();
-        move |client_hello| {
-            *alpn.lock().unwrap() = Some(
-                client_hello
-                    .get_extension(ExtensionType::APPLICATION_LAYER_PROTOCOL_NEGOTIATION)
-                    .unwrap()
-                    .to_owned(),
-            );
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let alpn = alpn_extension.clone();
+            move |client_hello| {
+                *alpn.lock().unwrap() = Some(
+                    client_hello
+                        .get_extension(ExtensionType::APPLICATION_LAYER_PROTOCOL_NEGOTIATION)
+                        .unwrap()
+                        .to_owned(),
+                );
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client();
@@ -968,20 +993,23 @@ fn connector_sends_sni_only_for_domain_names() {
     let observed = Arc::new(Mutex::new(Vec::new()));
     let mut server = Server::builder();
     server.expected_connections_count(3);
-    server.ctx().set_select_certificate_callback({
-        let observed = Arc::clone(&observed);
-        move |client_hello| {
-            observed.lock().unwrap().push((
-                client_hello
-                    .get_extension(ExtensionType::SERVER_NAME)
-                    .is_some(),
-                client_hello
-                    .servername(NameType::HOST_NAME)
-                    .map(ToOwned::to_owned),
-            ));
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let observed = Arc::clone(&observed);
+            move |client_hello| {
+                observed.lock().unwrap().push((
+                    client_hello
+                        .get_extension(ExtensionType::SERVER_NAME)
+                        .is_some(),
+                    client_hello
+                        .servername(NameType::HOST_NAME)
+                        .map(ToOwned::to_owned),
+                ));
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
@@ -1210,12 +1238,15 @@ fn psk_ciphers() {
 
     let mut server = Server::builder();
     server.ctx().set_cipher_list(CIPHER).unwrap();
-    server.ctx().set_psk_server_callback(|_, identity, psk| {
-        assert_eq!(identity.unwrap_or(&[]), CLIENT_IDENT);
-        psk[..PSK.len()].copy_from_slice(PSK);
-        SERVER_CALLED.store(true, Ordering::SeqCst);
-        Ok(PSK.len())
-    });
+    server
+        .ctx()
+        .set_psk_server_callback(|_, identity, psk| {
+            assert_eq!(identity.unwrap_or(&[]), CLIENT_IDENT);
+            psk[..PSK.len()].copy_from_slice(PSK);
+            SERVER_CALLED.store(true, Ordering::SeqCst);
+            Ok(PSK.len())
+        })
+        .unwrap();
 
     let server = server.build();
 
@@ -1231,7 +1262,8 @@ fn psk_ciphers() {
             psk[..PSK.len()].copy_from_slice(PSK);
             CLIENT_CALLED.store(true, Ordering::SeqCst);
             Ok(PSK.len())
-        });
+        })
+        .unwrap();
 
     client.connect();
 
@@ -1244,10 +1276,13 @@ fn psk_callbacks_reject_invalid_output() {
     for invalid_length in [false, true] {
         let mut server = Server::builder();
         server.ctx().set_cipher_list(CIPHER).unwrap();
-        server.ctx().set_psk_server_callback(|_, _, output| {
-            output[0] = 1;
-            Ok(1)
-        });
+        server
+            .ctx()
+            .set_psk_server_callback(|_, _, output| {
+                output[0] = 1;
+                Ok(1)
+            })
+            .unwrap();
         server.should_error();
         let server = server.build();
         let mut client = server.client();
@@ -1267,7 +1302,8 @@ fn psk_callbacks_reject_invalid_output() {
                     identity.fill(b'a');
                     Ok(1)
                 }
-            });
+            })
+            .unwrap();
         client.connect_err();
         assert!(invoked.load(Ordering::SeqCst));
     }
@@ -1283,7 +1319,8 @@ fn sni_callback_swapped_ctx() {
     ctx.set_servername_callback(|_, _| {
         CALLED_BACK.store(true, Ordering::SeqCst);
         Ok(())
-    });
+    })
+    .unwrap();
 
     let keyed_ctx = mem::replace(server.ctx(), ctx).build();
     server.ssl_cb(move |ssl| ssl.set_ssl_context(&keyed_ctx).unwrap());
@@ -1415,13 +1452,16 @@ fn set_tls13_ciphers_orders_offer_and_selection() {
         .ctx()
         .set_tls13_ciphers(&[Tls13Cipher::AES_256_GCM_SHA384])
         .unwrap();
-    server.ctx().set_select_certificate_callback({
-        let offered = offered.clone();
-        move |hello| {
-            offered.lock().unwrap().push(tls13_offer(&hello));
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let offered = offered.clone();
+            move |hello| {
+                offered.lock().unwrap().push(tls13_offer(&hello));
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     // A non-default order, as Firefox sends it.
@@ -1528,9 +1568,15 @@ fn drop_ex_data_in_context() {
     let index = SslContext::new_ex_index::<&'static str>().unwrap();
     let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
 
-    assert_eq!(ctx.replace_ex_data(index, "comté"), None);
-    assert_eq!(ctx.replace_ex_data(index, "camembert"), Some("comté"));
-    assert_eq!(ctx.replace_ex_data(index, "raclette"), Some("camembert"));
+    assert_eq!(ctx.replace_ex_data(index, "comté").unwrap(), None);
+    assert_eq!(
+        ctx.replace_ex_data(index, "camembert").unwrap(),
+        Some("comté")
+    );
+    assert_eq!(
+        ctx.replace_ex_data(index, "raclette").unwrap(),
+        Some("camembert")
+    );
 }
 
 #[test]
@@ -1539,9 +1585,15 @@ fn drop_ex_data_in_ssl() {
     let ctx = SslContext::builder(SslMethod::dtls()).unwrap().build();
     let mut ssl = Ssl::new(&ctx).unwrap();
 
-    assert_eq!(ssl.replace_ex_data(index, "comté"), None);
-    assert_eq!(ssl.replace_ex_data(index, "camembert"), Some("comté"));
-    assert_eq!(ssl.replace_ex_data(index, "raclette"), Some("camembert"));
+    assert_eq!(ssl.replace_ex_data(index, "comté").unwrap(), None);
+    assert_eq!(
+        ssl.replace_ex_data(index, "camembert").unwrap(),
+        Some("comté")
+    );
+    assert_eq!(
+        ssl.replace_ex_data(index, "raclette").unwrap(),
+        Some("camembert")
+    );
 }
 
 #[test]
@@ -1550,9 +1602,12 @@ fn test_info_callback() {
 
     let server = Server::builder().build();
     let mut client = server.client();
-    client.ctx().set_info_callback(move |_, _, _| {
-        CALLED_BACK.store(true, Ordering::Relaxed);
-    });
+    client
+        .ctx()
+        .set_info_callback(move |_, _, _| {
+            CALLED_BACK.store(true, Ordering::Relaxed);
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::Relaxed));
@@ -1628,13 +1683,13 @@ fn ex_data_drop() {
     let d1 = Arc::new(AtomicU32::new(100));
     let d2 = Arc::new(AtomicU32::new(200));
     let d3 = Arc::new(AtomicU32::new(300));
-    ctx.set_ex_data(index, TrackDrop(d1.clone()));
+    ctx.set_ex_data(index, TrackDrop(d1.clone())).unwrap();
     assert_eq!(100, d1.load(Relaxed));
     assert_eq!(200, d2.load(Relaxed));
-    ctx.replace_ex_data(index, TrackDrop(d2.clone()));
+    ctx.replace_ex_data(index, TrackDrop(d2.clone())).unwrap();
     assert_eq!(101, d1.load(Relaxed));
     assert_eq!(200, d2.load(Relaxed));
-    ctx.replace_ex_data(index, TrackDrop(d3.clone()));
+    ctx.replace_ex_data(index, TrackDrop(d3.clone())).unwrap();
     assert_eq!(101, d1.load(Relaxed));
     assert_eq!(201, d2.load(Relaxed));
     assert_eq!(300, d3.load(Relaxed));
@@ -1645,8 +1700,8 @@ fn ex_data_drop() {
 
     let mut ctx2 = SslContextBuilder::new(SslMethod::tls()).unwrap();
 
-    ctx2.set_ex_data(index, TrackDrop(d1.clone()));
-    ctx2.set_ex_data(index, TrackDrop(d2.clone()));
+    ctx2.set_ex_data(index, TrackDrop(d1.clone())).unwrap();
+    ctx2.set_ex_data(index, TrackDrop(d2.clone())).unwrap();
     drop(ctx2);
     assert_eq!(102, d1.load(Relaxed));
     assert_eq!(202, d2.load(Relaxed));
@@ -1696,7 +1751,8 @@ fn peer_signature_algorithm_mtls_server_sees_client() {
                         captured_cb.store(true, Ordering::SeqCst);
                     }
                 }
-            });
+            })
+            .unwrap();
     }
     let server = server_builder.build();
 
@@ -1735,7 +1791,8 @@ fn signature_algorithm_used_server_default() {
                         captured_cb.store(true, Ordering::SeqCst);
                     }
                 }
-            });
+            })
+            .unwrap();
     }
     let server = server_builder.build();
     let _ = server.client_with_root_ca().connect();
@@ -1795,7 +1852,8 @@ fn signature_algorithm_used_mtls_client() {
                     captured_cb.store(true, Ordering::SeqCst);
                 }
             }
-        });
+        })
+        .unwrap();
     let _ = client_builder.connect();
 
     assert!(

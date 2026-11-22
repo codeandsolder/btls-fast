@@ -1,7 +1,11 @@
 use crate::error::ErrorStack;
 use libc::{c_int, c_void};
+use std::any::TypeId;
+use std::collections::HashMap;
+use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem;
+use std::sync::{Mutex, OnceLock};
 
 /// A slot in a type's "extra data" structure.
 ///
@@ -33,6 +37,89 @@ impl<T, U> Index<T, U> {
     #[must_use = "The returned native representation is needed by the caller."]
     pub const fn as_raw(self) -> c_int {
         self.0
+    }
+}
+
+// A dedicated typed native slot is registered on the first successful
+// installation, not when a callback merely tries to read it. Failed native
+// allocations can be retried.
+pub(crate) struct IndexSlot<O, T> {
+    index: OnceLock<Index<O, T>>,
+    registration: Mutex<()>,
+    allocate: fn() -> Result<Index<O, T>, ErrorStack>,
+}
+
+impl<O, T> IndexSlot<O, T> {
+    pub const fn new(allocate: fn() -> Result<Index<O, T>, ErrorStack>) -> Self {
+        Self {
+            index: OnceLock::new(),
+            registration: Mutex::new(()),
+            allocate,
+        }
+    }
+
+    pub fn get(&self) -> Option<Index<O, T>> {
+        self.index.get().copied()
+    }
+
+    pub fn register(&self) -> Result<Index<O, T>, ErrorStack> {
+        if let Some(index) = self.get() {
+            return Ok(index);
+        }
+        let _lock = self
+            .registration
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(index) = self.get() {
+            return Ok(index);
+        }
+        let index = (self.allocate)()?;
+        Ok(*self.index.get_or_init(|| index))
+    }
+}
+
+// Native method tables use monomorphized callback entrypoints. Keep a
+// separate typed slot for each role and callback type, and never allocate
+// a new index from a callback lookup.
+pub(crate) struct IndexRegistry<O, K> {
+    indices: Mutex<HashMap<(K, TypeId), c_int>>,
+    owner: PhantomData<fn(O) -> O>,
+}
+
+impl<O, K: Copy + Eq + Hash> IndexRegistry<O, K> {
+    pub fn new() -> Self {
+        Self {
+            indices: Mutex::new(HashMap::new()),
+            owner: PhantomData,
+        }
+    }
+
+    pub fn register<T: 'static + Send + Sync>(
+        &self,
+        role: K,
+        allocate: fn() -> Result<Index<O, T>, ErrorStack>,
+    ) -> Result<Index<O, T>, ErrorStack> {
+        let mut indices = self
+            .indices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let idx = match indices.entry((role, TypeId::of::<T>())) {
+            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+            std::collections::hash_map::Entry::Vacant(entry) => *entry.insert(allocate()?.as_raw()),
+        };
+        // SAFETY: this key is inserted only by the allocator of the exact
+        // owner/type pair. The role further distinguishes callback slots.
+        Ok(unsafe { Index::from_raw(idx) })
+    }
+
+    pub fn get<T: 'static + Send + Sync>(&self, role: K) -> Option<Index<O, T>> {
+        let indices = self
+            .indices
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let &idx = indices.get(&(role, TypeId::of::<T>()))?;
+        // SAFETY: register establishes the exact native owner and boxed type.
+        Some(unsafe { Index::from_raw(idx) })
     }
 }
 
