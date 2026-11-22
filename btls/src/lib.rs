@@ -224,8 +224,9 @@ unsafe extern "C" fn free_data_box<T>(
     _argp: *mut c_void,
 ) {
     if !ptr.is_null() {
-        unsafe {
-            drop(Box::<T>::from_raw(ptr.cast::<T>()));
-        }
+        // SAFETY: the typed index registered this exact Box<T> destructor;
+        // the native container transfers its owned allocation on cleanup.
+        // Contain any application destructor panic at the C ABI boundary.
+        let _ = crate::util::catch_native(|| unsafe { drop(Box::<T>::from_raw(ptr.cast::<T>())) });
     }
 }

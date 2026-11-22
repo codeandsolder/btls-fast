@@ -13,7 +13,7 @@ use crate::ffi;
 use crate::hmac::HmacCtxRef;
 use crate::ssl::TicketKeyCallbackResult;
 use crate::symm::CipherCtxRef;
-use crate::x509::{X509StoreContext, X509StoreContextRef};
+use crate::x509::X509StoreContextRef;
 use foreign_types::ForeignType;
 use foreign_types::ForeignTypeRef;
 use libc::{c_char, c_int, c_uchar, c_uint, c_void};
@@ -31,21 +31,13 @@ where
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
-    let ssl_idx = X509StoreContext::ssl_idx().expect("BUG: store context ssl index missing");
-    let verify_idx = SslContext::cached_ex_index::<F>();
-
-    let verify = ctx
-        .ex_data(ssl_idx)
-        .expect("BUG: store context missing ssl")
-        .ssl_context()
-        .ex_data(verify_idx)
-        .expect("BUG: verify callback missing");
-
-    // SAFETY: The callback won't outlive the context it's associated with
-    // because there is no `X509StoreContextRef::ssl_mut(&mut self)` method.
-    let verify = unsafe { &*ptr::from_ref::<F>(verify) };
-
-    c_int::from(verify(preverify_ok != 0, ctx))
+    let Some(ssl_context) = ctx.ssl().map(|ssl| ssl.ssl_context().to_owned()) else {
+        return 0;
+    };
+    let Some(verify) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        return 0;
+    };
+    crate::util::catch_native(|| c_int::from(verify(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn raw_custom_verify<F>(
@@ -79,22 +71,13 @@ where
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
-    let ssl_idx = X509StoreContext::ssl_idx().expect("BUG: store context ssl index missing");
-    let verify_idx = SslContext::cached_ex_index::<F>();
-
-    let verify = ctx
-        .ex_data(ssl_idx)
-        .expect("BUG: store context missing ssl")
-        .ssl_context()
-        .ex_data(verify_idx)
-        .expect("BUG: verify callback missing");
-
-    // SAFETY: The callback won't outlive the context it's associated with
-    // because there is no way to get a mutable reference to the `SslContext`,
-    // so the callback can't replace itself.
-    let verify = unsafe { &*ptr::from_ref::<F>(verify) };
-
-    c_int::from(verify(ctx))
+    let Some(ssl_context) = ctx.ssl().map(|ssl| ssl.ssl_context().to_owned()) else {
+        return 0;
+    };
+    let Some(verify) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+        return 0;
+    };
+    crate::util::catch_native(|| c_int::from(verify(ctx))).unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn ssl_raw_custom_verify<F>(
@@ -228,19 +211,13 @@ where
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
-    let ssl_idx = X509StoreContext::ssl_idx().expect("BUG: store context ssl index missing");
-
-    // NOTE(nox): I'm pretty sure this Arc<F> is unnecessary here as there is
-    // no way to get a `&mut SslRef` from a `&mut X509StoreContextRef`, and I
-    // don't understand how this callback is different from `raw_verify` above.
-    let callback = ctx
-        .ex_data(ssl_idx)
-        .expect("BUG: store context missing ssl")
-        .ex_data(Ssl::cached_ex_index::<Arc<F>>())
-        .expect("BUG: ssl verify callback missing")
-        .clone();
-
-    c_int::from(callback(preverify_ok != 0, ctx))
+    let Some(callback) = ctx
+        .ssl()
+        .and_then(|ssl| ssl.ex_data(Ssl::cached_ex_index::<Arc<F>>()).cloned())
+    else {
+        return 0;
+    };
+    crate::util::catch_native(|| c_int::from(callback(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn raw_sni<F>(

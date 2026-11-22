@@ -29,7 +29,7 @@ use crate::asn1::{
 use crate::bio::{MemBio, MemBioSlice};
 use crate::conf::ConfRef;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::{replace_boxed, Index};
 use crate::hash::{DigestBytes, MessageDigest};
 use crate::nid::Nid;
 use crate::pkey::{HasPrivate, HasPublic, PKey, PKeyRef, Public};
@@ -61,14 +61,14 @@ pub mod verify;
 #[cfg(test)]
 mod tests;
 
-static STORE_INDEX: LazyLock<Index<X509StoreContext, store::X509Store>> =
-    LazyLock::new(|| X509StoreContext::new_ex_index().unwrap());
+struct ContextInputs {
+    trust: store::X509Store,
+    cert: X509,
+    chain: Stack<X509>,
+}
 
-static CERT_INDEX: LazyLock<Index<X509StoreContext, X509>> =
-    LazyLock::new(|| X509StoreContext::new_ex_index().unwrap());
-
-static CERT_CHAIN_INDEX: LazyLock<Index<X509StoreContext, Stack<X509>>> =
-    LazyLock::new(|| X509StoreContext::new_ex_index().unwrap());
+static CONTEXT_INPUTS_INDEX: LazyLock<Result<Index<X509StoreContext, ContextInputs>, ErrorStack>> =
+    LazyLock::new(X509StoreContext::new_ex_index);
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::X509_STORE_CTX;
@@ -79,13 +79,6 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl X509StoreContext {
-    /// Returns the index which can be used to obtain a reference to the `Ssl` associated with a
-    /// context.
-    #[corresponds(SSL_get_ex_data_X509_STORE_CTX_idx)]
-    pub fn ssl_idx() -> Result<Index<Self, SslRef>, ErrorStack> {
-        unsafe { cvt_n(ffi::SSL_get_ex_data_X509_STORE_CTX_idx()).map(|idx| Index::from_raw(idx)) }
-    }
-
     /// Creates a new `X509StoreContext` instance.
     #[corresponds(X509_STORE_CTX_new)]
     pub fn new() -> Result<Self, ErrorStack> {
@@ -113,10 +106,33 @@ impl X509StoreContext {
 }
 
 impl X509StoreContextRef {
-    /// Returns application data pertaining to an `X509` store context.
+    /// Returns the SSL connection associated with a native certificate
+    /// verification callback, if present.
+    ///
+    /// The native reserved slot borrows the connection and does not own a
+    /// boxed application value; it must never expose mutable SSL access.
+    #[must_use = "Use the associated connection to inspect verification context."]
+    pub fn ssl(&self) -> Option<&SslRef> {
+        // SAFETY: BoringSSL reserves this index for a borrowed live SSL
+        // during certificate verification; no safe setter can access it.
+        unsafe {
+            let ptr = ffi::X509_STORE_CTX_get_ex_data(
+                self.as_ptr(),
+                ffi::SSL_get_ex_data_X509_STORE_CTX_idx(),
+            );
+            SslRef::from_const_ptr_opt(ptr.cast())
+        }
+    }
+
+    /// Returns application data pertaining to this certificate store context.
     #[corresponds(X509_STORE_CTX_get_ex_data)]
     #[must_use = "Use the returned application data, or handle an empty slot."]
-    pub fn ex_data<T>(&self, index: Index<X509StoreContext, T>) -> Option<&T> {
+    pub fn ex_data<T: 'static + Send + Sync>(
+        &self,
+        index: Index<X509StoreContext, T>,
+    ) -> Option<&T> {
+        // SAFETY: index identifies a registered boxed T; the native object
+        // keeps the allocation alive throughout the shared borrow.
         unsafe {
             ffi::X509_STORE_CTX_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
@@ -124,9 +140,14 @@ impl X509StoreContextRef {
         }
     }
 
-    /// Returns a mutable reference to the extra data at the specified index.
+    /// Returns a mutable reference to registered application data.
     #[corresponds(X509_STORE_CTX_get_ex_data)]
-    pub fn ex_data_mut<T>(&mut self, index: Index<X509StoreContext, T>) -> Option<&mut T> {
+    pub fn ex_data_mut<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<X509StoreContext, T>,
+    ) -> Option<&mut T> {
+        // SAFETY: exclusive context access guarantees exclusive application
+        // data access; reserved native borrowed-pointer slots are excluded.
         unsafe {
             ffi::X509_STORE_CTX_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
@@ -134,27 +155,28 @@ impl X509StoreContextRef {
         }
     }
 
-    /// Sets or overwrites the extra data at the specified index.
+    /// Sets or overwrites application data at a registered extra-data index.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `Ssl::new_ex_index` method to create an `Index`.
+    /// # Errors
+    ///
+    /// The native container cannot allocate the slot.
     #[corresponds(X509_STORE_CTX_set_ex_data)]
-    pub fn set_ex_data<T>(&mut self, index: Index<X509StoreContext, T>, data: T) {
-        if let Some(old) = self.ex_data_mut(index) {
-            *old = data;
-
-            return;
-        }
-
+    pub fn set_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<X509StoreContext, T>,
+        data: T,
+    ) -> Result<(), ErrorStack> {
+        let ctx = self.as_ptr();
+        // SAFETY: the exclusive context and typed owned index establish the
+        // matching boxed slot; the native setter accepts ownership on success.
         unsafe {
-            let data = Box::new(data);
-
-            ffi::X509_STORE_CTX_set_ex_data(
-                self.as_ptr(),
-                index.as_raw(),
-                Box::into_raw(data).cast(),
-            );
+            replace_boxed(
+                ffi::X509_STORE_CTX_get_ex_data(ctx, index.as_raw()),
+                data,
+                |ptr| cvt(ffi::X509_STORE_CTX_set_ex_data(ctx, index.as_raw(), ptr)),
+            )?;
         }
+        Ok(())
     }
 
     /// Returns the verify result of the context.
@@ -162,7 +184,9 @@ impl X509StoreContextRef {
     pub fn verify_result(&self) -> X509VerifyResult {
         unsafe { X509VerifyError::from_raw(ffi::X509_STORE_CTX_get_error(self.as_ptr())) }
     }
+}
 
+impl X509StoreContext {
     /// Initializes this context with the given certificate, certificates chain and certificate
     /// store. After initializing the context, the `with_context` closure is called with the prepared
     /// context. As long as the closure is running, the context stays initialized and can be used
@@ -185,7 +209,7 @@ impl X509StoreContextRef {
         with_context: F,
     ) -> Result<T, ErrorStack>
     where
-        F: FnOnce(&mut Self) -> Result<T, ErrorStack>,
+        F: FnOnce(&mut X509StoreContextRef) -> Result<T, ErrorStack>,
     {
         struct Cleanup<'a>(&'a mut X509StoreContextRef);
 
@@ -224,36 +248,60 @@ impl X509StoreContextRef {
         cert: X509,
         cert_chain: Stack<X509>,
     ) -> Result<(), ErrorStack> {
+        // Allocate the typed slot and owner before modifying native context.
+        let index = *CONTEXT_INPUTS_INDEX.as_ref().map_err(Clone::clone)?;
+        let inputs = Box::new(ContextInputs {
+            trust,
+            cert,
+            chain: cert_chain,
+        });
+        let ctx = self.as_ptr();
+        // SAFETY: self owns the context; inputs remain alive until the
+        // native initialization and installation both succeed or are cleaned up.
         unsafe {
-            if let Err(e) = cvt(ffi::X509_STORE_CTX_init(
-                self.as_ptr(),
-                trust.as_ptr(),
-                cert.as_ptr(),
-                cert_chain.as_ptr(),
+            cvt(ffi::X509_STORE_CTX_init(
+                ctx,
+                inputs.trust.as_ptr(),
+                inputs.cert.as_ptr(),
+                inputs.chain.as_ptr(),
+            ))?;
+            let owner = Box::into_raw(inputs);
+            if let Err(error) = cvt(ffi::X509_STORE_CTX_set_ex_data(
+                ctx,
+                index.as_raw(),
+                owner.cast(),
             )) {
-                ffi::X509_STORE_CTX_cleanup(self.as_ptr());
-
-                return Err(e);
+                ffi::X509_STORE_CTX_cleanup(ctx);
+                drop(Box::from_raw(owner));
+                return Err(error);
             }
         }
-
-        self.set_ex_data(*STORE_INDEX, trust);
-        self.set_ex_data(*CERT_INDEX, cert);
-        self.set_ex_data(*CERT_CHAIN_INDEX, cert_chain);
-
         Ok(())
     }
+}
 
+impl X509StoreContextRef {
     /// Returns a reference to the X509 verification configuration.
     #[corresponds(X509_STORE_CTX_get0_param)]
-    pub fn verify_param(&mut self) -> &X509VerifyParamRef {
-        unsafe { X509VerifyParamRef::from_ptr(ffi::X509_STORE_CTX_get0_param(self.as_ptr())) }
+    pub fn verify_param(&self) -> Option<&X509VerifyParamRef> {
+        // SAFETY: the parameter, if initialized, is owned by this context.
+        unsafe {
+            X509VerifyParamRef::from_const_ptr_opt(ffi::X509_STORE_CTX_get0_param(self.as_ptr()))
+        }
     }
 
     /// Returns a mutable reference to the X509 verification configuration.
     #[corresponds(X509_STORE_CTX_get0_param)]
-    pub fn verify_param_mut(&mut self) -> &mut X509VerifyParamRef {
-        unsafe { X509VerifyParamRef::from_ptr_mut(ffi::X509_STORE_CTX_get0_param(self.as_ptr())) }
+    pub fn verify_param_mut(&mut self) -> Option<&mut X509VerifyParamRef> {
+        // SAFETY: the parameter, if initialized, is uniquely borrowed
+        // through this exclusive context reference.
+        let ptr = unsafe { ffi::X509_STORE_CTX_get0_param(self.as_ptr()) };
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: non-null parameter remains owned by the borrowed context.
+            Some(unsafe { X509VerifyParamRef::from_ptr_mut(ptr) })
+        }
     }
 
     /// Sets the X509 verification configuration.
@@ -270,6 +318,12 @@ impl X509StoreContextRef {
     /// This will only work inside of a call to `init`.
     #[corresponds(X509_verify_cert)]
     pub fn verify_cert(&mut self) -> Result<bool, ErrorStack> {
+        if self.verify_param().is_none() {
+            return Err(ErrorStack::internal_error_str(
+                "certificate context is uninitialized",
+            ));
+        }
+        // SAFETY: the live native context has initialized verification parameters.
         unsafe { cvt_n(ffi::X509_verify_cert(self.as_ptr())).map(|n| n != 0) }
     }
 

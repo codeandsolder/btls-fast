@@ -5,6 +5,18 @@ use std::any::Any;
 use std::panic::{self, AssertUnwindSafe};
 use std::slice;
 
+// Native callbacks cannot unwind into C. Arbitrary panic payloads may have
+// panicking destructors, so they must not be dropped on the native stack.
+pub(crate) fn catch_native<T>(callback: impl FnOnce() -> T) -> Option<T> {
+    match panic::catch_unwind(AssertUnwindSafe(callback)) {
+        Ok(value) => Some(value),
+        Err(payload) => {
+            std::mem::forget(payload);
+            None
+        }
+    }
+}
+
 /// Wraps a user-supplied callback and a slot for panics thrown inside the callback (while FFI
 /// frames are on the stack).
 ///

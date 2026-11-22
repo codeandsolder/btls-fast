@@ -524,6 +524,34 @@ fn test_verify_cert() {
 }
 
 #[test]
+fn uninitialized_context_and_panicking_ex_data_drop() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    struct PanicOnDrop(Arc<AtomicBool>);
+    impl Drop for PanicOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            panic!("application ex-data destructor");
+        }
+    }
+
+    let mut context = X509StoreContext::new().unwrap();
+    assert!(context.ssl().is_none());
+    assert!(context.verify_param().is_none());
+    assert!(context.verify_param_mut().is_none());
+    assert!(context.verify_cert().is_err());
+    let called = Arc::new(AtomicBool::new(false));
+    let index = X509StoreContext::new_ex_index().unwrap();
+    context
+        .set_ex_data(index, PanicOnDrop(called.clone()))
+        .unwrap();
+    drop(context);
+    assert!(called.load(Ordering::Relaxed));
+}
+
+#[test]
 fn test_verify_fails() {
     let cert = include_bytes!("../../../test/cert.pem");
     let cert = X509::from_pem(cert).unwrap();

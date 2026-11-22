@@ -11,8 +11,7 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
 use std::any::TypeId;
 use std::collections::HashMap;
-use std::ffi::{c_int, c_void};
-use std::mem;
+use std::ffi::c_int;
 use std::ptr;
 use std::sync::{Arc, LazyLock, Mutex};
 
@@ -96,48 +95,25 @@ impl SslCredentialRef {
         }
     }
 
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslCredentialBuilder.
-    #[corresponds(SSL_CREDENTIAL_get_ex_data)]
-    pub(crate) unsafe fn ex_data_mut<T>(
-        &mut self,
-        index: Index<SslCredential, T>,
-    ) -> Option<&mut T> {
-        // SAFETY: the caller guarantees unique access to the credential and
-        // the typed index identifies the allocation of T.
-        unsafe {
-            ffi::SSL_CREDENTIAL_get_ex_data(self.as_ptr(), index.as_raw())
-                .cast::<T>()
-                .as_mut()
-        }
-    }
-
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslCredentialBuilder.
+    // Only an unpublished, uniquely owned credential builder may mutate data.
     #[corresponds(SSL_CREDENTIAL_set_ex_data)]
-    pub(crate) unsafe fn replace_ex_data<T>(
+    unsafe fn replace_ex_data<T: 'static + Send + Sync>(
         &mut self,
         index: Index<SslCredential, T>,
         data: T,
     ) -> Result<Option<T>, ErrorStack> {
-        // SAFETY: the caller holds exclusive access to this credential.
-        if let Some(old) = unsafe { self.ex_data_mut(index) } {
-            return Ok(Some(mem::replace(old, data)));
-        }
-
-        // Keep ownership until the native setter has accepted the pointer.
-        let mut data = Box::new(data);
-        // SAFETY: the pointer identifies the owned value of T; the registered
-        // native free callback takes ownership only after a successful setter.
+        let cred = self.as_ptr();
+        // SAFETY: the caller establishes exclusive ownership and the typed
+        // slot; the native setter accepts ownership only on success.
         unsafe {
-            cvt_0i(ffi::SSL_CREDENTIAL_set_ex_data(
-                self.as_ptr(),
-                index.as_raw(),
-                ptr::from_mut(&mut *data).cast::<c_void>(),
-            ))?;
+            crate::ex_data::replace_boxed(
+                ffi::SSL_CREDENTIAL_get_ex_data(cred, index.as_raw()),
+                data,
+                |ptr| {
+                    cvt_0i(ffi::SSL_CREDENTIAL_set_ex_data(cred, index.as_raw(), ptr)).map(|_| ())
+                },
+            )
         }
-        let _ = Box::into_raw(data);
-        Ok(None)
     }
 }
 
@@ -152,7 +128,7 @@ impl SslCredentialBuilder {
     ///
     /// Any previous value will be returned and replaced by the new one.
     #[corresponds(SSL_CREDENTIAL_set_ex_data)]
-    pub fn replace_ex_data<T>(
+    pub fn replace_ex_data<T: 'static + Send + Sync>(
         &mut self,
         index: Index<SslCredential, T>,
         data: T,
