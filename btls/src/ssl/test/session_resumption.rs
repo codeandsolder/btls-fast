@@ -413,7 +413,12 @@ fn test_noop_tickey_key_callback(
 
         // Set the encryption context.
         evp_ctx
-            .init_encrypt(&cipher, &TEST_AES_128_CBC_KEY, &TEST_CBC_IV)
+            .init(
+                cipher,
+                crate::symm::Mode::Encrypt,
+                &TEST_AES_128_CBC_KEY,
+                Some(&TEST_CBC_IV),
+            )
             .unwrap();
 
         // Set the hmac context.
@@ -459,7 +464,12 @@ fn test_success_tickey_key_callback(
 
         // Set the encryption context.
         evp_ctx
-            .init_encrypt(&cipher, &TEST_AES_128_CBC_KEY, &TEST_CBC_IV)
+            .init(
+                cipher,
+                crate::symm::Mode::Encrypt,
+                &TEST_AES_128_CBC_KEY,
+                Some(&TEST_CBC_IV),
+            )
             .unwrap();
 
         // Set the hmac context.
@@ -472,7 +482,12 @@ fn test_success_tickey_key_callback(
 
         // Set the decryption context.
         evp_ctx
-            .init_decrypt(&cipher, &TEST_AES_128_CBC_KEY, iv)
+            .init(
+                cipher,
+                crate::symm::Mode::Decrypt,
+                &TEST_AES_128_CBC_KEY,
+                Some(iv),
+            )
             .unwrap();
 
         // Set the hmac context.
