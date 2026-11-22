@@ -2,16 +2,14 @@
 
 use crate::ffi;
 use foreign_types::{ForeignType, ForeignTypeRef};
-use libc::c_int;
 use openssl_macros::corresponds;
-use std::mem;
-use std::ptr;
 
 use crate::bn::{BigNum, BigNumRef};
 use crate::ec::EcKeyRef;
 use crate::error::ErrorStack;
 use crate::pkey::{HasPrivate, HasPublic};
-use crate::{cvt_n, cvt_p};
+use crate::{cvt, cvt_p};
+use std::mem;
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::ECDSA_SIG;
@@ -26,32 +24,46 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl EcdsaSig {
-    /// Computes a digital signature of the hash value `data` using the private EC key eckey.
+    /// Signs an already-computed cryptographic message digest with a private EC key.
+    ///
+    /// Do not pass unhashed message data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the key is unsuitable, signing fails, or allocation fails.
     #[corresponds(ECDSA_do_sign)]
-    pub fn sign<T>(data: &[u8], eckey: &EcKeyRef<T>) -> Result<Self, ErrorStack>
+    pub fn sign_digest<T>(digest: &[u8], key: &EcKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPrivate,
     {
+        // SAFETY: The private-key capability guarantees the required component.
+        // The native function reads the full size_t length and returns an owned signature.
         unsafe {
-            assert!(data.len() <= c_int::MAX as usize);
-            let sig = cvt_p(ffi::ECDSA_do_sign(
-                data.as_ptr(),
-                data.len(),
-                eckey.as_ptr(),
-            ))?;
-            Ok(Self::from_ptr(sig))
+            cvt_p(ffi::ECDSA_do_sign(
+                digest.as_ptr(),
+                digest.len(),
+                key.as_ptr(),
+            ))
+            .map(|sig| Self::from_ptr(sig))
         }
     }
 
-    /// Returns a new `EcdsaSig` by setting the `r` and `s` values associated with a
-    /// ECDSA signature.
+    /// Constructs a signature from its two integer components.
+    ///
+    /// The components are not validated against a curve until verification.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native allocation or component installation fails.
     #[corresponds(ECDSA_SIG_set0)]
-    pub fn from_private_components(r: BigNum, s: BigNum) -> Result<Self, ErrorStack> {
+    pub fn from_components(r: BigNum, s: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: The new signature is owned before installation. Native only
+        // takes ownership of r and s on success; Rust retains them on failure.
         unsafe {
-            let sig = cvt_p(ffi::ECDSA_SIG_new())?;
-            ECDSA_SIG_set0(sig, r.as_ptr(), s.as_ptr());
+            let sig = Self::from_ptr(cvt_p(ffi::ECDSA_SIG_new())?);
+            cvt(ffi::ECDSA_SIG_set0(sig.as_ptr(), r.as_ptr(), s.as_ptr()))?;
             mem::forget((r, s));
-            Ok(Self::from_ptr(sig))
+            Ok(sig)
         }
     }
 
@@ -73,45 +85,67 @@ impl EcdsaSigRef {
         ffi::i2d_ECDSA_SIG
     }
 
-    /// Verifies if the signature is a valid ECDSA signature using the given public key.
+    /// Checks this signature against an already-computed cryptographic message digest.
+    ///
+    /// Do not pass unhashed message data.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the signature is invalid or native verification
+    /// fails. The native operation does not distinguish those outcomes.
     #[corresponds(ECDSA_do_verify)]
-    pub fn verify<T>(&self, data: &[u8], eckey: &EcKeyRef<T>) -> Result<bool, ErrorStack>
+    pub fn verify_digest<T>(&self, digest: &[u8], key: &EcKeyRef<T>) -> Result<(), ErrorStack>
     where
         T: HasPublic,
     {
+        // SAFETY: The key has a public component, the signature stays live,
+        // and native receives the exact readable size_t digest length.
         unsafe {
-            assert!(data.len() <= c_int::MAX as usize);
-            cvt_n(ffi::ECDSA_do_verify(
-                data.as_ptr(),
-                data.len(),
+            cvt(ffi::ECDSA_do_verify(
+                digest.as_ptr(),
+                digest.len(),
                 self.as_ptr(),
-                eckey.as_ptr(),
+                key.as_ptr(),
             ))
-            .map(|x| x == 1)
         }
     }
 
-    /// Returns internal component: `r` of an `EcdsaSig`. (See X9.62 or FIPS 186-2)
-    #[corresponds(ECDSA_SIG_get0)]
-    #[must_use = "The returned key component is the result of this accessor."]
+    /// Borrows the r component of this signature.
+    #[corresponds(ECDSA_SIG_get0_r)]
+    #[must_use = "Use the returned signature component."]
     pub fn r(&self) -> &BigNumRef {
-        unsafe {
-            let mut r = ptr::null();
-            ECDSA_SIG_get0(self.as_ptr(), &raw mut r, ptr::null_mut());
-            BigNumRef::from_ptr(r.cast_mut())
-        }
+        // SAFETY: every successfully constructed signature owns both components.
+        unsafe { BigNumRef::from_ptr(ffi::ECDSA_SIG_get0_r(self.as_ptr()).cast_mut()) }
     }
 
-    /// Returns internal components: `s` of an `EcdsaSig`. (See X9.62 or FIPS 186-2)
-    #[corresponds(ECDSA_SIG_get0)]
-    #[must_use = "The returned key component is the result of this accessor."]
+    /// Borrows the s component of this signature.
+    #[corresponds(ECDSA_SIG_get0_s)]
+    #[must_use = "Use the returned signature component."]
     pub fn s(&self) -> &BigNumRef {
-        unsafe {
-            let mut s = ptr::null();
-            ECDSA_SIG_get0(self.as_ptr(), ptr::null_mut(), &raw mut s);
-            BigNumRef::from_ptr(s.cast_mut())
-        }
+        // SAFETY: every successfully constructed signature owns both components.
+        unsafe { BigNumRef::from_ptr(ffi::ECDSA_SIG_get0_s(self.as_ptr()).cast_mut()) }
     }
 }
 
-use crate::ffi::{ECDSA_SIG_get0, ECDSA_SIG_set0};
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ec::{EcGroup, EcKey};
+    use crate::nid::Nid;
+    use crate::sha::sha256;
+
+    #[test]
+    fn sign_verify_and_reconstruct_components() {
+        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+        let key = EcKey::generate(&group).unwrap();
+        let digest = sha256(b"message");
+        let sig = EcdsaSig::sign_digest(&digest, &key).unwrap();
+        sig.verify_digest(&digest, &key).unwrap();
+        assert!(sig.verify_digest(&sha256(b"other message"), &key).is_err());
+        let reconstructed =
+            EcdsaSig::from_components(sig.r().to_owned().unwrap(), sig.s().to_owned().unwrap())
+                .unwrap();
+        assert_eq!(sig.to_der().unwrap(), reconstructed.to_der().unwrap());
+        reconstructed.verify_digest(&digest, &key).unwrap();
+    }
+}

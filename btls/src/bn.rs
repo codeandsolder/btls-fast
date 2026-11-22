@@ -38,6 +38,7 @@ use crate::{cvt, cvt_p, try_int};
 use openssl_macros::corresponds;
 
 /// Options for the most significant bits of a randomly generated `BigNum`.
+#[derive(Copy, Clone)]
 pub struct MsbOption(c_int);
 
 impl MsbOption {
@@ -58,11 +59,10 @@ foreign_type_and_impl_send_sync! {
     type CType = ffi::BN_CTX;
     fn drop = ffi::BN_CTX_free;
 
-    /// Temporary storage for BigNums on the secure heap
+    /// Native scratch storage for big-number arithmetic.
     ///
-    /// BigNum values are stored dynamically and therefore can be expensive
-    /// to allocate.  BigNumContext and the OpenSSL [`BN_CTX`] structure are used
-    /// internally when passing BigNum values between subroutines.
+    /// Reuse this context to avoid repeated temporary allocations. `BigNumContext` and the OpenSSL [`BN_CTX`] structure are used
+    /// internally when passing `BigNum` values between subroutines.
     ///
     /// [`BN_CTX`]: https://www.openssl.org/docs/man1.1.0/crypto/BN_CTX_new.html
     pub struct BigNumContext;
@@ -91,7 +91,7 @@ foreign_type_and_impl_send_sync! {
 
     /// Dynamically sized arbitrary-precision integer
     ///
-    /// Perform large number mathematics.  Create a new BigNum
+    /// Perform large number mathematics.  Create a new `BigNum`
     /// with [`new`].  Perform standard mathematics on large numbers using
     /// methods from [`Deref<Target = BigNumRef>`]
     ///

@@ -633,9 +633,9 @@ impl EcKey<Params> {
 }
 
 impl EcKey<Public> {
-    /// Constructs an `EcKey` from the specified group with the associated `EcPoint`, public_key.
+    /// Constructs an `EcKey` from the specified group with the associated public point.
     ///
-    /// This will only have the associated public_key.
+    /// This key contains only the public component.
     ///
     /// # Example
     ///
@@ -667,8 +667,8 @@ impl EcKey<Public> {
             cvt(ffi::EC_KEY_set_public_key(
                 key.as_ptr(),
                 public_key.as_ptr(),
-            ))?
-        };
+            ))?;
+        }
         key.check_key()?;
         // SAFETY: successful installation and validation established the public component.
         Ok(unsafe { Self::from_ptr(key.into_ptr()) })
@@ -692,8 +692,8 @@ impl EcKey<Public> {
                 key.as_ptr(),
                 x.as_ptr(),
                 y.as_ptr(),
-            ))?
-        };
+            ))?;
+        }
         // SAFETY: the native setter succeeded, establishing the public component.
         Ok(unsafe { Self::from_ptr(key.into_ptr()) })
     }
@@ -728,7 +728,9 @@ impl EcKey<Private> {
         let key = EcKey::<Params>::from_group(group)?;
         // SAFETY: the exclusive parameter key has a valid group, and native
         // generation initializes both matching key components.
-        unsafe { cvt(ffi::EC_KEY_generate_key(key.as_ptr()))? };
+        unsafe {
+            cvt(ffi::EC_KEY_generate_key(key.as_ptr()))?;
+        }
         // SAFETY: successful generation established private and public components.
         Ok(unsafe { Self::from_ptr(key.into_ptr()) })
     }
