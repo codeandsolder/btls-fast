@@ -12,12 +12,12 @@ permissions:
 
 jobs:
   sync:
-    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@a50ec6783a6754f6f3d4fdd77542d934e72be681 # main
     with:
       upstream-repository: 0x676e67/btls
       upstream-branch: main
       target-branch: main
       strategy: merge
       workflow-policy: reject
-      rust-toolchain: nightly-2026-11-19
+      rust-toolchain: repository
       validation-script: .github/scripts/validate-upstream.sh
