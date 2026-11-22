@@ -7,16 +7,15 @@ use std::sync::LazyLock;
 
 // `CARGO_CRATE_NAME` is `build_script_main` here, so derive the C identifier
 // from the package name instead.
-pub(crate) static PREFIX: LazyLock<String> =
-    LazyLock::new(|| env!("CARGO_PKG_NAME").replace('-', "_"));
+pub static PREFIX: LazyLock<String> = LazyLock::new(|| env!("CARGO_PKG_NAME").replace('-', "_"));
 
 #[derive(Debug)]
-pub(crate) struct PrefixCallback {
+pub struct PrefixCallback {
     symbol_prefix: &'static str,
 }
 
 impl PrefixCallback {
-    pub(crate) fn new(target_os: &str, target_arch: &str) -> Self {
+    pub fn new(target_os: &str, target_arch: &str) -> Self {
         // bindgen emits the override with a `\u{1}` prefix, which suppresses LLVM's
         // platform mangling, so the name must already carry the leading underscore
         // that Mach-O and 32-bit Windows C symbols have.
@@ -44,7 +43,7 @@ impl bindgen::callbacks::ParseCallbacks for PrefixCallback {
     }
 }
 
-pub(crate) fn regenerate_prefix_symbols(source_path: &Path, out_dir: &Path) -> io::Result<()> {
+pub fn regenerate_prefix_symbols(source_path: &Path, out_dir: &Path) -> io::Result<()> {
     let source_root = boringssl_source_root(source_path)?;
     let generator_root = out_dir.join("prefix-symbol-generator");
     prepare_generator_workspace(&source_root, &generator_root)?;
@@ -70,7 +69,7 @@ pub(crate) fn regenerate_prefix_symbols(source_path: &Path, out_dir: &Path) -> i
     Ok(())
 }
 
-pub(crate) fn audit_prefixed_symbols(
+pub fn audit_prefixed_symbols(
     source_path: &Path,
     archive_paths: &[PathBuf],
     target_os: &str,
@@ -101,7 +100,7 @@ pub(crate) fn audit_prefixed_symbols(
 }
 
 /// Locates the static archive cmake built for `library`, which is `crypto` or `ssl`.
-pub(crate) fn find_archive(
+pub fn find_archive(
     build_dir: &Path,
     target_env: &str,
     msvc_lib_subdir: Option<&str>,
@@ -149,8 +148,12 @@ fn prepare_generator_workspace(source_root: &Path, generator_root: &Path) -> io:
     // import set is an upstream implementation detail, and a missing package would only show
     // up as an opaque Go build error after a BoringSSL bump.
     for path in ["include", "util"] {
-        fs_extra::dir::copy(source_root.join(path), generator_root, &Default::default())
-            .map_err(io::Error::other)?;
+        fs_extra::dir::copy(
+            source_root.join(path),
+            generator_root,
+            &fs_extra::dir::CopyOptions::default(),
+        )
+        .map_err(io::Error::other)?;
     }
 
     for file in ["go.mod", "go.sum"] {

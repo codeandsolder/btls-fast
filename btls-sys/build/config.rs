@@ -2,73 +2,85 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub(crate) struct Config {
-    pub(crate) manifest_dir: PathBuf,
-    pub(crate) out_dir: PathBuf,
-    pub(crate) is_bazel: bool,
-    pub(crate) host: String,
-    pub(crate) target: String,
-    pub(crate) target_arch: String,
-    pub(crate) target_os: String,
-    pub(crate) unix: bool,
-    pub(crate) target_env: String,
-    pub(crate) target_features: Vec<String>,
-    pub(crate) features: Features,
-    pub(crate) env: Env,
+pub struct Config {
+    pub manifest_dir: PathBuf,
+    pub out_dir: PathBuf,
+    pub source_dir: PathBuf,
+    pub is_bazel: bool,
+    pub host: String,
+    pub target: String,
+    pub target_arch: String,
+    pub target_os: String,
+    pub unix: bool,
+    pub target_env: String,
+    pub target_features: Vec<String>,
+    pub features: Features,
+    pub env: Env,
 }
 
-pub(crate) struct Features {
-    pub(crate) fips: bool,
-    pub(crate) rpk: bool,
-    pub(crate) underscore_wildcards: bool,
-    pub(crate) prefix_symbols: bool,
-    pub(crate) allow_crl_extensions_bad_version: bool,
-    pub(crate) relax_cert_validation: bool,
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "These fields record independent Cargo feature switches; only the incompatible combinations are rejected during configuration."
+)]
+pub struct Features {
+    pub fips: bool,
+    pub rpk: bool,
+    pub underscore_wildcards: bool,
+    pub prefix_symbols: bool,
+    pub allow_crl_extensions_bad_version: bool,
+    pub relax_cert_validation: bool,
 }
 
-pub(crate) struct Env {
-    pub(crate) path: Option<PathBuf>,
-    pub(crate) include_path: Option<PathBuf>,
-    pub(crate) source_path: Option<PathBuf>,
-    pub(crate) assume_patched: bool,
-    pub(crate) sysroot: Option<PathBuf>,
-    pub(crate) compiler_external_toolchain: Option<PathBuf>,
-    pub(crate) debug: Option<OsString>,
-    pub(crate) opt_level: Option<OsString>,
-    pub(crate) android_ndk_home: Option<PathBuf>,
-    pub(crate) cmake_toolchain_file: Option<PathBuf>,
-    pub(crate) cpp_runtime_lib: Option<OsString>,
+pub struct Env {
+    pub path: Option<PathBuf>,
+    pub include_path: Option<PathBuf>,
+    pub source_path: Option<PathBuf>,
+    pub assume_patched: bool,
+    pub sysroot: Option<PathBuf>,
+    pub compiler_external_toolchain: Option<PathBuf>,
+    pub debug: Option<OsString>,
+    pub opt_level: Option<OsString>,
+    pub android_ndk_home: Option<PathBuf>,
+    pub cmake_toolchain_file: Option<PathBuf>,
+    pub cpp_runtime_lib: Option<OsString>,
     /// C compiler (ignored if using FIPS)
-    pub(crate) cc: Option<OsString>,
-    pub(crate) cxx: Option<OsString>,
-    pub(crate) docs_rs: bool,
+    pub cc: Option<OsString>,
+    pub cxx: Option<OsString>,
+    pub docs_rs: bool,
     /// If set, built artifacts (libraries and patched headers) will be copied
     /// into this directory. The directory must exist and be empty.
-    pub(crate) export_to_install_dir: Option<PathBuf>,
+    pub export_to_install_dir: Option<PathBuf>,
 }
 
 impl Config {
-    pub(crate) fn from_env() -> Result<Self, &'static str> {
+    pub fn from_env() -> Result<Self, &'static str> {
         let manifest_dir = env::var_os("CARGO_MANIFEST_DIR")
             .ok_or("CARGO_MANIFEST_DIR")?
             .into();
-        let out_dir = env::var_os("OUT_DIR").ok_or("OUT_DIR")?.into();
-        let host = env::var("HOST").unwrap();
-        let target = env::var("TARGET").unwrap();
-        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap();
-        let target_env = env::var("CARGO_CFG_TARGET_ENV").unwrap();
+        let out_dir: PathBuf = env::var_os("OUT_DIR").ok_or("OUT_DIR")?.into();
+        let host = env::var("HOST").map_err(|_| "HOST is missing or not Unicode")?;
+        let target = env::var("TARGET").map_err(|_| "TARGET is missing or not Unicode")?;
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH")
+            .map_err(|_| "CARGO_CFG_TARGET_ARCH is missing or not Unicode")?;
+        let target_os = env::var("CARGO_CFG_TARGET_OS")
+            .map_err(|_| "CARGO_CFG_TARGET_OS is missing or not Unicode")?;
+        let target_env = env::var("CARGO_CFG_TARGET_ENV")
+            .map_err(|_| "CARGO_CFG_TARGET_ENV is missing or not Unicode")?;
         let unix = env::var("CARGO_CFG_UNIX").is_ok();
 
         let target_features = env::var("CARGO_CFG_TARGET_FEATURE")
             .unwrap_or_default()
             .split(',')
-            .map(|s| s.to_owned())
+            .map(str::to_owned)
             .collect();
 
         let features = Features::from_env();
         let env = Env::from_env(&host, &target, features.is_fips_like());
 
+        let source_dir = env
+            .source_path
+            .clone()
+            .unwrap_or_else(|| out_dir.join("boringssl"));
         let is_bazel = env
             .source_path
             .as_ref()
@@ -83,6 +95,7 @@ impl Config {
         let config = Self {
             manifest_dir,
             out_dir,
+            source_dir,
             is_bazel,
             host,
             target,
@@ -157,7 +170,7 @@ impl Config {
 }
 
 impl Features {
-    fn from_env() -> Self {
+    const fn from_env() -> Self {
         Self {
             fips: cfg!(feature = "fips"),
             rpk: cfg!(feature = "rpk"),
@@ -168,7 +181,7 @@ impl Features {
         }
     }
 
-    pub(crate) fn is_fips_like(&self) -> bool {
+    pub const fn is_fips_like(&self) -> bool {
         self.fips
     }
 }
