@@ -473,8 +473,6 @@ fn test_select_cert_last_setter_wins() {
 
 #[test]
 fn test_mutable_store() {
-    #![allow(deprecated)]
-
     let cert = include_bytes!("../../../test/cert.pem");
     let cert = X509::from_pem(cert).unwrap();
     let cert2 = include_bytes!("../../../test/root-ca.pem");

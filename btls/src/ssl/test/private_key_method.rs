@@ -12,31 +12,18 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[allow(clippy::type_complexity)]
+type Sign = dyn Fn(&mut SslRef, &[u8], SslSignatureAlgorithm, &mut [u8]) -> Result<usize, PrivateKeyMethodError>
+    + Send
+    + Sync;
+type Decrypt =
+    dyn Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<usize, PrivateKeyMethodError> + Send + Sync;
+type Complete =
+    dyn Fn(&mut SslRef, &mut [u8]) -> Result<usize, PrivateKeyMethodError> + Send + Sync;
+
 pub(super) struct Method {
-    sign: Box<
-        dyn Fn(
-                &mut SslRef,
-                &[u8],
-                SslSignatureAlgorithm,
-                &mut [u8],
-            ) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    >,
-    decrypt: Box<
-        dyn Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    >,
-    complete: Box<
-        dyn Fn(&mut SslRef, &mut [u8]) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    >,
+    sign: Box<Sign>,
+    decrypt: Box<Decrypt>,
+    complete: Box<Complete>,
 }
 
 impl Method {
@@ -61,19 +48,6 @@ impl Method {
             + 'static,
     ) -> Self {
         self.sign = Box::new(sign);
-
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn decrypt(
-        mut self,
-        decrypt: impl Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    ) -> Self {
-        self.decrypt = Box::new(decrypt);
 
         self
     }

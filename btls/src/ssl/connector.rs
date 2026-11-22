@@ -16,7 +16,6 @@ use crate::ssl::{
     SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
 };
 use crate::stack::StackRef;
-use crate::version;
 use crate::x509::{X509Ref, X509};
 use std::net::IpAddr;
 
@@ -40,7 +39,6 @@ ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 -----END DH PARAMETERS-----
 ";
 
-#[allow(clippy::inconsistent_digit_grouping)]
 fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
     let mut ctx = SslContextBuilder::new(method)?;
 
@@ -54,15 +52,8 @@ fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
 
     ctx.set_options(opts);
 
-    let mut mode =
+    let mode =
         SslMode::AUTO_RETRY | SslMode::ACCEPT_MOVING_WRITE_BUFFER | SslMode::ENABLE_PARTIAL_WRITE;
-
-    // This is quite a useful optimization for saving memory, but historically
-    // caused CVEs in OpenSSL pre-1.0.1h, according to
-    // https://bugs.python.org/issue25672
-    if version::number() >= 0x1000_1080 {
-        mode |= SslMode::RELEASE_BUFFERS;
-    }
 
     ctx.set_mode(mode);
 

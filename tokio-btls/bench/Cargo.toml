@@ -16,7 +16,6 @@ jemalloc = ["dep:tikv-jemallocator"]
 [dependencies]
 tikv-jemallocator = { workspace = true, optional = true, features = ["unprefixed_malloc_on_supported_platforms"] }
 
-[dev-dependencies]
 aws-lc-rs = { workspace = true }
 btls = { workspace = true }
 cpu-time = { workspace = true }
@@ -27,9 +26,8 @@ tokio = { workspace = true, features = ["io-util", "macros", "net", "rt", "rt-mu
 tokio-btls = { workspace = true }
 tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
-[[test]]
-name = "support"
-path = "tests.rs"
+[lib]
+path = "lib.rs"
 
 [[bench]]
 name = "read_memory"

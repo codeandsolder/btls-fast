@@ -5,8 +5,6 @@ mod plain;
 mod rustls;
 
 #[cfg(test)]
-// Criterion's harness-free targets also set cfg(test), but omit the test functions.
-#[allow(dead_code, unused_imports)]
 mod tests;
 
 use std::{

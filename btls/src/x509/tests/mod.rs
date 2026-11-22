@@ -481,11 +481,13 @@ fn signature() {
 }
 
 #[test]
-#[allow(clippy::redundant_clone)]
 fn clone_x509() {
     let cert = include_bytes!("../../../test/cert.pem");
     let cert = X509::from_pem(cert).unwrap();
-    drop(cert.clone());
+    let shared = cert.clone();
+    let original = cert.to_der().unwrap();
+    drop(cert);
+    assert_eq!(shared.to_der().unwrap(), original);
 }
 
 #[test]

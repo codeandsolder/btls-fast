@@ -42,7 +42,7 @@
 
 use crate::error::ErrorStack;
 use crate::ffi;
-use crate::stack::StackRef;
+use crate::stack::Stack;
 use crate::x509::verify::{X509VerifyFlags, X509VerifyParamRef};
 use crate::x509::{X509Object, X509Ref};
 use crate::{cvt, cvt_p};
@@ -119,12 +119,15 @@ impl X509StoreBuilderRef {
         unsafe { cvt(ffi::X509_STORE_set1_param(self.as_ptr(), param.as_ptr())) }
     }
 
-    /// For testing only
+    /// Returns an owned snapshot of the certificates and CRLs currently cached.
+    /// Subsequent native cache mutations do not invalidate this snapshot.
+    pub fn objects(&self) -> Result<Stack<X509Object>, ErrorStack> {
+        snapshot_objects(self.as_ptr())
+    }
+
     #[cfg(test)]
     pub fn objects_len(&self) -> usize {
-        unsafe {
-            StackRef::<X509Object>::from_ptr(ffi::X509_STORE_get0_objects(self.as_ptr())).len()
-        }
+        self.objects().unwrap().len()
     }
 }
 
@@ -154,41 +157,53 @@ impl Clone for X509Store {
 }
 
 impl X509StoreRef {
-    /// **Warning: this method is unsound**
-    ///
-    /// Get a reference to the cache of certificates in this store.
-    ///
-    /// # Safety
-    /// References may be invalidated by any access to the shared cache.
-    #[deprecated(
-        note = "This method is unsound https://github.com/sfackler/rust-openssl/issues/2096"
-    )]
-    #[corresponds(X509_STORE_get0_objects)]
-    #[must_use]
-    pub fn objects(&self) -> &StackRef<X509Object> {
-        unsafe { StackRef::from_ptr(ffi::X509_STORE_get0_objects(self.as_ptr())) }
+    /// Returns an owned snapshot of the certificates and CRLs currently cached.
+    /// The snapshot is independent of later native cache mutations and store destruction.
+    #[corresponds(X509_STORE_get1_objects)]
+    pub fn objects(&self) -> Result<Stack<X509Object>, ErrorStack> {
+        snapshot_objects(self.as_ptr())
     }
 
-    /// For testing only, where it doesn't have to expose an unsafe pointer
     #[cfg(test)]
-    #[allow(deprecated)]
-    #[must_use]
     pub fn objects_len(&self) -> usize {
-        self.objects().len()
+        self.objects().unwrap().len()
     }
 }
 
+// SAFETY: callers pass a live store pointer for the duration of the call.
+// The native function takes the cache lock and transfers ownership of the
+// returned stack and its elements, or returns null on failure.
+fn snapshot_objects(store: *mut ffi::X509_STORE) -> Result<Stack<X509Object>, ErrorStack> {
+    // SAFETY: The two private call sites borrow live owned store wrappers.
+    unsafe { cvt_p(ffi::X509_STORE_get1_objects(store)).map(|p| Stack::from_ptr(p)) }
+}
+
 #[test]
-#[allow(clippy::redundant_clone)]
-#[should_panic = "Shared X509Store can't be mutated"]
-fn set_cert_store_pevents_mutability() {
+fn owned_store_snapshot_survives_mutation_and_destruction() -> Result<(), ErrorStack> {
+    use crate::x509::X509;
+
+    let mut store = X509StoreBuilder::new()?;
+    let cert = X509::from_pem(include_bytes!("../../test/cert.pem"))?;
+    let second = X509::from_pem(include_bytes!("../../test/root-ca.pem"))?;
+    store.add_cert(&cert)?;
+    let snapshot = store.objects()?;
+    store.add_cert(second)?;
+    assert_eq!(store.objects()?.len(), 2);
+    drop(store);
+    assert_eq!(snapshot.len(), 1);
+    assert_eq!(snapshot[0].x509().unwrap().to_der()?, cert.to_der()?);
+    Ok(())
+}
+
+#[test]
+#[should_panic(expected = "Shared X509Store can't be mutated")]
+fn set_cert_store_prevents_mutability() {
     use crate::ssl::*;
 
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
     let store = X509StoreBuilder::new().unwrap().build();
 
-    ctx.set_cert_store(store.clone());
-
-    // This is bad.
+    ctx.set_cert_store_ref(&store);
+    assert!(std::ptr::eq(ctx.cert_store().as_ptr(), store.as_ptr()));
     let _aliased_store = ctx.cert_store_mut();
 }

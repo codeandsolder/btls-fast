@@ -488,16 +488,19 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn test_clone() {
         let i = 7;
         let inp = Vec::from_hex(MD5_TESTS[i].0).unwrap();
         assert!(inp.len() > 2);
         let p = inp.len() / 2;
-        let h0 = Hasher::new(MessageDigest::md5()).unwrap();
+        let mut h0 = Hasher::new(MessageDigest::md5()).unwrap();
 
         println!("Clone a new hasher");
         let mut h1 = h0.clone();
+        assert_eq!(
+            &*h0.finish().unwrap(),
+            &*hash(MessageDigest::md5(), &[]).unwrap()
+        );
         h1.write_all(&inp[..p]).unwrap();
         {
             println!("Clone an updated hasher");
@@ -512,6 +515,10 @@ mod tests {
 
         println!("Clone a finished hasher");
         let mut h3 = h1.clone();
+        assert_eq!(
+            &*h1.finish().unwrap(),
+            &*hash(MessageDigest::md5(), &[]).unwrap()
+        );
         h3.write_all(&Vec::from_hex(MD5_TESTS[i + 1].0).unwrap())
             .unwrap();
         let res = h3.finish().unwrap();

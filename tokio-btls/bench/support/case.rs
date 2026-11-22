@@ -17,7 +17,6 @@ pub struct BenchTarget {
 }
 
 /// Stream operation the measured client performs.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum Direction {
     /// The client reads bodies a tokio-btls server sends.
@@ -38,7 +37,6 @@ impl fmt::Display for Direction {
 }
 
 /// Transport under the measured client stream.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum Transport {
     /// In-process pipe; a tokio-btls server on the same task works between timed batches.
@@ -59,7 +57,6 @@ impl fmt::Display for Transport {
 }
 
 /// Clock a measured duration is read from.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum Clock {
     /// Elapsed wall time. A TCP server streams bodies for as long as the connection lasts.

@@ -1,6 +1,6 @@
 //! Benchmarks TLS client writes over the in-memory transport.
 
-mod support;
+use tokio_btls_bench as support;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use support::{BenchTarget, Clock, Direction, Transport};

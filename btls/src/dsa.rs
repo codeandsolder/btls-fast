@@ -335,9 +335,11 @@ mod test {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn clone() {
         let key = Dsa::generate(2048).unwrap();
-        drop(key.clone());
+        let shared = key.clone();
+        assert_eq!(key.pub_key().to_vec(), shared.pub_key().to_vec());
+        drop(key);
+        assert!(!shared.pub_key().to_vec().is_empty());
     }
 }

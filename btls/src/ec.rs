@@ -849,11 +849,13 @@ mod test {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn dup() {
         let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
         let key = EcKey::generate(&group).unwrap();
-        drop(key.clone());
+        let shared = key.clone();
+        assert!(std::ptr::eq(key.as_ptr(), shared.as_ptr()));
+        drop(key);
+        shared.check_key().unwrap();
     }
 
     #[test]

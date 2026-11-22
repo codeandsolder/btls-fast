@@ -1546,82 +1546,141 @@ impl X509VerifyError {
     }
 }
 
-#[allow(missing_docs)] // no need to document the constants
 impl X509VerifyError {
+    /// Native verification failure `X509_V_ERR_UNSPECIFIED`.
     pub const UNSPECIFIED: Self = Self(ffi::X509_V_ERR_UNSPECIFIED);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT`.
     pub const UNABLE_TO_GET_ISSUER_CERT: Self = Self(ffi::X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_CRL`.
     pub const UNABLE_TO_GET_CRL: Self = Self(ffi::X509_V_ERR_UNABLE_TO_GET_CRL);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE`.
     pub const UNABLE_TO_DECRYPT_CERT_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE`.
     pub const UNABLE_TO_DECRYPT_CRL_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY`.
     pub const UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY);
+    /// Native verification failure `X509_V_ERR_CERT_SIGNATURE_FAILURE`.
     pub const CERT_SIGNATURE_FAILURE: Self = Self(ffi::X509_V_ERR_CERT_SIGNATURE_FAILURE);
+    /// Native verification failure `X509_V_ERR_CRL_SIGNATURE_FAILURE`.
     pub const CRL_SIGNATURE_FAILURE: Self = Self(ffi::X509_V_ERR_CRL_SIGNATURE_FAILURE);
+    /// Native verification failure `X509_V_ERR_CERT_NOT_YET_VALID`.
     pub const CERT_NOT_YET_VALID: Self = Self(ffi::X509_V_ERR_CERT_NOT_YET_VALID);
+    /// Native verification failure `X509_V_ERR_CERT_HAS_EXPIRED`.
     pub const CERT_HAS_EXPIRED: Self = Self(ffi::X509_V_ERR_CERT_HAS_EXPIRED);
+    /// Native verification failure `X509_V_ERR_CRL_NOT_YET_VALID`.
     pub const CRL_NOT_YET_VALID: Self = Self(ffi::X509_V_ERR_CRL_NOT_YET_VALID);
+    /// Native verification failure `X509_V_ERR_CRL_HAS_EXPIRED`.
     pub const CRL_HAS_EXPIRED: Self = Self(ffi::X509_V_ERR_CRL_HAS_EXPIRED);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD`.
     pub const ERROR_IN_CERT_NOT_BEFORE_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD`.
     pub const ERROR_IN_CERT_NOT_AFTER_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD`.
     pub const ERROR_IN_CRL_LAST_UPDATE_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD`.
     pub const ERROR_IN_CRL_NEXT_UPDATE_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD);
+    /// Native verification failure `X509_V_ERR_OUT_OF_MEM`.
     pub const OUT_OF_MEM: Self = Self(ffi::X509_V_ERR_OUT_OF_MEM);
+    /// Native verification failure `X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT`.
     pub const DEPTH_ZERO_SELF_SIGNED_CERT: Self = Self(ffi::X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT);
+    /// Native verification failure `X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN`.
     pub const SELF_SIGNED_CERT_IN_CHAIN: Self = Self(ffi::X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
     pub const UNABLE_TO_GET_ISSUER_CERT_LOCALLY: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
     pub const UNABLE_TO_VERIFY_LEAF_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_CERT_CHAIN_TOO_LONG`.
     pub const CERT_CHAIN_TOO_LONG: Self = Self(ffi::X509_V_ERR_CERT_CHAIN_TOO_LONG);
+    /// Native verification failure `X509_V_ERR_CERT_REVOKED`.
     pub const CERT_REVOKED: Self = Self(ffi::X509_V_ERR_CERT_REVOKED);
+    /// Native verification failure `X509_V_ERR_INVALID_CA`.
     pub const INVALID_CA: Self = Self(ffi::X509_V_ERR_INVALID_CA);
+    /// Native verification failure `X509_V_ERR_PATH_LENGTH_EXCEEDED`.
     pub const PATH_LENGTH_EXCEEDED: Self = Self(ffi::X509_V_ERR_PATH_LENGTH_EXCEEDED);
+    /// Native verification failure `X509_V_ERR_INVALID_PURPOSE`.
     pub const INVALID_PURPOSE: Self = Self(ffi::X509_V_ERR_INVALID_PURPOSE);
+    /// Native verification failure `X509_V_ERR_CERT_UNTRUSTED`.
     pub const CERT_UNTRUSTED: Self = Self(ffi::X509_V_ERR_CERT_UNTRUSTED);
+    /// Native verification failure `X509_V_ERR_CERT_REJECTED`.
     pub const CERT_REJECTED: Self = Self(ffi::X509_V_ERR_CERT_REJECTED);
+    /// Native verification failure `X509_V_ERR_SUBJECT_ISSUER_MISMATCH`.
     pub const SUBJECT_ISSUER_MISMATCH: Self = Self(ffi::X509_V_ERR_SUBJECT_ISSUER_MISMATCH);
+    /// Native verification failure `X509_V_ERR_AKID_SKID_MISMATCH`.
     pub const AKID_SKID_MISMATCH: Self = Self(ffi::X509_V_ERR_AKID_SKID_MISMATCH);
+    /// Native verification failure `X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH`.
     pub const AKID_ISSUER_SERIAL_MISMATCH: Self = Self(ffi::X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH);
+    /// Native verification failure `X509_V_ERR_KEYUSAGE_NO_CERTSIGN`.
     pub const KEYUSAGE_NO_CERTSIGN: Self = Self(ffi::X509_V_ERR_KEYUSAGE_NO_CERTSIGN);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER`.
     pub const UNABLE_TO_GET_CRL_ISSUER: Self = Self(ffi::X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER);
+    /// Native verification failure `X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION`.
     pub const UNHANDLED_CRITICAL_EXTENSION: Self =
         Self(ffi::X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION);
+    /// Native verification failure `X509_V_ERR_KEYUSAGE_NO_CRL_SIGN`.
     pub const KEYUSAGE_NO_CRL_SIGN: Self = Self(ffi::X509_V_ERR_KEYUSAGE_NO_CRL_SIGN);
+    /// Native verification failure `X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION`.
     pub const UNHANDLED_CRITICAL_CRL_EXTENSION: Self =
         Self(ffi::X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION);
+    /// Native verification failure `X509_V_ERR_INVALID_NON_CA`.
     pub const INVALID_NON_CA: Self = Self(ffi::X509_V_ERR_INVALID_NON_CA);
+    /// Native verification failure `X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED`.
     pub const PROXY_PATH_LENGTH_EXCEEDED: Self = Self(ffi::X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED);
+    /// Native verification failure `X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE`.
     pub const KEYUSAGE_NO_DIGITAL_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED`.
     pub const PROXY_CERTIFICATES_NOT_ALLOWED: Self =
         Self(ffi::X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED);
+    /// Native verification failure `X509_V_ERR_INVALID_EXTENSION`.
     pub const INVALID_EXTENSION: Self = Self(ffi::X509_V_ERR_INVALID_EXTENSION);
+    /// Native verification failure `X509_V_ERR_INVALID_POLICY_EXTENSION`.
     pub const INVALID_POLICY_EXTENSION: Self = Self(ffi::X509_V_ERR_INVALID_POLICY_EXTENSION);
+    /// Native verification failure `X509_V_ERR_NO_EXPLICIT_POLICY`.
     pub const NO_EXPLICIT_POLICY: Self = Self(ffi::X509_V_ERR_NO_EXPLICIT_POLICY);
+    /// Native verification failure `X509_V_ERR_DIFFERENT_CRL_SCOPE`.
     pub const DIFFERENT_CRL_SCOPE: Self = Self(ffi::X509_V_ERR_DIFFERENT_CRL_SCOPE);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE`.
     pub const UNSUPPORTED_EXTENSION_FEATURE: Self =
         Self(ffi::X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE);
+    /// Native verification failure `X509_V_ERR_UNNESTED_RESOURCE`.
     pub const UNNESTED_RESOURCE: Self = Self(ffi::X509_V_ERR_UNNESTED_RESOURCE);
+    /// Native verification failure `X509_V_ERR_PERMITTED_VIOLATION`.
     pub const PERMITTED_VIOLATION: Self = Self(ffi::X509_V_ERR_PERMITTED_VIOLATION);
+    /// Native verification failure `X509_V_ERR_EXCLUDED_VIOLATION`.
     pub const EXCLUDED_VIOLATION: Self = Self(ffi::X509_V_ERR_EXCLUDED_VIOLATION);
+    /// Native verification failure `X509_V_ERR_SUBTREE_MINMAX`.
     pub const SUBTREE_MINMAX: Self = Self(ffi::X509_V_ERR_SUBTREE_MINMAX);
+    /// Native verification failure `X509_V_ERR_APPLICATION_VERIFICATION`.
     pub const APPLICATION_VERIFICATION: Self = Self(ffi::X509_V_ERR_APPLICATION_VERIFICATION);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE`.
     pub const UNSUPPORTED_CONSTRAINT_TYPE: Self = Self(ffi::X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX`.
     pub const UNSUPPORTED_CONSTRAINT_SYNTAX: Self =
         Self(ffi::X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_NAME_SYNTAX`.
     pub const UNSUPPORTED_NAME_SYNTAX: Self = Self(ffi::X509_V_ERR_UNSUPPORTED_NAME_SYNTAX);
+    /// Native verification failure `X509_V_ERR_CRL_PATH_VALIDATION_ERROR`.
     pub const CRL_PATH_VALIDATION_ERROR: Self = Self(ffi::X509_V_ERR_CRL_PATH_VALIDATION_ERROR);
+    /// Native verification failure `X509_V_ERR_HOSTNAME_MISMATCH`.
     pub const HOSTNAME_MISMATCH: Self = Self(ffi::X509_V_ERR_HOSTNAME_MISMATCH);
+    /// Native verification failure `X509_V_ERR_EMAIL_MISMATCH`.
     pub const EMAIL_MISMATCH: Self = Self(ffi::X509_V_ERR_EMAIL_MISMATCH);
+    /// Native verification failure `X509_V_ERR_IP_ADDRESS_MISMATCH`.
     pub const IP_ADDRESS_MISMATCH: Self = Self(ffi::X509_V_ERR_IP_ADDRESS_MISMATCH);
+    /// Native verification failure `X509_V_ERR_INVALID_CALL`.
     pub const INVALID_CALL: Self = Self(ffi::X509_V_ERR_INVALID_CALL);
+    /// Native verification failure `X509_V_ERR_STORE_LOOKUP`.
     pub const STORE_LOOKUP: Self = Self(ffi::X509_V_ERR_STORE_LOOKUP);
+    /// Native verification failure `X509_V_ERR_NAME_CONSTRAINTS_WITHOUT_SANS`.
     pub const NAME_CONSTRAINTS_WITHOUT_SANS: Self =
         Self(ffi::X509_V_ERR_NAME_CONSTRAINTS_WITHOUT_SANS);
 }
@@ -1779,7 +1838,7 @@ impl X509AlgorithmRef {
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::X509_OBJECT;
-    fn drop = X509_OBJECT_free;
+    fn drop = ffi::X509_OBJECT_free;
 
     /// An `X509` or an X509 certificate revocation list.
     pub struct X509Object;
@@ -1811,14 +1870,6 @@ use crate::ffi::{
 };
 
 use crate::ffi::X509_OBJECT_get0_X509;
-
-#[allow(bad_style)]
-unsafe fn X509_OBJECT_free(x: *mut ffi::X509_OBJECT) {
-    unsafe {
-        ffi::X509_OBJECT_free_contents(x);
-        ffi::OPENSSL_free(x.cast());
-    }
-}
 
 unsafe fn get_new_x509_store_ctx_idx(f: ffi::CRYPTO_EX_free) -> c_int {
     unsafe { ffi::X509_STORE_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }

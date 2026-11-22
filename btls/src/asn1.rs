@@ -117,62 +117,89 @@ impl fmt::Display for Asn1GeneralizedTimeRef {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct Asn1Type(c_int);
 
-#[allow(missing_docs)] // no need to document the constants
 impl Asn1Type {
+    /// End-of-contents marker.
     pub const EOC: Asn1Type = Asn1Type(ffi::V_ASN1_EOC);
 
+    /// Boolean value.
     pub const BOOLEAN: Asn1Type = Asn1Type(ffi::V_ASN1_BOOLEAN);
 
+    /// Integer value.
     pub const INTEGER: Asn1Type = Asn1Type(ffi::V_ASN1_INTEGER);
 
+    /// Bit string.
     pub const BIT_STRING: Asn1Type = Asn1Type(ffi::V_ASN1_BIT_STRING);
 
+    /// Octet string.
     pub const OCTET_STRING: Asn1Type = Asn1Type(ffi::V_ASN1_OCTET_STRING);
 
+    /// Null value.
     pub const NULL: Asn1Type = Asn1Type(ffi::V_ASN1_NULL);
 
+    /// Object identifier.
     pub const OBJECT: Asn1Type = Asn1Type(ffi::V_ASN1_OBJECT);
 
+    /// Object descriptor.
     pub const OBJECT_DESCRIPTOR: Asn1Type = Asn1Type(ffi::V_ASN1_OBJECT_DESCRIPTOR);
 
+    /// External value.
     pub const EXTERNAL: Asn1Type = Asn1Type(ffi::V_ASN1_EXTERNAL);
 
+    /// Real number.
     pub const REAL: Asn1Type = Asn1Type(ffi::V_ASN1_REAL);
 
+    /// Enumerated value.
     pub const ENUMERATED: Asn1Type = Asn1Type(ffi::V_ASN1_ENUMERATED);
 
+    /// UTF-8 string.
     pub const UTF8STRING: Asn1Type = Asn1Type(ffi::V_ASN1_UTF8STRING);
 
+    /// Ordered sequence.
     pub const SEQUENCE: Asn1Type = Asn1Type(ffi::V_ASN1_SEQUENCE);
 
+    /// Set of values.
     pub const SET: Asn1Type = Asn1Type(ffi::V_ASN1_SET);
 
+    /// Numeric string.
     pub const NUMERICSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_NUMERICSTRING);
 
+    /// Printable string.
     pub const PRINTABLESTRING: Asn1Type = Asn1Type(ffi::V_ASN1_PRINTABLESTRING);
 
+    /// T.61 string.
     pub const T61STRING: Asn1Type = Asn1Type(ffi::V_ASN1_T61STRING);
 
+    /// Teletex string.
     pub const TELETEXSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_TELETEXSTRING);
 
+    /// Videotex string.
     pub const VIDEOTEXSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_VIDEOTEXSTRING);
 
+    /// IA5 string.
     pub const IA5STRING: Asn1Type = Asn1Type(ffi::V_ASN1_IA5STRING);
 
+    /// UTC time.
     pub const UTCTIME: Asn1Type = Asn1Type(ffi::V_ASN1_UTCTIME);
 
+    /// Generalized time.
     pub const GENERALIZEDTIME: Asn1Type = Asn1Type(ffi::V_ASN1_GENERALIZEDTIME);
 
+    /// Graphic string.
     pub const GRAPHICSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_GRAPHICSTRING);
 
+    /// ISO 64 string.
     pub const ISO64STRING: Asn1Type = Asn1Type(ffi::V_ASN1_ISO64STRING);
 
+    /// Visible string.
     pub const VISIBLESTRING: Asn1Type = Asn1Type(ffi::V_ASN1_VISIBLESTRING);
 
+    /// General string.
     pub const GENERALSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_GENERALSTRING);
 
+    /// Universal string.
     pub const UNIVERSALSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_UNIVERSALSTRING);
 
+    /// Basic multilingual plane string.
     pub const BMPSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_BMPSTRING);
 
     /// Constructs an `Asn1Type` from a raw OpenSSL value.

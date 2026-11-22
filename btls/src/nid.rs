@@ -48,7 +48,6 @@ pub struct SignatureAlgorithms {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub struct Nid(c_int);
 
-#[allow(non_snake_case)]
 impl Nid {
     /// Create a `Nid` from an integer representation.
     #[must_use]

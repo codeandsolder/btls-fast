@@ -523,27 +523,6 @@ impl RsaPrivateKeyBuilder {
 }
 
 impl Rsa<Private> {
-    /// Creates a new RSA key with private components (public components are assumed).
-    ///
-    /// This a convenience method over
-    /// `Rsa::build(n, e, d)?.set_factors(p, q)?.set_crt_params(dmp1, dmq1, iqmp)?.build()`
-    #[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
-    pub fn from_private_components(
-        n: BigNum,
-        e: BigNum,
-        d: BigNum,
-        p: BigNum,
-        q: BigNum,
-        dmp1: BigNum,
-        dmq1: BigNum,
-        iqmp: BigNum,
-    ) -> Result<Rsa<Private>, ErrorStack> {
-        Ok(RsaPrivateKeyBuilder::new(n, e, d)?
-            .set_factors(p, q)?
-            .set_crt_params(dmp1, dmq1, iqmp)?
-            .build())
-    }
-
     /// Generates a public/private key pair with the specified size.
     ///
     /// The public exponent will be 65537.
@@ -772,10 +751,12 @@ mod test {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn clone() {
         let key = Rsa::generate(2048).unwrap();
-        drop(key.clone());
+        let shared = key.clone();
+        assert_eq!(key.n().to_vec(), shared.n().to_vec());
+        drop(key);
+        assert!(shared.check_key().unwrap());
     }
 
     #[test]
