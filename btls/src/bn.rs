@@ -502,8 +502,8 @@ impl BigNumRef {
                 self.as_ptr(),
                 bits,
                 c_int::from(safe),
-                add.map_or(ptr::null_mut(), ForeignTypeRef::as_ptr),
-                rem.map_or(ptr::null_mut(), ForeignTypeRef::as_ptr),
+                add.map_or(ptr::null(), |number| number.as_ptr().cast_const()),
+                rem.map_or(ptr::null(), |number| number.as_ptr().cast_const()),
                 ptr::null_mut(),
             ))
         }
