@@ -748,7 +748,8 @@ foreign_type_and_impl_send_sync! {
     pub struct Asn1Object;
 }
 
-impl Stackable for Asn1Object {
+// SAFETY: the native stack type matches native ASN1_OBJECT ownership references.
+unsafe impl Stackable for Asn1Object {
     type StackType = ffi::stack_st_ASN1_OBJECT;
 }
 

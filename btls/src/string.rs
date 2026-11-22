@@ -31,7 +31,8 @@ impl fmt::Debug for OpensslString {
     }
 }
 
-impl Stackable for OpensslString {
+// SAFETY: the native stack type matches owned native NUL-terminated string allocations.
+unsafe impl Stackable for OpensslString {
     type StackType = ffi::stack_st_OPENSSL_STRING;
 }
 

@@ -2896,7 +2896,8 @@ impl SslCipher {
     }
 }
 
-impl Stackable for SslCipher {
+// SAFETY: the native stack type matches static native SSL_CIPHER descriptors; ownership release is a no-op.
+unsafe impl Stackable for SslCipher {
     type StackType = ffi::stack_st_SSL_CIPHER;
 }
 

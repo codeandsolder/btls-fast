@@ -880,7 +880,8 @@ impl AsRef<Self> for X509Ref {
     }
 }
 
-impl Stackable for X509 {
+// SAFETY: the native stack type matches reference-counted native X509 objects.
+unsafe impl Stackable for X509 {
     type StackType = ffi::stack_st_X509;
 }
 
@@ -902,7 +903,8 @@ foreign_type_and_impl_send_sync! {
     pub struct X509Extension;
 }
 
-impl Stackable for X509Extension {
+// SAFETY: the native stack type matches owned native X509_EXTENSION objects.
+unsafe impl Stackable for X509Extension {
     type StackType = ffi::stack_st_X509_EXTENSION;
 }
 
@@ -1149,7 +1151,8 @@ impl X509Name {
     }
 }
 
-impl Stackable for X509Name {
+// SAFETY: the native stack type matches owned native X509_NAME objects.
+unsafe impl Stackable for X509Name {
     type StackType = ffi::stack_st_X509_NAME;
 }
 
@@ -1807,7 +1810,8 @@ impl fmt::Debug for GeneralNameRef {
     }
 }
 
-impl Stackable for GeneralName {
+// SAFETY: the native stack type matches owned native GENERAL_NAME objects.
+unsafe impl Stackable for GeneralName {
     type StackType = ffi::stack_st_GENERAL_NAME;
 }
 
@@ -1859,7 +1863,8 @@ impl X509ObjectRef {
     }
 }
 
-impl Stackable for X509Object {
+// SAFETY: the native stack type matches owned native X509_OBJECT references.
+unsafe impl Stackable for X509Object {
     type StackType = ffi::stack_st_X509_OBJECT;
 }
 

@@ -15,7 +15,8 @@ foreign_type_and_impl_send_sync! {
     pub struct SrtpProtectionProfile;
 }
 
-impl Stackable for SrtpProtectionProfile {
+// SAFETY: the native stack type matches static native SRTP profile descriptors; ownership release is a no-op.
+unsafe impl Stackable for SrtpProtectionProfile {
     type StackType = ffi::stack_st_SRTP_PROTECTION_PROFILE;
 }
 
