@@ -26,7 +26,7 @@ impl Drop for Deriver<'_> {
 impl<'a> Deriver<'a> {
     /// Creates a new `Deriver` using the provided private key.
     #[corresponds(EVP_PKEY_derive_init)]
-    pub fn new<T>(key: &'a PKeyRef<T>) -> Result<Deriver<'a>, ErrorStack>
+    pub fn new<T>(key: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPrivate,
     {
@@ -53,7 +53,7 @@ impl<'a> Deriver<'a> {
     pub fn secret_len(&mut self) -> Result<usize, ErrorStack> {
         unsafe {
             let mut len = 0;
-            cvt(ffi::EVP_PKEY_derive(self.0, ptr::null_mut(), &mut len)).map(|_| len)
+            cvt(ffi::EVP_PKEY_derive(self.0, ptr::null_mut(), &raw mut len)).map(|_| len)
         }
     }
 
@@ -63,7 +63,7 @@ impl<'a> Deriver<'a> {
     #[corresponds(EVP_PKEY_derive)]
     pub fn derive(&mut self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
         let mut len = buf.len();
-        unsafe { cvt(ffi::EVP_PKEY_derive(self.0, buf.as_mut_ptr(), &mut len)).map(|_| len) }
+        unsafe { cvt(ffi::EVP_PKEY_derive(self.0, buf.as_mut_ptr(), &raw mut len)).map(|_| len) }
     }
 
     /// A convenience function which derives a shared secret and returns it in a new buffer.

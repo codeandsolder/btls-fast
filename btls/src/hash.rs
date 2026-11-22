@@ -23,61 +23,61 @@ impl MessageDigest {
     ///
     /// The caller must ensure the pointer is valid.
     #[must_use]
-    pub unsafe fn from_ptr(x: *const ffi::EVP_MD) -> Self {
-        MessageDigest(x)
+    pub const unsafe fn from_ptr(x: *const ffi::EVP_MD) -> Self {
+        Self(x)
     }
 
     /// Returns the `MessageDigest` corresponding to an `Nid`.
     #[corresponds(EVP_get_digestbynid)]
     #[must_use]
-    pub fn from_nid(type_: Nid) -> Option<MessageDigest> {
+    pub fn from_nid(type_: Nid) -> Option<Self> {
         unsafe {
             let ptr = ffi::EVP_get_digestbynid(type_.as_raw());
             if ptr.is_null() {
                 None
             } else {
-                Some(MessageDigest(ptr))
+                Some(Self(ptr))
             }
         }
     }
 
     #[must_use]
-    pub fn md5() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_md5()) }
+    pub fn md5() -> Self {
+        unsafe { Self(ffi::EVP_md5()) }
     }
 
     #[must_use]
-    pub fn sha1() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha1()) }
+    pub fn sha1() -> Self {
+        unsafe { Self(ffi::EVP_sha1()) }
     }
 
     #[must_use]
-    pub fn sha224() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha224()) }
+    pub fn sha224() -> Self {
+        unsafe { Self(ffi::EVP_sha224()) }
     }
 
     #[must_use]
-    pub fn sha256() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha256()) }
+    pub fn sha256() -> Self {
+        unsafe { Self(ffi::EVP_sha256()) }
     }
 
     #[must_use]
-    pub fn sha384() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha384()) }
+    pub fn sha384() -> Self {
+        unsafe { Self(ffi::EVP_sha384()) }
     }
 
     #[must_use]
-    pub fn sha512() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha512()) }
+    pub fn sha512() -> Self {
+        unsafe { Self(ffi::EVP_sha512()) }
     }
 
     #[must_use]
-    pub fn sha512_256() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha512_256()) }
+    pub fn sha512_256() -> Self {
+        unsafe { Self(ffi::EVP_sha512_256()) }
     }
 
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_ptr(self) -> *const ffi::EVP_MD {
+    pub const fn as_ptr(self) -> *const ffi::EVP_MD {
         self.0
     }
 
@@ -155,12 +155,12 @@ unsafe impl Send for Hasher {}
 
 impl Hasher {
     /// Creates a new `Hasher` with the specified hash type.
-    pub fn new(ty: MessageDigest) -> Result<Hasher, ErrorStack> {
+    pub fn new(ty: MessageDigest) -> Result<Self, ErrorStack> {
         ffi::init();
 
         let ctx = unsafe { cvt_p(EVP_MD_CTX_new())? };
 
-        let mut h = Hasher {
+        let mut h = Self {
             ctx,
             md: ty.as_ptr(),
             type_: ty,
@@ -212,7 +212,7 @@ impl Hasher {
             cvt(ffi::EVP_DigestFinal_ex(
                 self.ctx,
                 buf.as_mut_ptr(),
-                &mut len,
+                &raw mut len,
             ))?;
             self.state = Finalized;
             Ok(DigestBytes {
@@ -253,7 +253,7 @@ impl Write for Hasher {
 }
 
 impl Clone for Hasher {
-    fn clone(&self) -> Hasher {
+    fn clone(&self) -> Self {
         let ctx = unsafe {
             let ctx = EVP_MD_CTX_new();
             assert!(!ctx.is_null());
@@ -261,7 +261,7 @@ impl Clone for Hasher {
             assert_eq!(r, 1);
             ctx
         };
-        Hasher {
+        Self {
             ctx,
             md: self.md,
             type_: self.type_,
@@ -293,7 +293,7 @@ pub struct DigestBytes {
 
 impl Clone for DigestBytes {
     #[inline]
-    fn clone(&self) -> DigestBytes {
+    fn clone(&self) -> Self {
         *self
     }
 }
@@ -372,7 +372,7 @@ pub(crate) fn hmac<const N: usize>(
             data.as_ptr(),
             data.len(),
             out.as_mut_ptr(),
-            &mut out_len,
+            &raw mut out_len,
         )
     })?;
 

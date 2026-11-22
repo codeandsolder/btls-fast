@@ -40,9 +40,9 @@ where
 }
 
 impl Dh<Params> {
-    pub fn from_params(p: BigNum, g: BigNum, q: BigNum) -> Result<Dh<Params>, ErrorStack> {
+    pub fn from_params(p: BigNum, g: BigNum, q: BigNum) -> Result<Self, ErrorStack> {
         unsafe {
-            let dh = Dh::from_ptr(cvt_p(ffi::DH_new())?);
+            let dh = Self::from_ptr(cvt_p(ffi::DH_new())?);
             cvt(DH_set0_pqg(dh.0, p.as_ptr(), q.as_ptr(), g.as_ptr()))?;
             mem::forget((p, g, q));
             Ok(dh)

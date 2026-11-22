@@ -80,20 +80,20 @@ impl MlKemPrivateKey {
     /// Generates a new key pair, returning `(public_key, private_key)`.
     ///
     /// The private key is a 64-byte seed. Keep it secret.
-    pub fn generate(algorithm: Algorithm) -> Result<(MlKemPublicKey, MlKemPrivateKey), ErrorStack> {
+    pub fn generate(algorithm: Algorithm) -> Result<(MlKemPublicKey, Self), ErrorStack> {
         match algorithm {
             Algorithm::MlKem768 => {
                 let (pk, sk) = MlKem768PrivateKey::generate()?;
                 Ok((
                     MlKemPublicKey(Either::MlKem768(pk)),
-                    MlKemPrivateKey(Either::MlKem768(sk)),
+                    Self(Either::MlKem768(sk)),
                 ))
             }
             Algorithm::MlKem1024 => {
                 let (pk, sk) = MlKem1024PrivateKey::generate()?;
                 Ok((
                     MlKemPublicKey(Either::MlKem1024(pk)),
-                    MlKemPrivateKey(Either::MlKem1024(sk)),
+                    Self(Either::MlKem1024(sk)),
                 ))
             }
         }
@@ -136,7 +136,7 @@ impl MlKemPublicKey {
     }
 
     /// Query public key and ciphertext length
-    pub fn algorithm(&self) -> Algorithm {
+    pub const fn algorithm(&self) -> Algorithm {
         match self.0 {
             Either::MlKem768(_) => Algorithm::MlKem768,
             Either::MlKem1024(_) => Algorithm::MlKem1024,
@@ -187,7 +187,7 @@ impl MlKemPrivateKey {
     }
 
     /// Query public key and ciphertext length
-    pub fn algorithm(&self) -> Algorithm {
+    pub const fn algorithm(&self) -> Algorithm {
         match self.0 {
             Either::MlKem768(_) => Algorithm::MlKem768,
             Either::MlKem1024(_) => Algorithm::MlKem1024,
@@ -214,7 +214,7 @@ impl MlKem768PrivateKey {
     pub const CIPHERTEXT_BYTES: usize = ffi::MLKEM768_CIPHERTEXT_BYTES as usize;
 
     /// Generate a new key pair.
-    fn generate() -> Result<(Box<MlKem768PublicKey>, Box<MlKem768PrivateKey>), ErrorStack> {
+    fn generate() -> Result<(Box<MlKem768PublicKey>, Box<Self>), ErrorStack> {
         // SAFETY: all buffers are out parameters, correctly sized
         unsafe {
             ffi::init();
@@ -230,7 +230,7 @@ impl MlKem768PrivateKey {
 
             Ok((
                 Box::new(MlKem768PublicKey::from_slice(&bytes)?),
-                Box::new(MlKem768PrivateKey {
+                Box::new(Self {
                     seed,
                     expanded: expanded.assume_init(),
                 }),
@@ -295,7 +295,7 @@ impl MlKem768PrivateKey {
                 shared_secret.as_mut_ptr(),
                 ciphertext.as_ptr(),
                 ciphertext.len(),
-                &self.expanded,
+                &raw const self.expanded,
             );
 
             shared_secret
@@ -350,7 +350,7 @@ impl MlKem768PublicKey {
 
             cvt(ffi::MLKEM768_parse_public_key(
                 parsed.as_mut_ptr(),
-                &mut cbs,
+                &raw mut cbs,
             ))?;
             if cbs.len != 0 {
                 return Err(ErrorStack::internal_error_str(
@@ -383,7 +383,7 @@ impl MlKem768PublicKey {
             ffi::MLKEM768_encap(
                 ciphertext.as_mut_ptr(),
                 shared_secret.as_mut_ptr(),
-                &self.parsed,
+                &raw const self.parsed,
             );
 
             (ciphertext, shared_secret)
@@ -419,7 +419,7 @@ impl MlKem1024PrivateKey {
     pub const CIPHERTEXT_BYTES: usize = ffi::MLKEM1024_CIPHERTEXT_BYTES as usize;
 
     /// Generate a new key pair.
-    fn generate() -> Result<(Box<MlKem1024PublicKey>, Box<MlKem1024PrivateKey>), ErrorStack> {
+    fn generate() -> Result<(Box<MlKem1024PublicKey>, Box<Self>), ErrorStack> {
         // SAFETY: all buffers are out parameters, correctly sized
         unsafe {
             ffi::init();
@@ -435,7 +435,7 @@ impl MlKem1024PrivateKey {
 
             Ok((
                 Box::new(MlKem1024PublicKey::from_slice(&bytes)?),
-                Box::new(MlKem1024PrivateKey {
+                Box::new(Self {
                     seed,
                     expanded: expanded.assume_init(),
                 }),
@@ -500,7 +500,7 @@ impl MlKem1024PrivateKey {
                 shared_secret.as_mut_ptr(),
                 ciphertext.as_ptr(),
                 ciphertext.len(),
-                &self.expanded,
+                &raw const self.expanded,
             );
 
             shared_secret
@@ -557,7 +557,7 @@ impl MlKem1024PublicKey {
 
             cvt(ffi::MLKEM1024_parse_public_key(
                 parsed.as_mut_ptr(),
-                &mut cbs,
+                &raw mut cbs,
             ))?;
             if cbs.len != 0 {
                 return Err(ErrorStack::internal_error_str(
@@ -590,7 +590,7 @@ impl MlKem1024PublicKey {
             ffi::MLKEM1024_encap(
                 ciphertext.as_mut_ptr(),
                 shared_secret.as_mut_ptr(),
-                &self.parsed,
+                &raw const self.parsed,
             );
 
             (ciphertext, shared_secret)

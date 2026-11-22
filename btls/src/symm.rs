@@ -144,113 +144,113 @@ impl Cipher {
     /// Looks up the cipher for a certain nid.
     #[corresponds(EVP_get_cipherbynid)]
     #[must_use]
-    pub fn from_nid(nid: Nid) -> Option<Cipher> {
+    pub fn from_nid(nid: Nid) -> Option<Self> {
         let ptr = unsafe { ffi::EVP_get_cipherbynid(nid.as_raw()) };
         if ptr.is_null() {
             None
         } else {
-            Some(Cipher(ptr))
+            Some(Self(ptr))
         }
     }
 
     #[must_use]
-    pub fn aes_128_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_ecb()) }
+    pub fn aes_128_ecb() -> Self {
+        unsafe { Self(ffi::EVP_aes_128_ecb()) }
     }
 
     #[must_use]
-    pub fn aes_128_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_cbc()) }
+    pub fn aes_128_cbc() -> Self {
+        unsafe { Self(ffi::EVP_aes_128_cbc()) }
     }
 
     #[must_use]
-    pub fn aes_128_ctr() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_ctr()) }
+    pub fn aes_128_ctr() -> Self {
+        unsafe { Self(ffi::EVP_aes_128_ctr()) }
     }
 
     #[must_use]
-    pub fn aes_128_gcm() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_gcm()) }
+    pub fn aes_128_gcm() -> Self {
+        unsafe { Self(ffi::EVP_aes_128_gcm()) }
     }
 
     #[must_use]
-    pub fn aes_128_ofb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_ofb()) }
+    pub fn aes_128_ofb() -> Self {
+        unsafe { Self(ffi::EVP_aes_128_ofb()) }
     }
 
     #[must_use]
-    pub fn aes_192_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_ecb()) }
+    pub fn aes_192_ecb() -> Self {
+        unsafe { Self(ffi::EVP_aes_192_ecb()) }
     }
 
     #[must_use]
-    pub fn aes_192_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_cbc()) }
+    pub fn aes_192_cbc() -> Self {
+        unsafe { Self(ffi::EVP_aes_192_cbc()) }
     }
 
     #[must_use]
-    pub fn aes_192_ctr() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_ctr()) }
+    pub fn aes_192_ctr() -> Self {
+        unsafe { Self(ffi::EVP_aes_192_ctr()) }
     }
 
     #[must_use]
-    pub fn aes_192_gcm() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_gcm()) }
+    pub fn aes_192_gcm() -> Self {
+        unsafe { Self(ffi::EVP_aes_192_gcm()) }
     }
 
     #[must_use]
-    pub fn aes_192_ofb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_ofb()) }
+    pub fn aes_192_ofb() -> Self {
+        unsafe { Self(ffi::EVP_aes_192_ofb()) }
     }
 
     #[must_use]
-    pub fn aes_256_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_ecb()) }
+    pub fn aes_256_ecb() -> Self {
+        unsafe { Self(ffi::EVP_aes_256_ecb()) }
     }
 
     #[must_use]
-    pub fn aes_256_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_cbc()) }
+    pub fn aes_256_cbc() -> Self {
+        unsafe { Self(ffi::EVP_aes_256_cbc()) }
     }
 
     #[must_use]
-    pub fn aes_256_ctr() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_ctr()) }
+    pub fn aes_256_ctr() -> Self {
+        unsafe { Self(ffi::EVP_aes_256_ctr()) }
     }
 
     #[must_use]
-    pub fn aes_256_gcm() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_gcm()) }
+    pub fn aes_256_gcm() -> Self {
+        unsafe { Self(ffi::EVP_aes_256_gcm()) }
     }
 
     #[must_use]
-    pub fn aes_256_ofb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_ofb()) }
+    pub fn aes_256_ofb() -> Self {
+        unsafe { Self(ffi::EVP_aes_256_ofb()) }
     }
 
     #[must_use]
-    pub fn des_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_cbc()) }
+    pub fn des_cbc() -> Self {
+        unsafe { Self(ffi::EVP_des_cbc()) }
     }
 
     #[must_use]
-    pub fn des_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_ecb()) }
+    pub fn des_ecb() -> Self {
+        unsafe { Self(ffi::EVP_des_ecb()) }
     }
 
     #[must_use]
-    pub fn des_ede3() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_ede3()) }
+    pub fn des_ede3() -> Self {
+        unsafe { Self(ffi::EVP_des_ede3()) }
     }
 
     #[must_use]
-    pub fn des_ede3_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_ede3_cbc()) }
+    pub fn des_ede3_cbc() -> Self {
+        unsafe { Self(ffi::EVP_des_ede3_cbc()) }
     }
 
     #[must_use]
-    pub fn rc4() -> Cipher {
-        unsafe { Cipher(ffi::EVP_rc4()) }
+    pub fn rc4() -> Self {
+        unsafe { Self(ffi::EVP_rc4()) }
     }
 
     /// Creates a `Cipher` from a raw pointer to its OpenSSL type.
@@ -259,12 +259,12 @@ impl Cipher {
     ///
     /// The caller must ensure the pointer is valid for the `'static` lifetime.
     #[must_use]
-    pub unsafe fn from_ptr(ptr: *const ffi::EVP_CIPHER) -> Cipher {
-        Cipher(ptr)
+    pub const unsafe fn from_ptr(ptr: *const ffi::EVP_CIPHER) -> Self {
+        Self(ptr)
     }
 
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_ptr(self) -> *const ffi::EVP_CIPHER {
+    pub const fn as_ptr(self) -> *const ffi::EVP_CIPHER {
         self.0
     }
 
@@ -387,17 +387,12 @@ impl Crypter {
     ///
     /// Panics if an IV is required by the cipher but not provided.  Also make sure that the key
     /// and IV size are appropriate for your cipher.
-    pub fn new(
-        t: Cipher,
-        mode: Mode,
-        key: &[u8],
-        iv: Option<&[u8]>,
-    ) -> Result<Crypter, ErrorStack> {
+    pub fn new(t: Cipher, mode: Mode, key: &[u8], iv: Option<&[u8]>) -> Result<Self, ErrorStack> {
         ffi::init();
 
         unsafe {
             let ctx = cvt_p(ffi::EVP_CIPHER_CTX_new())?;
-            let crypter = Crypter {
+            let crypter = Self {
                 ctx,
                 block_size: t.block_size(),
             };
@@ -500,7 +495,7 @@ impl Crypter {
             cvt(ffi::EVP_CipherUpdate(
                 self.ctx,
                 ptr::null_mut(),
-                &mut len,
+                &raw mut len,
                 ptr::null_mut(),
                 try_int(data_len)?,
             ))
@@ -518,7 +513,7 @@ impl Crypter {
             cvt(ffi::EVP_CipherUpdate(
                 self.ctx,
                 ptr::null_mut(),
-                &mut len,
+                &raw mut len,
                 input.as_ptr(),
                 try_int(input.len())?,
             ))
@@ -550,7 +545,7 @@ impl Crypter {
             cvt(ffi::EVP_CipherUpdate(
                 self.ctx,
                 output.as_mut_ptr(),
-                &mut outl,
+                &raw mut outl,
                 input.as_ptr(),
                 try_int(input.len())?,
             ))?;
@@ -580,7 +575,7 @@ impl Crypter {
             cvt(ffi::EVP_CipherFinal_ex(
                 self.ctx,
                 output.as_mut_ptr(),
-                &mut outl,
+                &raw mut outl,
             ))?;
 
             Ok(outl as usize)

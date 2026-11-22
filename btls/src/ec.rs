@@ -43,16 +43,14 @@ pub struct PointConversionForm(ffi::point_conversion_form_t);
 
 impl PointConversionForm {
     /// Compressed conversion from point value.
-    pub const COMPRESSED: PointConversionForm =
-        PointConversionForm(ffi::point_conversion_form_t::POINT_CONVERSION_COMPRESSED);
+    pub const COMPRESSED: Self = Self(ffi::point_conversion_form_t::POINT_CONVERSION_COMPRESSED);
 
     /// Uncompressed conversion from point value.
-    pub const UNCOMPRESSED: PointConversionForm =
-        PointConversionForm(ffi::point_conversion_form_t::POINT_CONVERSION_UNCOMPRESSED);
+    pub const UNCOMPRESSED: Self =
+        Self(ffi::point_conversion_form_t::POINT_CONVERSION_UNCOMPRESSED);
 
     /// Performs both compressed and uncompressed conversions.
-    pub const HYBRID: PointConversionForm =
-        PointConversionForm(ffi::point_conversion_form_t::POINT_CONVERSION_HYBRID);
+    pub const HYBRID: Self = Self(ffi::point_conversion_form_t::POINT_CONVERSION_HYBRID);
 }
 
 /// Named Curve or Explicit
@@ -75,7 +73,7 @@ impl Asn1Flag {
     /// OpenSSL documentation at [`EC_GROUP`]
     ///
     /// [`EC_GROUP`]: https://www.openssl.org/docs/man1.1.0/crypto/EC_GROUP_get_seed_len.html
-    pub const EXPLICIT_CURVE: Asn1Flag = Asn1Flag(0);
+    pub const EXPLICIT_CURVE: Self = Self(0);
 
     /// Standard Curves
     ///
@@ -85,7 +83,7 @@ impl Asn1Flag {
     /// OpenSSL documentation at [`EC_GROUP`]
     ///
     /// [`EC_GROUP`]: https://www.openssl.org/docs/manmaster/man3/EC_GROUP_order_bits.html
-    pub const NAMED_CURVE: Asn1Flag = Asn1Flag(ffi::OPENSSL_EC_NAMED_CURVE);
+    pub const NAMED_CURVE: Self = Self(ffi::OPENSSL_EC_NAMED_CURVE);
 }
 
 foreign_type_and_impl_send_sync! {
@@ -114,10 +112,10 @@ foreign_type_and_impl_send_sync! {
 impl EcGroup {
     /// Returns the group of a standard named curve.
     #[corresponds(EC_GROUP_new)]
-    pub fn from_curve_name(nid: Nid) -> Result<EcGroup, ErrorStack> {
+    pub fn from_curve_name(nid: Nid) -> Result<Self, ErrorStack> {
         unsafe {
             init();
-            cvt_p(ffi::EC_GROUP_new_by_curve_name(nid.as_raw())).map(|p| EcGroup::from_ptr(p))
+            cvt_p(ffi::EC_GROUP_new_by_curve_name(nid.as_raw())).map(|p| Self::from_ptr(p))
         }
     }
 }
@@ -253,8 +251,8 @@ impl EcPointRef {
     pub fn add(
         &mut self,
         group: &EcGroupRef,
-        a: &EcPointRef,
-        b: &EcPointRef,
+        a: &Self,
+        b: &Self,
         ctx: &mut BigNumContextRef,
     ) -> Result<(), ErrorStack> {
         unsafe {
@@ -273,7 +271,7 @@ impl EcPointRef {
     pub fn mul(
         &mut self,
         group: &EcGroupRef,
-        q: &EcPointRef,
+        q: &Self,
         m: &BigNumRef,
         ctx: &mut BigNumContextRef,
     ) -> Result<(), ErrorStack> {
@@ -313,7 +311,7 @@ impl EcPointRef {
         &mut self,
         group: &EcGroupRef,
         n: &BigNumRef,
-        q: &EcPointRef,
+        q: &Self,
         m: &BigNumRef,
         ctx: &mut BigNumContextRef,
     ) -> Result<(), ErrorStack> {
@@ -394,7 +392,7 @@ impl EcPointRef {
     pub fn eq(
         &self,
         group: &EcGroupRef,
-        other: &EcPointRef,
+        other: &Self,
         ctx: &mut BigNumContextRef,
     ) -> Result<bool, ErrorStack> {
         unsafe {
@@ -481,8 +479,8 @@ impl EcPointRef {
 impl EcPoint {
     /// Creates a new point on the specified curve.
     #[corresponds(EC_POINT_new)]
-    pub fn new(group: &EcGroupRef) -> Result<EcPoint, ErrorStack> {
-        unsafe { cvt_p(ffi::EC_POINT_new(group.as_ptr())).map(|p| EcPoint::from_ptr(p)) }
+    pub fn new(group: &EcGroupRef) -> Result<Self, ErrorStack> {
+        unsafe { cvt_p(ffi::EC_POINT_new(group.as_ptr())).map(|p| Self::from_ptr(p)) }
     }
 
     /// Creates point from a binary representation
@@ -491,8 +489,8 @@ impl EcPoint {
         group: &EcGroupRef,
         buf: &[u8],
         ctx: &mut BigNumContextRef,
-    ) -> Result<EcPoint, ErrorStack> {
-        let point = EcPoint::new(group)?;
+    ) -> Result<Self, ErrorStack> {
+        let point = Self::new(group)?;
         unsafe {
             cvt(ffi::EC_POINT_oct2point(
                 group.as_ptr(),
@@ -626,19 +624,19 @@ impl EcKey<Params> {
     /// It will not have an associated public or private key. This kind of key is primarily useful
     /// to be provided to the `set_tmp_ecdh` methods on `Ssl` and `SslContextBuilder`.
     #[corresponds(EC_KEY_new_by_curve_name)]
-    pub fn from_curve_name(nid: Nid) -> Result<EcKey<Params>, ErrorStack> {
+    pub fn from_curve_name(nid: Nid) -> Result<Self, ErrorStack> {
         unsafe {
             init();
-            cvt_p(ffi::EC_KEY_new_by_curve_name(nid.as_raw())).map(|p| EcKey::from_ptr(p))
+            cvt_p(ffi::EC_KEY_new_by_curve_name(nid.as_raw())).map(|p| Self::from_ptr(p))
         }
     }
 
     /// Constructs an `EcKey` corresponding to a curve.
     #[corresponds(EC_KEY_set_group)]
-    pub fn from_group(group: &EcGroupRef) -> Result<EcKey<Params>, ErrorStack> {
+    pub fn from_group(group: &EcGroupRef) -> Result<Self, ErrorStack> {
         unsafe {
             cvt_p(ffi::EC_KEY_new())
-                .map(|p| EcKey::from_ptr(p))
+                .map(|p| Self::from_ptr(p))
                 .and_then(|key| {
                     cvt(ffi::EC_KEY_set_group(key.as_ptr(), group.as_ptr())).map(|_| key)
                 })
@@ -671,10 +669,10 @@ impl EcKey<Public> {
     pub fn from_public_key(
         group: &EcGroupRef,
         public_key: &EcPointRef,
-    ) -> Result<EcKey<Public>, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         unsafe {
             cvt_p(ffi::EC_KEY_new())
-                .map(|p| EcKey::from_ptr(p))
+                .map(|p| Self::from_ptr(p))
                 .and_then(|key| {
                     cvt(ffi::EC_KEY_set_group(key.as_ptr(), group.as_ptr())).map(|_| key)
                 })
@@ -693,10 +691,10 @@ impl EcKey<Public> {
         group: &EcGroupRef,
         x: &BigNumRef,
         y: &BigNumRef,
-    ) -> Result<EcKey<Public>, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         unsafe {
             cvt_p(ffi::EC_KEY_new())
-                .map(|p| EcKey::from_ptr(p))
+                .map(|p| Self::from_ptr(p))
                 .and_then(|key| {
                     cvt(ffi::EC_KEY_set_group(key.as_ptr(), group.as_ptr())).map(|_| key)
                 })
@@ -733,10 +731,10 @@ impl EcKey<Public> {
 
 impl EcKey<Private> {
     /// Generates a new public/private key pair on the specified curve.
-    pub fn generate(group: &EcGroupRef) -> Result<EcKey<Private>, ErrorStack> {
+    pub fn generate(group: &EcGroupRef) -> Result<Self, ErrorStack> {
         unsafe {
             cvt_p(ffi::EC_KEY_new())
-                .map(|p| EcKey::from_ptr(p))
+                .map(|p| Self::from_ptr(p))
                 .and_then(|key| {
                     cvt(ffi::EC_KEY_set_group(key.as_ptr(), group.as_ptr())).map(|_| key)
                 })
@@ -749,10 +747,10 @@ impl EcKey<Private> {
         group: &EcGroupRef,
         private_number: &BigNumRef,
         public_key: &EcPointRef,
-    ) -> Result<EcKey<Private>, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         unsafe {
             cvt_p(ffi::EC_KEY_new())
-                .map(|p| EcKey::from_ptr(p))
+                .map(|p| Self::from_ptr(p))
                 .and_then(|key| {
                     cvt(ffi::EC_KEY_set_group(key.as_ptr(), group.as_ptr())).map(|_| key)
                 })
@@ -808,7 +806,7 @@ impl EcKey<Private> {
 }
 
 impl<T> Clone for EcKey<T> {
-    fn clone(&self) -> EcKey<T> {
+    fn clone(&self) -> Self {
         (**self).to_owned()
     }
 }

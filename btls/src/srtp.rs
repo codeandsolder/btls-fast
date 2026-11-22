@@ -6,7 +6,7 @@ use std::ffi::CStr;
 use std::str;
 
 /// fake free method, since SRTP_PROTECTION_PROFILE is static
-unsafe fn free(_profile: *mut ffi::SRTP_PROTECTION_PROFILE) {}
+const unsafe fn free(_profile: *mut ffi::SRTP_PROTECTION_PROFILE) {}
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::SRTP_PROTECTION_PROFILE;
@@ -38,28 +38,24 @@ impl SrtpProtectionProfileRef {
 pub struct SrtpProfileId(c_ulong);
 
 impl SrtpProfileId {
-    pub const SRTP_AES128_CM_SHA1_80: SrtpProfileId =
-        SrtpProfileId(ffi::SRTP_AES128_CM_SHA1_80 as _);
-    pub const SRTP_AES128_CM_SHA1_32: SrtpProfileId =
-        SrtpProfileId(ffi::SRTP_AES128_CM_SHA1_32 as _);
-    pub const SRTP_AES128_F8_SHA1_80: SrtpProfileId =
-        SrtpProfileId(ffi::SRTP_AES128_F8_SHA1_80 as _);
-    pub const SRTP_AES128_F8_SHA1_32: SrtpProfileId =
-        SrtpProfileId(ffi::SRTP_AES128_F8_SHA1_32 as _);
-    pub const SRTP_NULL_SHA1_80: SrtpProfileId = SrtpProfileId(ffi::SRTP_NULL_SHA1_80 as _);
-    pub const SRTP_NULL_SHA1_32: SrtpProfileId = SrtpProfileId(ffi::SRTP_NULL_SHA1_32 as _);
-    pub const SRTP_AEAD_AES_128_GCM: SrtpProfileId = SrtpProfileId(ffi::SRTP_AEAD_AES_128_GCM as _);
-    pub const SRTP_AEAD_AES_256_GCM: SrtpProfileId = SrtpProfileId(ffi::SRTP_AEAD_AES_256_GCM as _);
+    pub const SRTP_AES128_CM_SHA1_80: Self = Self(ffi::SRTP_AES128_CM_SHA1_80 as _);
+    pub const SRTP_AES128_CM_SHA1_32: Self = Self(ffi::SRTP_AES128_CM_SHA1_32 as _);
+    pub const SRTP_AES128_F8_SHA1_80: Self = Self(ffi::SRTP_AES128_F8_SHA1_80 as _);
+    pub const SRTP_AES128_F8_SHA1_32: Self = Self(ffi::SRTP_AES128_F8_SHA1_32 as _);
+    pub const SRTP_NULL_SHA1_80: Self = Self(ffi::SRTP_NULL_SHA1_80 as _);
+    pub const SRTP_NULL_SHA1_32: Self = Self(ffi::SRTP_NULL_SHA1_32 as _);
+    pub const SRTP_AEAD_AES_128_GCM: Self = Self(ffi::SRTP_AEAD_AES_128_GCM as _);
+    pub const SRTP_AEAD_AES_256_GCM: Self = Self(ffi::SRTP_AEAD_AES_256_GCM as _);
 
     /// Creates a `SrtpProfileId` from an integer representation.
     #[must_use]
-    pub fn from_raw(value: c_ulong) -> SrtpProfileId {
-        SrtpProfileId(value)
+    pub const fn from_raw(value: c_ulong) -> Self {
+        Self(value)
     }
 
     /// Returns the integer representation of `SrtpProfileId`.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_ulong {
+    pub const fn as_raw(self) -> c_ulong {
         self.0
     }
 }

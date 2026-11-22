@@ -60,8 +60,8 @@ pub struct AesKey(ffi::AES_KEY);
 impl AesKey {
     /// A zeroed key. AES-128 and AES-192 schedules fill only part of it, and the rest must still
     /// be initialized.
-    fn zeroed() -> Self {
-        AesKey(ffi::AES_KEY {
+    const fn zeroed() -> Self {
+        Self(ffi::AES_KEY {
             rd_key: [0; 60],
             rounds: 0,
         })
@@ -73,15 +73,15 @@ impl AesKey {
     ///
     /// Returns an error if the key is not 128, 192, or 256 bits.
     #[corresponds(AES_set_encrypt_key)]
-    pub fn new_encrypt(key: &[u8]) -> Result<AesKey, KeyError> {
+    pub fn new_encrypt(key: &[u8]) -> Result<Self, KeyError> {
         unsafe {
             assert!(key.len() <= c_int::MAX as usize / 8);
 
-            let mut aes_key = AesKey::zeroed();
+            let mut aes_key = Self::zeroed();
             let r = ffi::AES_set_encrypt_key(
                 key.as_ptr(),
                 (key.len() * 8).try_into().map_err(|_| KeyError(()))?,
-                &mut aes_key.0,
+                &raw mut aes_key.0,
             );
             if r == 0 {
                 Ok(aes_key)
@@ -97,15 +97,15 @@ impl AesKey {
     ///
     /// Returns an error if the key is not 128, 192, or 256 bits.
     #[corresponds(AES_set_decrypt_key)]
-    pub fn new_decrypt(key: &[u8]) -> Result<AesKey, KeyError> {
+    pub fn new_decrypt(key: &[u8]) -> Result<Self, KeyError> {
         unsafe {
             assert!(key.len() <= c_int::MAX as usize / 8);
 
-            let mut aes_key = AesKey::zeroed();
+            let mut aes_key = Self::zeroed();
             let r = ffi::AES_set_decrypt_key(
                 key.as_ptr(),
                 (key.len() * 8).try_into().map_err(|_| KeyError(()))?,
-                &mut aes_key.0,
+                &raw mut aes_key.0,
             );
 
             if r == 0 {
@@ -132,13 +132,13 @@ impl Drop for AesKey {
 /// other modes such as QUIC header protection.
 #[corresponds(AES_encrypt)]
 pub fn encrypt_block(key: &AesKey, in_: &[u8; 16], out: &mut [u8; 16]) {
-    unsafe { ffi::AES_encrypt(in_.as_ptr(), out.as_mut_ptr(), &key.0) }
+    unsafe { ffi::AES_encrypt(in_.as_ptr(), out.as_mut_ptr(), &raw const key.0) }
 }
 
 /// Decrypts a single block with a key from [`AesKey::new_decrypt`].
 #[corresponds(AES_decrypt)]
 pub fn decrypt_block(key: &AesKey, in_: &[u8; 16], out: &mut [u8; 16]) {
-    unsafe { ffi::AES_decrypt(in_.as_ptr(), out.as_mut_ptr(), &key.0) }
+    unsafe { ffi::AES_decrypt(in_.as_ptr(), out.as_mut_ptr(), &raw const key.0) }
 }
 
 /// Wrap a key, according to [RFC 3394](https://tools.ietf.org/html/rfc3394)

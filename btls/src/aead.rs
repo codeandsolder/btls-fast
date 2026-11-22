@@ -263,7 +263,7 @@ impl AeadCtx {
                 key.len(),
                 tag_len,
             ))
-            .map(|ptr| AeadCtx::from_ptr(ptr))
+            .map(|ptr| Self::from_ptr(ptr))
         }
     }
 
@@ -290,7 +290,7 @@ impl AeadCtxRef {
         unsafe {
             cvt(ffi::EVP_AEAD_CTX_tag_len(
                 self.as_ptr(),
-                &mut out_tag_len,
+                &raw mut out_tag_len,
                 in_len,
                 extra_in_len,
             ))?;
@@ -412,7 +412,7 @@ impl AeadCtxRef {
                 self.as_ptr(),
                 in_out.as_mut_ptr(),
                 out_tag.as_mut_ptr(),
-                &mut out_tag_len,
+                &raw mut out_tag_len,
                 out_tag.len(),
                 nonce.as_ptr(),
                 nonce.len(),

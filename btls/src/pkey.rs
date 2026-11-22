@@ -73,31 +73,31 @@ pub enum Private {}
 pub struct Id(c_int);
 
 impl Id {
-    pub const RSA: Id = Id(ffi::EVP_PKEY_RSA);
+    pub const RSA: Self = Self(ffi::EVP_PKEY_RSA);
     /// RSA-PSS key type
     #[doc(alias = "RSA_PSS")]
-    pub const RSAPSS: Id = Id(ffi::EVP_PKEY_RSA_PSS);
+    pub const RSAPSS: Self = Self(ffi::EVP_PKEY_RSA_PSS);
     /// rust-openssl alias
     #[doc(hidden)]
-    pub const RSA_PSS: Id = Self::RSAPSS;
-    pub const DSA: Id = Id(ffi::EVP_PKEY_DSA);
-    pub const DH: Id = Id(ffi::EVP_PKEY_DH);
-    pub const EC: Id = Id(ffi::EVP_PKEY_EC);
-    pub const ED25519: Id = Id(ffi::EVP_PKEY_ED25519);
-    pub const ED448: Id = Id(ffi::EVP_PKEY_ED448);
-    pub const X25519: Id = Id(ffi::EVP_PKEY_X25519);
-    pub const X448: Id = Id(ffi::EVP_PKEY_X448);
-    pub const HKDF: Id = Id(ffi::EVP_PKEY_HKDF);
+    pub const RSA_PSS: Self = Self::RSAPSS;
+    pub const DSA: Self = Self(ffi::EVP_PKEY_DSA);
+    pub const DH: Self = Self(ffi::EVP_PKEY_DH);
+    pub const EC: Self = Self(ffi::EVP_PKEY_EC);
+    pub const ED25519: Self = Self(ffi::EVP_PKEY_ED25519);
+    pub const ED448: Self = Self(ffi::EVP_PKEY_ED448);
+    pub const X25519: Self = Self(ffi::EVP_PKEY_X25519);
+    pub const X448: Self = Self(ffi::EVP_PKEY_X448);
+    pub const HKDF: Self = Self(ffi::EVP_PKEY_HKDF);
 
     /// Creates a `Id` from an integer representation.
     #[must_use]
-    pub fn from_raw(value: c_int) -> Id {
-        Id(value)
+    pub const fn from_raw(value: c_int) -> Self {
+        Self(value)
     }
 
     /// Returns the integer representation of the `Id`.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -254,7 +254,7 @@ where
             _ = cvt_0i(ffi::EVP_PKEY_get_raw_public_key(
                 self.as_ptr(),
                 ptr::null_mut(),
-                &mut size,
+                &raw mut size,
             ))?;
             Ok(size)
         }
@@ -270,7 +270,7 @@ where
             _ = cvt_0i(ffi::EVP_PKEY_get_raw_public_key(
                 self.as_ptr(),
                 out.as_mut_ptr(),
-                &mut size,
+                &raw mut size,
             ))?;
             Ok(&out[..size])
         }
@@ -322,7 +322,7 @@ where
             _ = cvt_0i(ffi::EVP_PKEY_get_raw_private_key(
                 self.as_ptr(),
                 ptr::null_mut(),
-                &mut size,
+                &raw mut size,
             ))?;
             Ok(size)
         }
@@ -338,7 +338,7 @@ where
             _ = cvt_0i(ffi::EVP_PKEY_get_raw_private_key(
                 self.as_ptr(),
                 out.as_mut_ptr(),
-                &mut size,
+                &raw mut size,
             ))?;
             Ok(&out[..size])
         }
@@ -363,7 +363,7 @@ impl<T> fmt::Debug for PKey<T> {
 }
 
 impl<T> Clone for PKey<T> {
-    fn clone(&self) -> PKey<T> {
+    fn clone(&self) -> Self {
         PKeyRef::to_owned(self)
     }
 }
@@ -371,10 +371,10 @@ impl<T> Clone for PKey<T> {
 impl<T> PKey<T> {
     /// Creates a new `PKey` containing an RSA key.
     #[corresponds(EVP_PKEY_assign_RSA)]
-    pub fn from_rsa(rsa: Rsa<T>) -> Result<PKey<T>, ErrorStack> {
+    pub fn from_rsa(rsa: Rsa<T>) -> Result<Self, ErrorStack> {
         unsafe {
             let evp = cvt_p(ffi::EVP_PKEY_new())?;
-            let pkey = PKey::from_ptr(evp);
+            let pkey = Self::from_ptr(evp);
             cvt(ffi::EVP_PKEY_assign(
                 pkey.0,
                 ffi::EVP_PKEY_RSA,
@@ -387,10 +387,10 @@ impl<T> PKey<T> {
 
     /// Creates a new `PKey` containing an elliptic curve key.
     #[corresponds(EVP_PKEY_assign_EC_KEY)]
-    pub fn from_ec_key(ec_key: EcKey<T>) -> Result<PKey<T>, ErrorStack> {
+    pub fn from_ec_key(ec_key: EcKey<T>) -> Result<Self, ErrorStack> {
         unsafe {
             let evp = cvt_p(ffi::EVP_PKEY_new())?;
-            let pkey = PKey::from_ptr(evp);
+            let pkey = Self::from_ptr(evp);
             cvt(ffi::EVP_PKEY_assign(
                 pkey.0,
                 ffi::EVP_PKEY_EC,
@@ -413,7 +413,7 @@ impl PKey<Private> {
     /// key size or an EC group) should use their dedicated APIs instead, such
     /// as [`Rsa::generate`] and [`EcKey::generate`].
     #[corresponds(EVP_PKEY_keygen)]
-    pub fn generate(id: Id) -> Result<PKey<Private>, ErrorStack> {
+    pub fn generate(id: Id) -> Result<Self, ErrorStack> {
         unsafe {
             ffi::init();
 
@@ -423,9 +423,9 @@ impl PKey<Private> {
                 cvt(ffi::EVP_PKEY_keygen_init(ctx))?;
 
                 let mut pkey = ptr::null_mut();
-                cvt(ffi::EVP_PKEY_keygen(ctx, &mut pkey))?;
+                cvt(ffi::EVP_PKEY_keygen(ctx, &raw mut pkey))?;
 
-                Ok(PKey::from_ptr(pkey))
+                Ok(Self::from_ptr(pkey))
             })();
 
             ffi::EVP_PKEY_CTX_free(ctx);
@@ -467,7 +467,7 @@ impl PKey<Private> {
     /// Deserializes a DER-formatted PKCS#8 unencrypted private key.
     ///
     /// This method is mainly for interoperability reasons. Encrypted keyfiles should be preferred.
-    pub fn private_key_from_pkcs8(der: &[u8]) -> Result<PKey<Private>, ErrorStack> {
+    pub fn private_key_from_pkcs8(der: &[u8]) -> Result<Self, ErrorStack> {
         unsafe {
             ffi::init();
             let len = der.len().min(c_long::MAX as usize) as c_long;
@@ -476,7 +476,7 @@ impl PKey<Private> {
                 &mut der.as_ptr(),
                 len,
             ))?;
-            let res = cvt_p(ffi::EVP_PKCS82PKEY(p8inf)).map(|p| PKey::from_ptr(p));
+            let res = cvt_p(ffi::EVP_PKCS82PKEY(p8inf)).map(|p| Self::from_ptr(p));
             ffi::PKCS8_PRIV_KEY_INFO_free(p8inf);
             res
         }
@@ -487,10 +487,7 @@ impl PKey<Private> {
     ///
     /// The callback should copy the password into the provided buffer and return the number of
     /// bytes written.
-    pub fn private_key_from_pkcs8_callback<F>(
-        der: &[u8],
-        callback: F,
-    ) -> Result<PKey<Private>, ErrorStack>
+    pub fn private_key_from_pkcs8_callback<F>(der: &[u8], callback: F) -> Result<Self, ErrorStack>
     where
         F: FnOnce(&mut [u8]) -> Result<usize, ErrorStack>,
     {
@@ -504,7 +501,7 @@ impl PKey<Private> {
                 Some(invoke_passwd_cb::<F>),
                 std::ptr::addr_of_mut!(cb).cast(),
             ))
-            .map(|p| PKey::from_ptr(p))
+            .map(|p| Self::from_ptr(p))
         }
     }
 
@@ -517,7 +514,7 @@ impl PKey<Private> {
     pub fn private_key_from_pkcs8_passphrase(
         der: &[u8],
         passphrase: &[u8],
-    ) -> Result<PKey<Private>, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         unsafe {
             ffi::init();
             let bio = MemBioSlice::new(der)?;
@@ -528,7 +525,7 @@ impl PKey<Private> {
                 None,
                 passphrase.as_ptr().cast_mut().cast(),
             ))
-            .map(|p| PKey::from_ptr(p))
+            .map(|p| Self::from_ptr(p))
         }
     }
 }

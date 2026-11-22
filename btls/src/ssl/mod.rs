@@ -334,8 +334,8 @@ impl SslMethod {
     /// The caller must ensure the pointer is valid.
     #[corresponds(TLS_server_method)]
     #[must_use]
-    pub unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> SslMethod {
-        SslMethod {
+    pub const unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> Self {
+        Self {
             ptr,
             is_x509_method: false,
         }
@@ -348,13 +348,13 @@ impl SslMethod {
     /// BoringSSL will crash if the user calls a function that involves
     /// X.509 certificates with an object configured with this method.
     /// You most probably don't need it.
-    pub unsafe fn assume_x509(&mut self) {
+    pub const unsafe fn assume_x509(&mut self) {
         self.is_x509_method = true;
     }
 
     /// Returns a pointer to the underlying OpenSSL value.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_ptr(self) -> *const ffi::SSL_METHOD {
+    pub const fn as_ptr(self) -> *const ffi::SSL_METHOD {
         self.ptr
     }
 
@@ -408,7 +408,7 @@ impl From<X509VerifyError> for SslVerifyError {
     fn from(err: X509VerifyError) -> Self {
         // SAFETY: only maps an integer.
         let alert = unsafe { ffi::SSL_alert_from_verify_result(c_long::from(err.as_raw())) };
-        SslVerifyError::Invalid(SslAlert(alert))
+        Self::Invalid(SslAlert(alert))
     }
 }
 
@@ -456,22 +456,22 @@ impl SslFiletype {
     /// The PEM format.
     ///
     /// This corresponds to `SSL_FILETYPE_PEM`.
-    pub const PEM: SslFiletype = SslFiletype(ffi::SSL_FILETYPE_PEM);
+    pub const PEM: Self = Self(ffi::SSL_FILETYPE_PEM);
 
     /// The ASN1 format.
     ///
     /// This corresponds to `SSL_FILETYPE_ASN1`.
-    pub const ASN1: SslFiletype = SslFiletype(ffi::SSL_FILETYPE_ASN1);
+    pub const ASN1: Self = Self(ffi::SSL_FILETYPE_ASN1);
 
     /// Constructs an `SslFiletype` from a raw OpenSSL value.
     #[must_use]
-    pub fn from_raw(raw: c_int) -> SslFiletype {
-        SslFiletype(raw)
+    pub const fn from_raw(raw: c_int) -> Self {
+        Self(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -482,17 +482,17 @@ pub struct StatusType(c_int);
 
 impl StatusType {
     /// An OSCP status.
-    pub const OCSP: StatusType = StatusType(ffi::TLSEXT_STATUSTYPE_ocsp);
+    pub const OCSP: Self = Self(ffi::TLSEXT_STATUSTYPE_ocsp);
 
     /// Constructs a `StatusType` from a raw OpenSSL value.
     #[must_use]
-    pub fn from_raw(raw: c_int) -> StatusType {
-        StatusType(raw)
+    pub const fn from_raw(raw: c_int) -> Self {
+        Self(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -503,17 +503,17 @@ pub struct NameType(c_int);
 
 impl NameType {
     /// A host name.
-    pub const HOST_NAME: NameType = NameType(ffi::TLSEXT_NAMETYPE_host_name);
+    pub const HOST_NAME: Self = Self(ffi::TLSEXT_NAMETYPE_host_name);
 
     /// Constructs a `StatusType` from a raw OpenSSL value.
     #[must_use]
-    pub fn from_raw(raw: c_int) -> StatusType {
+    pub const fn from_raw(raw: c_int) -> StatusType {
         StatusType(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -543,12 +543,12 @@ pub struct SniError(c_int);
 
 impl SniError {
     /// Abort the handshake with a fatal alert.
-    pub const ALERT_FATAL: SniError = SniError(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
+    pub const ALERT_FATAL: Self = Self(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
 
     /// Send a warning alert to the client and continue the handshake.
-    pub const ALERT_WARNING: SniError = SniError(ffi::SSL_TLSEXT_ERR_ALERT_WARNING);
+    pub const ALERT_WARNING: Self = Self(ffi::SSL_TLSEXT_ERR_ALERT_WARNING);
 
-    pub const NOACK: SniError = SniError(ffi::SSL_TLSEXT_ERR_NOACK);
+    pub const NOACK: Self = Self(ffi::SSL_TLSEXT_ERR_NOACK);
 }
 
 /// An SSL/TLS alert.
@@ -594,7 +594,7 @@ impl SslAlert {
 
     /// Returns the alert's description code.
     #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    pub const fn as_raw(&self) -> c_int {
         self.0
     }
 
@@ -616,10 +616,10 @@ pub struct AlpnError(c_int);
 
 impl AlpnError {
     /// Terminate the handshake with a fatal alert.
-    pub const ALERT_FATAL: AlpnError = AlpnError(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
+    pub const ALERT_FATAL: Self = Self(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
 
     /// Do not select a protocol, but continue the handshake.
-    pub const NOACK: AlpnError = AlpnError(ffi::SSL_TLSEXT_ERR_NOACK);
+    pub const NOACK: Self = Self(ffi::SSL_TLSEXT_ERR_NOACK);
 }
 
 /// An error returned from a certificate selection callback.
@@ -726,28 +726,28 @@ pub struct SslVersion(u16);
 
 impl SslVersion {
     /// SSLv3
-    pub const SSL3: SslVersion = SslVersion(ffi::SSL3_VERSION as _);
+    pub const SSL3: Self = Self(ffi::SSL3_VERSION as _);
 
     /// TLSv1.0
-    pub const TLS1: SslVersion = SslVersion(ffi::TLS1_VERSION as _);
+    pub const TLS1: Self = Self(ffi::TLS1_VERSION as _);
 
     /// TLSv1.1
-    pub const TLS1_1: SslVersion = SslVersion(ffi::TLS1_1_VERSION as _);
+    pub const TLS1_1: Self = Self(ffi::TLS1_1_VERSION as _);
 
     /// TLSv1.2
-    pub const TLS1_2: SslVersion = SslVersion(ffi::TLS1_2_VERSION as _);
+    pub const TLS1_2: Self = Self(ffi::TLS1_2_VERSION as _);
 
     /// TLSv1.3
-    pub const TLS1_3: SslVersion = SslVersion(ffi::TLS1_3_VERSION as _);
+    pub const TLS1_3: Self = Self(ffi::TLS1_3_VERSION as _);
 
     /// DTLSv1.0
-    pub const DTLS1: SslVersion = SslVersion(ffi::DTLS1_VERSION as _);
+    pub const DTLS1: Self = Self(ffi::DTLS1_VERSION as _);
 
     /// DTLSv1.2
-    pub const DTLS1_2: SslVersion = SslVersion(ffi::DTLS1_2_VERSION as _);
+    pub const DTLS1_2: Self = Self(ffi::DTLS1_2_VERSION as _);
 
     /// DTLSv1.3
-    pub const DTLS1_3: SslVersion = SslVersion(ffi::DTLS1_3_VERSION as _);
+    pub const DTLS1_3: Self = Self(ffi::DTLS1_3_VERSION as _);
 }
 
 impl TryFrom<u16> for SslVersion {
@@ -810,52 +810,37 @@ impl fmt::Display for SslVersion {
 pub struct SslSignatureAlgorithm(u16);
 
 impl SslSignatureAlgorithm {
-    pub const RSA_PKCS1_SHA1: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA1 as _);
+    pub const RSA_PKCS1_SHA1: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA1 as _);
 
-    pub const RSA_PKCS1_SHA256: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA256 as _);
+    pub const RSA_PKCS1_SHA256: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA256 as _);
 
-    pub const RSA_PKCS1_SHA384: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA384 as _);
+    pub const RSA_PKCS1_SHA384: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA384 as _);
 
-    pub const RSA_PKCS1_SHA512: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA512 as _);
+    pub const RSA_PKCS1_SHA512: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_SHA512 as _);
 
-    pub const RSA_PKCS1_MD5_SHA1: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_MD5_SHA1 as _);
+    pub const RSA_PKCS1_MD5_SHA1: Self = Self(ffi::SSL_SIGN_RSA_PKCS1_MD5_SHA1 as _);
 
-    pub const ECDSA_SHA1: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SHA1 as _);
+    pub const ECDSA_SHA1: Self = Self(ffi::SSL_SIGN_ECDSA_SHA1 as _);
 
-    pub const ECDSA_SECP256R1_SHA256: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256 as _);
+    pub const ECDSA_SECP256R1_SHA256: Self = Self(ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256 as _);
 
-    pub const ECDSA_SECP384R1_SHA384: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SECP384R1_SHA384 as _);
+    pub const ECDSA_SECP384R1_SHA384: Self = Self(ffi::SSL_SIGN_ECDSA_SECP384R1_SHA384 as _);
 
-    pub const ECDSA_SECP521R1_SHA512: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SECP521R1_SHA512 as _);
+    pub const ECDSA_SECP521R1_SHA512: Self = Self(ffi::SSL_SIGN_ECDSA_SECP521R1_SHA512 as _);
 
-    pub const RSA_PSS_RSAE_SHA256: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256 as _);
+    pub const RSA_PSS_RSAE_SHA256: Self = Self(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256 as _);
 
-    pub const RSA_PSS_RSAE_SHA384: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA384 as _);
+    pub const RSA_PSS_RSAE_SHA384: Self = Self(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA384 as _);
 
-    pub const RSA_PSS_RSAE_SHA512: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA512 as _);
+    pub const RSA_PSS_RSAE_SHA512: Self = Self(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA512 as _);
 
-    pub const ED25519: SslSignatureAlgorithm = SslSignatureAlgorithm(ffi::SSL_SIGN_ED25519 as _);
+    pub const ED25519: Self = Self(ffi::SSL_SIGN_ED25519 as _);
 
-    pub const ML_DSA_44: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ML_DSA_44 as _);
+    pub const ML_DSA_44: Self = Self(ffi::SSL_SIGN_ML_DSA_44 as _);
 
-    pub const ML_DSA_65: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ML_DSA_65 as _);
+    pub const ML_DSA_65: Self = Self(ffi::SSL_SIGN_ML_DSA_65 as _);
 
-    pub const ML_DSA_87: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ML_DSA_87 as _);
+    pub const ML_DSA_87: Self = Self(ffi::SSL_SIGN_ML_DSA_87 as _);
 
     /// Returns the name of this signature algorithm, or `None` if unknown.
     ///
@@ -898,28 +883,27 @@ impl From<u16> for SslSignatureAlgorithm {
 pub struct KeyShare(u16);
 
 impl KeyShare {
-    pub const P256: KeyShare = KeyShare(ffi::SSL_GROUP_SECP256R1 as _);
+    pub const P256: Self = Self(ffi::SSL_GROUP_SECP256R1 as _);
 
-    pub const P384: KeyShare = KeyShare(ffi::SSL_GROUP_SECP384R1 as _);
+    pub const P384: Self = Self(ffi::SSL_GROUP_SECP384R1 as _);
 
-    pub const P521: KeyShare = KeyShare(ffi::SSL_GROUP_SECP521R1 as _);
+    pub const P521: Self = Self(ffi::SSL_GROUP_SECP521R1 as _);
 
-    pub const X25519: KeyShare = KeyShare(ffi::SSL_GROUP_X25519 as _);
+    pub const X25519: Self = Self(ffi::SSL_GROUP_X25519 as _);
 
-    pub const X25519_MLKEM768: KeyShare = KeyShare(ffi::SSL_GROUP_X25519_MLKEM768 as _);
+    pub const X25519_MLKEM768: Self = Self(ffi::SSL_GROUP_X25519_MLKEM768 as _);
 
-    pub const X25519_KYBER768_DRAFT00: KeyShare =
-        KeyShare(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00 as _);
+    pub const X25519_KYBER768_DRAFT00: Self = Self(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00 as _);
 
-    pub const P256_KYBER768_DRAFT00: KeyShare = KeyShare(ffi::SSL_GROUP_P256_KYBER768_DRAFT00 as _);
+    pub const P256_KYBER768_DRAFT00: Self = Self(ffi::SSL_GROUP_P256_KYBER768_DRAFT00 as _);
 
-    pub const MLKEM1024: KeyShare = KeyShare(ffi::SSL_GROUP_MLKEM1024 as _);
-
-    #[cfg(not(feature = "fips"))]
-    pub const FFDHE2048: KeyShare = KeyShare(ffi::SSL_GROUP_FFDHE2048 as _);
+    pub const MLKEM1024: Self = Self(ffi::SSL_GROUP_MLKEM1024 as _);
 
     #[cfg(not(feature = "fips"))]
-    pub const FFDHE3072: KeyShare = KeyShare(ffi::SSL_GROUP_FFDHE3072 as _);
+    pub const FFDHE2048: Self = Self(ffi::SSL_GROUP_FFDHE2048 as _);
+
+    #[cfg(not(feature = "fips"))]
+    pub const FFDHE3072: Self = Self(ffi::SSL_GROUP_FFDHE3072 as _);
 }
 
 /// A TLS 1.3 cipher suite.
@@ -928,14 +912,11 @@ impl KeyShare {
 pub struct Tls13Cipher(u16);
 
 impl Tls13Cipher {
-    pub const AES_128_GCM_SHA256: Tls13Cipher =
-        Tls13Cipher(ffi::SSL_CIPHER_AES_128_GCM_SHA256 as _);
+    pub const AES_128_GCM_SHA256: Self = Self(ffi::SSL_CIPHER_AES_128_GCM_SHA256 as _);
 
-    pub const AES_256_GCM_SHA384: Tls13Cipher =
-        Tls13Cipher(ffi::SSL_CIPHER_AES_256_GCM_SHA384 as _);
+    pub const AES_256_GCM_SHA384: Self = Self(ffi::SSL_CIPHER_AES_256_GCM_SHA384 as _);
 
-    pub const CHACHA20_POLY1305_SHA256: Tls13Cipher =
-        Tls13Cipher(ffi::SSL_CIPHER_CHACHA20_POLY1305_SHA256 as _);
+    pub const CHACHA20_POLY1305_SHA256: Self = Self(ffi::SSL_CIPHER_CHACHA20_POLY1305_SHA256 as _);
 }
 
 /// A compliance policy.
@@ -993,8 +974,8 @@ pub fn select_next_proto<'a>(server: &'a [u8], client: &'a [u8]) -> Option<&'a [
         let mut out = ptr::null_mut();
         let mut outlen = 0;
         let r = ffi::SSL_select_next_proto(
-            &mut out,
-            &mut outlen,
+            &raw mut out,
+            &raw mut outlen,
             server.as_ptr(),
             try_int(server.len()).ok()?,
             client.as_ptr(),
@@ -1106,7 +1087,7 @@ pub struct SslInfoCallbackAlert(c_int);
 impl SslInfoCallbackAlert {
     /// The level of the SSL alert.
     #[must_use]
-    pub fn alert_level(&self) -> Ssl3AlertLevel {
+    pub const fn alert_level(&self) -> Ssl3AlertLevel {
         let value = self.0 >> 8;
         Ssl3AlertLevel(value)
     }
@@ -1123,8 +1104,8 @@ impl SslInfoCallbackAlert {
 pub struct Ssl3AlertLevel(c_int);
 
 impl Ssl3AlertLevel {
-    pub const WARNING: Ssl3AlertLevel = Self(ffi::SSL3_AL_WARNING);
-    pub const FATAL: Ssl3AlertLevel = Self(ffi::SSL3_AL_FATAL);
+    pub const WARNING: Self = Self(ffi::SSL3_AL_WARNING);
+    pub const FATAL: Self = Self(ffi::SSL3_AL_FATAL);
 }
 
 /// A builder for `SslContext`s.
@@ -1137,11 +1118,11 @@ pub struct SslContextBuilder {
 impl SslContextBuilder {
     /// Creates a new `SslContextBuilder`.
     #[corresponds(SSL_CTX_new)]
-    pub fn new(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
+    pub fn new(method: SslMethod) -> Result<Self, ErrorStack> {
         unsafe {
             init();
             let ctx = cvt_p(ffi::SSL_CTX_new(method.as_ptr()))?;
-            let mut builder = SslContextBuilder::from_ptr(ctx);
+            let mut builder = Self::from_ptr(ctx);
 
             if method.is_x509_method {
                 builder.ctx.assume_x509();
@@ -2548,7 +2529,7 @@ impl SslContext {
     /// Each invocation of this function is guaranteed to return a distinct index. These can be used
     /// to store data in the context that can be retrieved later by callbacks, for example.
     #[corresponds(SSL_CTX_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<SslContext, T>, ErrorStack>
+    pub fn new_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
     where
         T: 'static + Sync + Send,
     {
@@ -2560,7 +2541,7 @@ impl SslContext {
     }
 
     // FIXME should return a result?
-    fn cached_ex_index<T>() -> Index<SslContext, T>
+    fn cached_ex_index<T>() -> Index<Self, T>
     where
         T: 'static + Sync + Send,
     {
@@ -2569,7 +2550,7 @@ impl SslContext {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .entry(TypeId::of::<T>())
-                .or_insert_with(|| SslContext::new_ex_index::<T>().unwrap().as_raw());
+                .or_insert_with(|| Self::new_ex_index::<T>().unwrap().as_raw());
             Index::from_raw(idx)
         }
     }
@@ -2639,7 +2620,7 @@ impl SslContextRef {
     pub fn extra_chain_certs(&self) -> &StackRef<X509> {
         unsafe {
             let mut chain = ptr::null_mut();
-            ffi::SSL_CTX_get_extra_chain_certs(self.as_ptr(), &mut chain);
+            ffi::SSL_CTX_get_extra_chain_certs(self.as_ptr(), &raw mut chain);
             assert!(!chain.is_null());
             StackRef::from_ptr(chain)
         }
@@ -2788,7 +2769,11 @@ impl SslContextRef {
         let mut types = ptr::null();
         let mut types_len = 0;
         unsafe {
-            ffi::SSL_CTX_get0_accepted_peer_cert_types(self.as_ptr(), &mut types, &mut types_len);
+            ffi::SSL_CTX_get0_accepted_peer_cert_types(
+                self.as_ptr(),
+                &raw mut types,
+                &raw mut types_len,
+            );
 
             if types_len == 0 {
                 return None;
@@ -2829,8 +2814,12 @@ impl ClientHello<'_> {
         unsafe {
             let mut ptr = ptr::null();
             let mut len = 0;
-            let result =
-                ffi::SSL_early_callback_ctx_extension_get(self.0, ext_type.0, &mut ptr, &mut len);
+            let result = ffi::SSL_early_callback_ctx_extension_get(
+                self.0,
+                ext_type.0,
+                &raw mut ptr,
+                &raw mut len,
+            );
             if result == 0 {
                 return None;
             }
@@ -2855,7 +2844,7 @@ impl ClientHello<'_> {
 
     /// Returns the version sent by the client in its Client Hello record.
     #[must_use]
-    pub fn client_version(&self) -> SslVersion {
+    pub const fn client_version(&self) -> SslVersion {
         SslVersion(self.0.version)
     }
 
@@ -2867,19 +2856,19 @@ impl ClientHello<'_> {
 
     /// Returns the raw data of the client hello message
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.0.client_hello, self.0.client_hello_len) }
     }
 
     /// Returns the client random data
     #[must_use]
-    pub fn random(&self) -> &[u8] {
+    pub const fn random(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.0.random, self.0.random_len) }
     }
 
     /// Returns the raw list of ciphers supported by the client in its Client Hello record.
     #[must_use]
-    pub fn ciphers(&self) -> &[u8] {
+    pub const fn ciphers(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.0.cipher_suites, self.0.cipher_suites_len) }
     }
 }
@@ -2912,8 +2901,8 @@ unsafe impl ForeignType for SslCipher {
     type Ref = SslCipherRef;
 
     #[inline]
-    unsafe fn from_ptr(ptr: *mut ffi::SSL_CIPHER) -> SslCipher {
-        SslCipher(unsafe { SslCipherRef::from_ptr(ptr) })
+    unsafe fn from_ptr(ptr: *mut ffi::SSL_CIPHER) -> Self {
+        Self(unsafe { SslCipherRef::from_ptr(ptr) })
     }
 
     #[inline]
@@ -2992,7 +2981,7 @@ impl SslCipherRef {
     pub fn bits(&self) -> CipherBits {
         unsafe {
             let mut algo_bits = 0;
-            let secret_bits = ffi::SSL_CIPHER_get_bits(self.as_ptr(), &mut algo_bits);
+            let secret_bits = ffi::SSL_CIPHER_get_bits(self.as_ptr(), &raw mut algo_bits);
             CipherBits {
                 secret: secret_bits,
                 algorithm: algo_bits,
@@ -3069,7 +3058,7 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl Clone for SslSession {
-    fn clone(&self) -> SslSession {
+    fn clone(&self) -> Self {
         SslSessionRef::to_owned(self)
     }
 }
@@ -3103,7 +3092,7 @@ impl SslSessionRef {
     pub fn id(&self) -> &[u8] {
         unsafe {
             let mut len = 0;
-            let p = ffi::SSL_SESSION_get_id(self.as_ptr(), &mut len);
+            let p = ffi::SSL_SESSION_get_id(self.as_ptr(), &raw mut len);
             slice::from_raw_parts(p, len as usize)
         }
     }
@@ -3214,7 +3203,7 @@ impl SslSessionRef {
     fn id_context(&self) -> &[u8] {
         unsafe {
             let mut len = 0;
-            let p = ffi::SSL_SESSION_get0_id_context(self.as_ptr(), &mut len);
+            let p = ffi::SSL_SESSION_get0_id_context(self.as_ptr(), &raw mut len);
             if p.is_null() {
                 &[]
             } else {
@@ -3256,7 +3245,7 @@ impl Ssl {
     /// Each invocation of this function is guaranteed to return a distinct index. These can be used
     /// to store data in the context that can be retrieved later by callbacks, for example.
     #[corresponds(SSL_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<Ssl, T>, ErrorStack>
+    pub fn new_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
     where
         T: 'static + Sync + Send,
     {
@@ -3268,7 +3257,7 @@ impl Ssl {
     }
 
     // FIXME should return a result?
-    fn cached_ex_index<T>() -> Index<Ssl, T>
+    fn cached_ex_index<T>() -> Index<Self, T>
     where
         T: 'static + Sync + Send,
     {
@@ -3277,17 +3266,17 @@ impl Ssl {
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .entry(TypeId::of::<T>())
-                .or_insert_with(|| Ssl::new_ex_index::<T>().unwrap().as_raw());
+                .or_insert_with(|| Self::new_ex_index::<T>().unwrap().as_raw());
             Index::from_raw(idx)
         }
     }
 
     /// Creates a new [`Ssl`].
     #[corresponds(SSL_new)]
-    pub fn new(ctx: &SslContextRef) -> Result<Ssl, ErrorStack> {
+    pub fn new(ctx: &SslContextRef) -> Result<Self, ErrorStack> {
         unsafe {
             let ptr = cvt_p(ffi::SSL_new(ctx.as_ptr()))?;
-            let mut ssl = Ssl::from_ptr(ptr);
+            let mut ssl = Self::from_ptr(ptr);
             ssl.set_ex_data(*SESSION_CTX_INDEX, ctx.to_owned());
 
             Ok(ssl)
@@ -3555,7 +3544,7 @@ impl SslRef {
     #[corresponds(SSL_set_custom_verify)]
     pub fn set_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
     where
-        F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
+        F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
         self.ssl_context().check_x509();
 
@@ -3898,7 +3887,7 @@ impl SslRef {
             let mut len: c_uint = 0;
             // Get the negotiated protocol from the SSL instance.
             // `data` will point at a `c_uchar` array; `len` will contain the length of this array.
-            ffi::SSL_get0_alpn_selected(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_alpn_selected(self.as_ptr(), &raw mut data, &raw mut len);
 
             if data.is_null() {
                 None
@@ -3920,7 +3909,7 @@ impl SslRef {
             }
             let mut data = ptr::null();
             let mut len = 0;
-            ffi::SSL_get0_peer_application_settings(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_peer_application_settings(self.as_ptr(), &raw mut data, &raw mut len);
             if data.is_null() {
                 Some(&[])
             } else {
@@ -4258,7 +4247,7 @@ impl SslRef {
     fn session_id_context(&self) -> Option<&[u8]> {
         unsafe {
             let mut len = 0;
-            let p = ffi::SSL_get0_session_id_context(self.as_ptr(), &mut len);
+            let p = ffi::SSL_get0_session_id_context(self.as_ptr(), &raw mut len);
             (!p.is_null()).then(|| slice::from_raw_parts(p, len))
         }
     }
@@ -4287,7 +4276,7 @@ impl SslRef {
     pub fn ocsp_status(&self) -> Option<&[u8]> {
         unsafe {
             let mut p = ptr::null();
-            let len = ffi::SSL_get_tlsext_status_ocsp_resp(self.as_ptr(), &mut p);
+            let len = ffi::SSL_get_tlsext_status_ocsp_resp(self.as_ptr(), &raw mut p);
 
             if len == 0 {
                 None
@@ -4441,9 +4430,9 @@ impl SslRef {
             let ok = unsafe {
                 ffi::SSL_seal_app_data_limits(
                     self.as_ptr(),
-                    &mut max_fragment,
-                    &mut record_overhead,
-                    &mut pending_len,
+                    &raw mut max_fragment,
+                    &raw mut record_overhead,
+                    &raw mut pending_len,
                 )
             };
             (ok == 1 && max_fragment > 0).then_some(SealLimits {
@@ -4485,12 +4474,12 @@ impl SslRef {
                     ffi::SSL_seal_app_data(
                         self.as_ptr(),
                         out.as_mut_ptr().cast(),
-                        &mut written,
+                        &raw mut written,
                         out.len(),
                         ivecs.as_ptr(),
                         ivecs.len(),
                         max_in,
-                        &mut consumed,
+                        &raw mut consumed,
                     )
                 }
             });
@@ -4597,7 +4586,7 @@ impl SslRef {
         unsafe {
             let mut data = ptr::null();
             let mut len: usize = 0;
-            ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &raw mut data, &raw mut len);
 
             if data.is_null() {
                 None
@@ -4619,7 +4608,7 @@ impl SslRef {
         unsafe {
             let mut data: *const c_char = ptr::null();
             let mut len: usize = 0;
-            ffi::SSL_get0_ech_name_override(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_ech_name_override(self.as_ptr(), &raw mut data, &raw mut len);
 
             if data.is_null() {
                 None
@@ -4717,7 +4706,11 @@ impl SslRef {
         let mut types = ptr::null();
         let mut types_len = 0;
         unsafe {
-            ffi::SSL_get0_accepted_peer_cert_types(self.as_ptr(), &mut types, &mut types_len);
+            ffi::SSL_get0_accepted_peer_cert_types(
+                self.as_ptr(),
+                &raw mut types,
+                &raw mut types_len,
+            );
 
             if types_len == 0 {
                 return None;
@@ -4815,7 +4808,7 @@ impl SslRef {
         // SAFETY: `self` is valid. BoringSSL keeps the list until the handshake moves on, which
         // the shared borrow of `self` prevents.
         unsafe {
-            ffi::SSL_get0_peer_available_trust_anchors(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_peer_available_trust_anchors(self.as_ptr(), &raw mut data, &raw mut len);
             if data.is_null() {
                 &[]
             } else {
@@ -4912,19 +4905,19 @@ pub struct SealLimits {
 impl SealLimits {
     /// Most plaintext bytes in one record.
     #[must_use]
-    pub fn max_fragment(&self) -> usize {
+    pub const fn max_fragment(&self) -> usize {
         self.max_fragment
     }
 
     /// Most bytes one record adds to its plaintext.
     #[must_use]
-    pub fn record_overhead(&self) -> usize {
+    pub const fn record_overhead(&self) -> usize {
         self.record_overhead
     }
 
     /// Most bytes of pending handshake records written ahead of the data.
     #[must_use]
-    pub fn pending_len(&self) -> usize {
+    pub const fn pending_len(&self) -> usize {
         self.pending_len
     }
 
@@ -5039,7 +5032,7 @@ impl<S> MidHandshakeSslStream<S> {
 
     /// Returns the underlying error which interrupted this handshake.
     #[must_use]
-    pub fn error(&self) -> &Error {
+    pub const fn error(&self) -> &Error {
         &self.error
     }
 
@@ -5128,7 +5121,7 @@ impl<S: Read + Write> SslStream<S> {
             ffi::SSL_set_bio(ssl.as_ptr(), bio, bio);
         }
 
-        Ok(SslStream {
+        Ok(Self {
             ssl: ManuallyDrop::new(ssl),
             method: ManuallyDrop::new(method),
             _p: PhantomData,

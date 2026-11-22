@@ -62,7 +62,7 @@ generic_foreign_type_and_impl_send_sync! {
 }
 
 impl<T> Clone for Dsa<T> {
-    fn clone(&self) -> Dsa<T> {
+    fn clone(&self) -> Self {
         (**self).to_owned()
     }
 }
@@ -103,7 +103,7 @@ where
     pub fn pub_key(&self) -> &BigNumRef {
         unsafe {
             let mut pub_key = ptr::null();
-            DSA_get0_key(self.as_ptr(), &mut pub_key, ptr::null_mut());
+            DSA_get0_key(self.as_ptr(), &raw mut pub_key, ptr::null_mut());
             BigNumRef::from_ptr(pub_key.cast_mut())
         }
     }
@@ -132,7 +132,7 @@ where
     pub fn priv_key(&self) -> &BigNumRef {
         unsafe {
             let mut priv_key = ptr::null();
-            DSA_get0_key(self.as_ptr(), ptr::null_mut(), &mut priv_key);
+            DSA_get0_key(self.as_ptr(), ptr::null_mut(), &raw mut priv_key);
             BigNumRef::from_ptr(priv_key.cast_mut())
         }
     }
@@ -154,7 +154,7 @@ where
     pub fn p(&self) -> &BigNumRef {
         unsafe {
             let mut p = ptr::null();
-            DSA_get0_pqg(self.as_ptr(), &mut p, ptr::null_mut(), ptr::null_mut());
+            DSA_get0_pqg(self.as_ptr(), &raw mut p, ptr::null_mut(), ptr::null_mut());
             BigNumRef::from_ptr(p.cast_mut())
         }
     }
@@ -164,7 +164,7 @@ where
     pub fn q(&self) -> &BigNumRef {
         unsafe {
             let mut q = ptr::null();
-            DSA_get0_pqg(self.as_ptr(), ptr::null_mut(), &mut q, ptr::null_mut());
+            DSA_get0_pqg(self.as_ptr(), ptr::null_mut(), &raw mut q, ptr::null_mut());
             BigNumRef::from_ptr(q.cast_mut())
         }
     }
@@ -174,7 +174,7 @@ where
     pub fn g(&self) -> &BigNumRef {
         unsafe {
             let mut g = ptr::null();
-            DSA_get0_pqg(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &mut g);
+            DSA_get0_pqg(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut g);
             BigNumRef::from_ptr(g.cast_mut())
         }
     }
@@ -190,10 +190,10 @@ impl Dsa<Private> {
     ///
     /// [`DSA_generate_parameters_ex`]: https://www.openssl.org/docs/man1.1.0/crypto/DSA_generate_parameters_ex.html
     /// [`DSA_generate_key`]: https://www.openssl.org/docs/man1.1.0/crypto/DSA_generate_key.html
-    pub fn generate(bits: u32) -> Result<Dsa<Private>, ErrorStack> {
+    pub fn generate(bits: u32) -> Result<Self, ErrorStack> {
         ffi::init();
         unsafe {
-            let dsa = Dsa::from_ptr(cvt_p(ffi::DSA_new())?);
+            let dsa = Self::from_ptr(cvt_p(ffi::DSA_new())?);
             cvt(ffi::DSA_generate_parameters_ex(
                 dsa.0,
                 c_uint::from(bits),
@@ -219,10 +219,10 @@ impl Dsa<Private> {
         g: BigNum,
         priv_key: BigNum,
         pub_key: BigNum,
-    ) -> Result<Dsa<Private>, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         ffi::init();
         unsafe {
-            let dsa = Dsa::from_ptr(cvt_p(ffi::DSA_new())?);
+            let dsa = Self::from_ptr(cvt_p(ffi::DSA_new())?);
             cvt(DSA_set0_pqg(dsa.0, p.as_ptr(), q.as_ptr(), g.as_ptr()))?;
             mem::forget((p, q, g));
             cvt(DSA_set0_key(dsa.0, pub_key.as_ptr(), priv_key.as_ptr()))?;
@@ -261,10 +261,10 @@ impl Dsa<Public> {
         q: BigNum,
         g: BigNum,
         pub_key: BigNum,
-    ) -> Result<Dsa<Public>, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         ffi::init();
         unsafe {
-            let dsa = Dsa::from_ptr(cvt_p(ffi::DSA_new())?);
+            let dsa = Self::from_ptr(cvt_p(ffi::DSA_new())?);
             cvt(DSA_set0_pqg(dsa.0, p.as_ptr(), q.as_ptr(), g.as_ptr()))?;
             mem::forget((p, q, g));
             cvt(DSA_set0_key(dsa.0, pub_key.into_ptr(), ptr::null_mut()))?;

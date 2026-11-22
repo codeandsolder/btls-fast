@@ -43,12 +43,12 @@ impl ErrorStack {
     /// otherwise the stack may be empty or a leftover from unrelated calls.
     #[corresponds(ERR_get_error_line_data)]
     #[must_use = "Use ErrorStack::clear() to drop the error stack"]
-    pub fn get() -> ErrorStack {
+    pub fn get() -> Self {
         let mut vec = vec![];
         while let Some(err) = Error::get() {
             vec.push(err);
         }
-        ErrorStack(vec)
+        Self(vec)
     }
 
     /// Pushes the errors back onto the OpenSSL error stack.
@@ -115,14 +115,14 @@ impl fmt::Display for ErrorStack {
 impl error::Error for ErrorStack {}
 
 impl From<ErrorStack> for io::Error {
-    fn from(e: ErrorStack) -> io::Error {
-        io::Error::other(e)
+    fn from(e: ErrorStack) -> Self {
+        Self::other(e)
     }
 }
 
 impl From<ErrorStack> for fmt::Error {
-    fn from(_: ErrorStack) -> fmt::Error {
-        fmt::Error
+    fn from(_: ErrorStack) -> Self {
+        Self
     }
 }
 
@@ -152,7 +152,7 @@ impl Error {
     /// Pops the first error off the OpenSSL error stack.
     #[must_use = "Use ErrorStack::clear() to drop the error stack"]
     #[corresponds(ERR_get_error_line_data)]
-    pub fn get() -> Option<Error> {
+    pub fn get() -> Option<Self> {
         unsafe {
             ffi::init();
 
@@ -160,7 +160,12 @@ impl Error {
             let mut line = 0;
             let mut data = ptr::null();
             let mut flags = 0;
-            match ffi::ERR_get_error_line_data(&mut file, &mut line, &mut data, &mut flags) {
+            match ffi::ERR_get_error_line_data(
+                &raw mut file,
+                &raw mut line,
+                &raw mut data,
+                &raw mut flags,
+            ) {
                 0 => None,
                 code => {
                     // The memory referenced by data is only valid until that slot is overwritten
@@ -170,7 +175,7 @@ impl Error {
                     } else {
                         Data::None
                     };
-                    Some(Error {
+                    Some(Self {
                         code,
                         file,
                         line: line as c_uint,
@@ -215,7 +220,7 @@ impl Error {
     /// Packed error codes are different than [SSL error codes](crate::ssl::ErrorCode).
     #[must_use]
     #[deprecated(note = "use library_reason() to compare error codes")]
-    pub fn code(&self) -> c_uint {
+    pub const fn code(&self) -> c_uint {
         self.code
     }
 
@@ -241,12 +246,12 @@ impl Error {
     ///
     /// Error [reason codes](Error::library_reason) are not globally unique, but scoped to each library.
     #[must_use]
-    pub fn library_code(&self) -> c_int {
+    pub const fn library_code(&self) -> c_int {
         ffi::ERR_GET_LIB(self.code)
     }
 
     /// Returns `None`. Boring doesn't use function codes.
-    pub fn function(&self) -> Option<&'static str> {
+    pub const fn function(&self) -> Option<&'static str> {
         None
     }
 
@@ -273,7 +278,7 @@ impl Error {
     /// For `ERR_LIB_SYS` the reason code is `errno`. `ERR_LIB_USER` can use any values.
     /// Other libraries may use [`ERR_R_*`](ffi::ERR_R_FATAL) or their own codes.
     #[must_use]
-    pub fn reason_code(&self) -> c_int {
+    pub const fn reason_code(&self) -> c_int {
         ffi::ERR_GET_REASON(self.code)
     }
 
@@ -294,7 +299,7 @@ impl Error {
     ///
     /// 0 if unknown
     #[must_use]
-    pub fn line(&self) -> u32 {
+    pub const fn line(&self) -> u32 {
         self.line
     }
 

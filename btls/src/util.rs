@@ -19,7 +19,7 @@ pub struct CallbackState<F> {
 
 impl<F> CallbackState<F> {
     pub fn new(callback: F) -> Self {
-        CallbackState {
+        Self {
             cb: Some(callback),
             panic: None,
         }

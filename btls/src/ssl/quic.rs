@@ -244,7 +244,7 @@ impl SslRef {
         let mut params = ptr::null();
         let mut len = 0;
         unsafe {
-            ffi::SSL_get_peer_quic_transport_params(self.as_ptr(), &mut params, &mut len);
+            ffi::SSL_get_peer_quic_transport_params(self.as_ptr(), &raw mut params, &raw mut len);
             if len == 0 {
                 None
             } else {

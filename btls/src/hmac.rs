@@ -36,12 +36,12 @@ pub struct Hmac(*mut ffi::HMAC_CTX);
 
 impl Hmac {
     /// Creates a new HMAC object with the given key and hash algorithm.
-    pub fn init(key: &[u8], md: &MessageDigest) -> Result<Hmac, ErrorStack> {
+    pub fn init(key: &[u8], md: &MessageDigest) -> Result<Self, ErrorStack> {
         ffi::init();
 
         let ctx = unsafe { cvt_p(ffi::HMAC_CTX_new())? };
         // Owned first, so that the context is freed if the initialization fails.
-        let hmac = Hmac(ctx);
+        let hmac = Self(ctx);
         unsafe {
             cvt(ffi::HMAC_Init_ex(
                 hmac.0,

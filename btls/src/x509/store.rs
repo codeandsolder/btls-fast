@@ -62,11 +62,11 @@ impl X509StoreBuilder {
     /// Returns a builder for a certificate store.
     ///
     /// The store is initially empty.
-    pub fn new() -> Result<X509StoreBuilder, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
         unsafe {
             ffi::init();
 
-            cvt_p(ffi::X509_STORE_new()).map(|p| X509StoreBuilder::from_ptr(p))
+            cvt_p(ffi::X509_STORE_new()).map(|p| Self::from_ptr(p))
         }
     }
 
@@ -151,7 +151,7 @@ impl ToOwned for X509StoreRef {
 }
 
 impl Clone for X509Store {
-    fn clone(&self) -> X509Store {
+    fn clone(&self) -> Self {
         (**self).to_owned()
     }
 }

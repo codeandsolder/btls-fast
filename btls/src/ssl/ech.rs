@@ -11,12 +11,12 @@ pub struct SslEchKeysBuilder {
 }
 
 impl SslEchKeysBuilder {
-    pub fn new() -> Result<SslEchKeysBuilder, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
         unsafe {
             ffi::init();
             let keys = cvt_p(ffi::SSL_ECH_KEYS_new())?;
 
-            Ok(SslEchKeysBuilder::from_ptr(keys))
+            Ok(Self::from_ptr(keys))
         }
     }
 

@@ -19,7 +19,7 @@ pub struct HkdfSuite {
 impl HkdfSuite {
     /// Creates an HKDF suite using `digest`.
     #[must_use]
-    pub fn new(digest: MessageDigest) -> Self {
+    pub const fn new(digest: MessageDigest) -> Self {
         Self { digest }
     }
 
@@ -48,7 +48,7 @@ impl HkdfSuite {
         unsafe {
             cvt(ffi::HKDF_extract(
                 prk.buf.as_mut_ptr(),
-                &mut prk.len,
+                &raw mut prk.len,
                 self.digest.as_ptr(),
                 ikm.as_ptr(),
                 ikm.len(),
@@ -85,7 +85,7 @@ impl HkdfSuite {
         unsafe {
             cvt(ffi::HKDF_extract(
                 out.as_mut_ptr(),
-                &mut len,
+                &raw mut len,
                 self.digest.as_ptr(),
                 ikm.as_ptr(),
                 ikm.len(),

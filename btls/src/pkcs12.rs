@@ -58,9 +58,9 @@ impl Pkcs12Ref {
             cvt_0i(ffi::PKCS12_parse(
                 self.as_ptr(),
                 pass.as_ptr(),
-                &mut pkey,
-                &mut cert,
-                &mut ca,
+                &raw mut pkey,
+                &raw mut cert,
+                &raw mut ca,
             ))?;
 
             let pkey = (!pkey.is_null()).then(|| PKey::from_ptr(pkey));
@@ -134,19 +134,19 @@ pub struct Pkcs12Builder {
 
 impl Pkcs12Builder {
     /// The encryption algorithm that should be used for the key
-    pub fn key_algorithm(&mut self, nid: Nid) -> &mut Self {
+    pub const fn key_algorithm(&mut self, nid: Nid) -> &mut Self {
         self.nid_key = nid;
         self
     }
 
     /// The encryption algorithm that should be used for the cert
-    pub fn cert_algorithm(&mut self, nid: Nid) -> &mut Self {
+    pub const fn cert_algorithm(&mut self, nid: Nid) -> &mut Self {
         self.nid_cert = nid;
         self
     }
 
     /// Key iteration count, default is 2048 as of this writing
-    pub fn key_iter(&mut self, iter: u32) -> &mut Self {
+    pub const fn key_iter(&mut self, iter: u32) -> &mut Self {
         self.iter = iter as c_int;
         self
     }
@@ -155,7 +155,7 @@ impl Pkcs12Builder {
     ///
     /// Old implementations don't understand MAC iterations greater than 1, (pre 1.0.1?), if such
     /// compatibility is required this should be set to 1.
-    pub fn mac_iter(&mut self, mac_iter: u32) -> &mut Self {
+    pub const fn mac_iter(&mut self, mac_iter: u32) -> &mut Self {
         self.mac_iter = mac_iter as c_int;
         self
     }

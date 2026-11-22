@@ -1,11 +1,11 @@
 pub(crate) struct MutOnly<T>(T);
 
 impl<T> MutOnly<T> {
-    pub(crate) fn new(value: T) -> Self {
+    pub(crate) const fn new(value: T) -> Self {
         Self(value)
     }
 
-    pub(crate) fn get_mut(&mut self) -> &mut T {
+    pub(crate) const fn get_mut(&mut self) -> &mut T {
         &mut self.0
     }
 }

@@ -98,7 +98,7 @@ impl MlDsaPrivateKey {
     /// Generates a random ML-DSA key pair.
     ///
     /// Returns `(public_key, private_key)`.
-    pub fn generate(algorithm: Algorithm) -> Result<(MlDsaPublicKey, MlDsaPrivateKey), ErrorStack> {
+    pub fn generate(algorithm: Algorithm) -> Result<(MlDsaPublicKey, Self), ErrorStack> {
         unsafe {
             ffi::init();
             match algorithm {
@@ -114,7 +114,7 @@ impl MlDsaPrivateKey {
                     let public_key = MlDsaPublicKey::from_slice(algorithm, &pub_bytes)?;
                     Ok((
                         public_key,
-                        MlDsaPrivateKey {
+                        Self {
                             algorithm,
                             seed,
                             inner: PrivateKeyInner::MlDsa44(Box::new(priv_key.assume_init())),
@@ -133,7 +133,7 @@ impl MlDsaPrivateKey {
                     let public_key = MlDsaPublicKey::from_slice(algorithm, &pub_bytes)?;
                     Ok((
                         public_key,
-                        MlDsaPrivateKey {
+                        Self {
                             algorithm,
                             seed,
                             inner: PrivateKeyInner::MlDsa65(Box::new(priv_key.assume_init())),
@@ -152,7 +152,7 @@ impl MlDsaPrivateKey {
                     let public_key = MlDsaPublicKey::from_slice(algorithm, &pub_bytes)?;
                     Ok((
                         public_key,
-                        MlDsaPrivateKey {
+                        Self {
                             algorithm,
                             seed,
                             inner: PrivateKeyInner::MlDsa87(Box::new(priv_key.assume_init())),
@@ -212,12 +212,12 @@ impl MlDsaPrivateKey {
     }
 
     /// Returns the algorithm for this key.
-    pub fn algorithm(&self) -> Algorithm {
+    pub const fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
 
     /// Returns the seed bytes for this private key.
-    pub fn seed_bytes(&self) -> &MlDsaPrivateKeySeed {
+    pub const fn seed_bytes(&self) -> &MlDsaPrivateKeySeed {
         &self.seed
     }
 
@@ -326,7 +326,10 @@ impl MlDsaPublicKey {
             match algorithm {
                 Algorithm::MlDsa44 => {
                     let mut key: MaybeUninit<ffi::MLDSA44_public_key> = MaybeUninit::uninit();
-                    cvt(ffi::MLDSA44_parse_public_key(key.as_mut_ptr(), &mut cbs))?;
+                    cvt(ffi::MLDSA44_parse_public_key(
+                        key.as_mut_ptr(),
+                        &raw mut cbs,
+                    ))?;
                     if cbs.len != 0 {
                         return Err(ErrorStack::internal_error_str(
                             "trailing bytes after ML-DSA-44 public key",
@@ -339,7 +342,10 @@ impl MlDsaPublicKey {
                 }
                 Algorithm::MlDsa65 => {
                     let mut key: MaybeUninit<ffi::MLDSA65_public_key> = MaybeUninit::uninit();
-                    cvt(ffi::MLDSA65_parse_public_key(key.as_mut_ptr(), &mut cbs))?;
+                    cvt(ffi::MLDSA65_parse_public_key(
+                        key.as_mut_ptr(),
+                        &raw mut cbs,
+                    ))?;
                     if cbs.len != 0 {
                         return Err(ErrorStack::internal_error_str(
                             "trailing bytes after ML-DSA-65 public key",
@@ -352,7 +358,10 @@ impl MlDsaPublicKey {
                 }
                 Algorithm::MlDsa87 => {
                     let mut key: MaybeUninit<ffi::MLDSA87_public_key> = MaybeUninit::uninit();
-                    cvt(ffi::MLDSA87_parse_public_key(key.as_mut_ptr(), &mut cbs))?;
+                    cvt(ffi::MLDSA87_parse_public_key(
+                        key.as_mut_ptr(),
+                        &raw mut cbs,
+                    ))?;
                     if cbs.len != 0 {
                         return Err(ErrorStack::internal_error_str(
                             "trailing bytes after ML-DSA-87 public key",
@@ -368,7 +377,7 @@ impl MlDsaPublicKey {
     }
 
     /// Returns the algorithm for this key.
-    pub fn algorithm(&self) -> Algorithm {
+    pub const fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
 

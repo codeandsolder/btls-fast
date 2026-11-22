@@ -14,13 +14,13 @@ impl ConfMethod {
     /// # Safety
     ///
     /// The caller must ensure that the pointer is valid.
-    pub unsafe fn from_ptr(ptr: *mut c_void) -> ConfMethod {
-        ConfMethod(ptr)
+    pub const unsafe fn from_ptr(ptr: *mut c_void) -> Self {
+        Self(ptr)
     }
 
     /// Convert to raw pointer.
     #[must_use]
-    pub fn as_ptr(&self) -> *mut c_void {
+    pub const fn as_ptr(&self) -> *mut c_void {
         self.0
     }
 }
@@ -34,7 +34,7 @@ foreign_type_and_impl_send_sync! {
 
 impl Conf {
     /// Create a configuration parser.
-    pub fn new(method: ConfMethod) -> Result<Conf, ErrorStack> {
-        unsafe { cvt_p(ffi::NCONF_new(method.as_ptr())).map(|p| Conf::from_ptr(p)) }
+    pub fn new(method: ConfMethod) -> Result<Self, ErrorStack> {
+        unsafe { cvt_p(ffi::NCONF_new(method.as_ptr())).map(|p| Self::from_ptr(p)) }
     }
 }

@@ -62,20 +62,20 @@ pub const EVP_PKEY_OP_TYPE_CRYPT: c_int = EVP_PKEY_OP_ENCRYPT | EVP_PKEY_OP_DECR
 pub struct Padding(c_int);
 
 impl Padding {
-    pub const NONE: Padding = Padding(ffi::RSA_NO_PADDING);
-    pub const PKCS1: Padding = Padding(ffi::RSA_PKCS1_PADDING);
-    pub const PKCS1_OAEP: Padding = Padding(ffi::RSA_PKCS1_OAEP_PADDING);
-    pub const PKCS1_PSS: Padding = Padding(ffi::RSA_PKCS1_PSS_PADDING);
+    pub const NONE: Self = Self(ffi::RSA_NO_PADDING);
+    pub const PKCS1: Self = Self(ffi::RSA_PKCS1_PADDING);
+    pub const PKCS1_OAEP: Self = Self(ffi::RSA_PKCS1_OAEP_PADDING);
+    pub const PKCS1_PSS: Self = Self(ffi::RSA_PKCS1_PSS_PADDING);
 
     /// Creates a `Padding` from an integer representation.
     #[must_use]
-    pub fn from_raw(value: c_int) -> Padding {
-        Padding(value)
+    pub const fn from_raw(value: c_int) -> Self {
+        Self(value)
     }
 
     /// Returns the integer representation of `Padding`.
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -92,7 +92,7 @@ generic_foreign_type_and_impl_send_sync! {
 }
 
 impl<T> Clone for Rsa<T> {
-    fn clone(&self) -> Rsa<T> {
+    fn clone(&self) -> Self {
         (**self).to_owned()
     }
 }
@@ -193,7 +193,7 @@ where
     pub fn d(&self) -> &BigNumRef {
         unsafe {
             let mut d = ptr::null();
-            RSA_get0_key(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &mut d);
+            RSA_get0_key(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut d);
             BigNumRef::from_ptr(d.cast_mut())
         }
     }
@@ -204,7 +204,7 @@ where
     pub fn p(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut p = ptr::null();
-            RSA_get0_factors(self.as_ptr(), &mut p, ptr::null_mut());
+            RSA_get0_factors(self.as_ptr(), &raw mut p, ptr::null_mut());
             if p.is_null() {
                 None
             } else {
@@ -219,7 +219,7 @@ where
     pub fn q(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut q = ptr::null();
-            RSA_get0_factors(self.as_ptr(), ptr::null_mut(), &mut q);
+            RSA_get0_factors(self.as_ptr(), ptr::null_mut(), &raw mut q);
             if q.is_null() {
                 None
             } else {
@@ -234,7 +234,7 @@ where
     pub fn dmp1(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut dp = ptr::null();
-            RSA_get0_crt_params(self.as_ptr(), &mut dp, ptr::null_mut(), ptr::null_mut());
+            RSA_get0_crt_params(self.as_ptr(), &raw mut dp, ptr::null_mut(), ptr::null_mut());
             if dp.is_null() {
                 None
             } else {
@@ -249,7 +249,7 @@ where
     pub fn dmq1(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut dq = ptr::null();
-            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), &mut dq, ptr::null_mut());
+            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), &raw mut dq, ptr::null_mut());
             if dq.is_null() {
                 None
             } else {
@@ -264,7 +264,7 @@ where
     pub fn iqmp(&self) -> Option<&BigNumRef> {
         unsafe {
             let mut qi = ptr::null();
-            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &mut qi);
+            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut qi);
             if qi.is_null() {
                 None
             } else {
@@ -388,7 +388,7 @@ where
     pub fn n(&self) -> &BigNumRef {
         unsafe {
             let mut n = ptr::null();
-            RSA_get0_key(self.as_ptr(), &mut n, ptr::null_mut(), ptr::null_mut());
+            RSA_get0_key(self.as_ptr(), &raw mut n, ptr::null_mut(), ptr::null_mut());
             BigNumRef::from_ptr(n.cast_mut())
         }
     }
@@ -399,7 +399,7 @@ where
     pub fn e(&self) -> &BigNumRef {
         unsafe {
             let mut e = ptr::null();
-            RSA_get0_key(self.as_ptr(), ptr::null_mut(), &mut e, ptr::null_mut());
+            RSA_get0_key(self.as_ptr(), ptr::null_mut(), &raw mut e, ptr::null_mut());
             BigNumRef::from_ptr(e.cast_mut())
         }
     }
@@ -411,12 +411,12 @@ impl Rsa<Public> {
     /// `n` is the modulus common to both public and private key.
     /// `e` is the public exponent.
     #[corresponds(RSA_new)]
-    pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Rsa<Public>, ErrorStack> {
+    pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Self, ErrorStack> {
         unsafe {
             let rsa = cvt_p(ffi::RSA_new())?;
             cvt(RSA_set0_key(rsa, n.as_ptr(), e.as_ptr(), ptr::null_mut()))?;
             mem::forget((n, e));
-            Ok(Rsa::from_ptr(rsa))
+            Ok(Self::from_ptr(rsa))
         }
     }
 
@@ -469,12 +469,12 @@ impl RsaPrivateKeyBuilder {
     /// `n` is the modulus common to both public and private key.
     /// `e` is the public exponent and `d` is the private exponent.
     #[corresponds(RSA_new)]
-    pub fn new(n: BigNum, e: BigNum, d: BigNum) -> Result<RsaPrivateKeyBuilder, ErrorStack> {
+    pub fn new(n: BigNum, e: BigNum, d: BigNum) -> Result<Self, ErrorStack> {
         unsafe {
             let rsa = cvt_p(ffi::RSA_new())?;
             cvt(RSA_set0_key(rsa, n.as_ptr(), e.as_ptr(), d.as_ptr()))?;
             mem::forget((n, e, d));
-            Ok(RsaPrivateKeyBuilder {
+            Ok(Self {
                 rsa: Rsa::from_ptr(rsa),
             })
         }
@@ -484,7 +484,7 @@ impl RsaPrivateKeyBuilder {
     ///
     /// `p` and `q` are the first and second factors of `n`.
     #[corresponds(RSA_set0_factors)]
-    pub fn set_factors(self, p: BigNum, q: BigNum) -> Result<RsaPrivateKeyBuilder, ErrorStack> {
+    pub fn set_factors(self, p: BigNum, q: BigNum) -> Result<Self, ErrorStack> {
         unsafe {
             cvt(RSA_set0_factors(self.rsa.as_ptr(), p.as_ptr(), q.as_ptr()))?;
             mem::forget((p, q));
@@ -502,7 +502,7 @@ impl RsaPrivateKeyBuilder {
         dmp1: BigNum,
         dmq1: BigNum,
         iqmp: BigNum,
-    ) -> Result<RsaPrivateKeyBuilder, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         unsafe {
             cvt(RSA_set0_crt_params(
                 self.rsa.as_ptr(),
@@ -527,18 +527,18 @@ impl Rsa<Private> {
     ///
     /// The public exponent will be 65537.
     #[corresponds(RSA_generate_key_ex)]
-    pub fn generate(bits: u32) -> Result<Rsa<Private>, ErrorStack> {
+    pub fn generate(bits: u32) -> Result<Self, ErrorStack> {
         let e = BigNum::from_u32(ffi::RSA_F4 as u32)?;
-        Rsa::generate_with_e(bits, &e)
+        Self::generate_with_e(bits, &e)
     }
 
     /// Generates a public/private key pair with the specified size and a custom exponent.
     ///
     /// Unless you have specific needs and know what you're doing, use `Rsa::generate` instead.
     #[corresponds(RSA_generate_key_ex)]
-    pub fn generate_with_e(bits: u32, e: &BigNumRef) -> Result<Rsa<Private>, ErrorStack> {
+    pub fn generate_with_e(bits: u32, e: &BigNumRef) -> Result<Self, ErrorStack> {
         unsafe {
-            let rsa = Rsa::from_ptr(cvt_p(ffi::RSA_new())?);
+            let rsa = Self::from_ptr(cvt_p(ffi::RSA_new())?);
             cvt(ffi::RSA_generate_key_ex(
                 rsa.0,
                 bits as c_int,

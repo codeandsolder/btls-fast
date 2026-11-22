@@ -31,16 +31,16 @@ pub struct BasicConstraints {
 }
 
 impl Default for BasicConstraints {
-    fn default() -> BasicConstraints {
-        BasicConstraints::new()
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl BasicConstraints {
     /// Construct a new `BasicConstraints` extension.
     #[must_use]
-    pub fn new() -> BasicConstraints {
-        BasicConstraints {
+    pub const fn new() -> Self {
+        Self {
             critical: false,
             ca: false,
             pathlen: None,
@@ -48,20 +48,20 @@ impl BasicConstraints {
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
-    pub fn critical(&mut self) -> &mut BasicConstraints {
+    pub const fn critical(&mut self) -> &mut Self {
         self.critical = true;
         self
     }
 
     /// Sets the `ca` flag to `true`.
-    pub fn ca(&mut self) -> &mut BasicConstraints {
+    pub const fn ca(&mut self) -> &mut Self {
         self.ca = true;
         self
     }
 
     /// Sets the pathlen to an optional non-negative value. The pathlen is the
     /// maximum number of CAs that can appear below this one in a chain.
-    pub fn pathlen(&mut self, pathlen: u32) -> &mut BasicConstraints {
+    pub const fn pathlen(&mut self, pathlen: u32) -> &mut Self {
         self.pathlen = Some(pathlen);
         self
     }
@@ -100,16 +100,16 @@ pub struct KeyUsage {
 }
 
 impl Default for KeyUsage {
-    fn default() -> KeyUsage {
-        KeyUsage::new()
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl KeyUsage {
     /// Construct a new `KeyUsage` extension.
     #[must_use]
-    pub fn new() -> KeyUsage {
-        KeyUsage {
+    pub const fn new() -> Self {
+        Self {
             critical: false,
             digital_signature: false,
             non_repudiation: false,
@@ -124,61 +124,61 @@ impl KeyUsage {
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
-    pub fn critical(&mut self) -> &mut KeyUsage {
+    pub const fn critical(&mut self) -> &mut Self {
         self.critical = true;
         self
     }
 
     /// Sets the `digitalSignature` flag to `true`.
-    pub fn digital_signature(&mut self) -> &mut KeyUsage {
+    pub const fn digital_signature(&mut self) -> &mut Self {
         self.digital_signature = true;
         self
     }
 
     /// Sets the `nonRepudiation` flag to `true`.
-    pub fn non_repudiation(&mut self) -> &mut KeyUsage {
+    pub const fn non_repudiation(&mut self) -> &mut Self {
         self.non_repudiation = true;
         self
     }
 
     /// Sets the `keyEncipherment` flag to `true`.
-    pub fn key_encipherment(&mut self) -> &mut KeyUsage {
+    pub const fn key_encipherment(&mut self) -> &mut Self {
         self.key_encipherment = true;
         self
     }
 
     /// Sets the `dataEncipherment` flag to `true`.
-    pub fn data_encipherment(&mut self) -> &mut KeyUsage {
+    pub const fn data_encipherment(&mut self) -> &mut Self {
         self.data_encipherment = true;
         self
     }
 
     /// Sets the `keyAgreement` flag to `true`.
-    pub fn key_agreement(&mut self) -> &mut KeyUsage {
+    pub const fn key_agreement(&mut self) -> &mut Self {
         self.key_agreement = true;
         self
     }
 
     /// Sets the `keyCertSign` flag to `true`.
-    pub fn key_cert_sign(&mut self) -> &mut KeyUsage {
+    pub const fn key_cert_sign(&mut self) -> &mut Self {
         self.key_cert_sign = true;
         self
     }
 
     /// Sets the `cRLSign` flag to `true`.
-    pub fn crl_sign(&mut self) -> &mut KeyUsage {
+    pub const fn crl_sign(&mut self) -> &mut Self {
         self.crl_sign = true;
         self
     }
 
     /// Sets the `encipherOnly` flag to `true`.
-    pub fn encipher_only(&mut self) -> &mut KeyUsage {
+    pub const fn encipher_only(&mut self) -> &mut Self {
         self.encipher_only = true;
         self
     }
 
     /// Sets the `decipherOnly` flag to `true`.
-    pub fn decipher_only(&mut self) -> &mut KeyUsage {
+    pub const fn decipher_only(&mut self) -> &mut Self {
         self.decipher_only = true;
         self
     }
@@ -229,79 +229,79 @@ pub struct ExtendedKeyUsage {
 }
 
 impl Default for ExtendedKeyUsage {
-    fn default() -> ExtendedKeyUsage {
-        ExtendedKeyUsage::new()
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl ExtendedKeyUsage {
     /// Construct a new `ExtendedKeyUsage` extension.
     #[must_use]
-    pub fn new() -> ExtendedKeyUsage {
-        ExtendedKeyUsage {
+    pub const fn new() -> Self {
+        Self {
             critical: false,
             items: vec![],
         }
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
-    pub fn critical(&mut self) -> &mut ExtendedKeyUsage {
+    pub const fn critical(&mut self) -> &mut Self {
         self.critical = true;
         self
     }
 
     /// Sets the `serverAuth` flag to `true`.
-    pub fn server_auth(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn server_auth(&mut self) -> &mut Self {
         self.other("serverAuth")
     }
 
     /// Sets the `clientAuth` flag to `true`.
-    pub fn client_auth(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn client_auth(&mut self) -> &mut Self {
         self.other("clientAuth")
     }
 
     /// Sets the `codeSigning` flag to `true`.
-    pub fn code_signing(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn code_signing(&mut self) -> &mut Self {
         self.other("codeSigning")
     }
 
     /// Sets the `timeStamping` flag to `true`.
-    pub fn time_stamping(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn time_stamping(&mut self) -> &mut Self {
         self.other("timeStamping")
     }
 
     /// Sets the `msCodeInd` flag to `true`.
-    pub fn ms_code_ind(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn ms_code_ind(&mut self) -> &mut Self {
         self.other("msCodeInd")
     }
 
     /// Sets the `msCodeCom` flag to `true`.
-    pub fn ms_code_com(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn ms_code_com(&mut self) -> &mut Self {
         self.other("msCodeCom")
     }
 
     /// Sets the `msCTLSign` flag to `true`.
-    pub fn ms_ctl_sign(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn ms_ctl_sign(&mut self) -> &mut Self {
         self.other("msCTLSign")
     }
 
     /// Sets the `msSGC` flag to `true`.
-    pub fn ms_sgc(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn ms_sgc(&mut self) -> &mut Self {
         self.other("msSGC")
     }
 
     /// Sets the `msEFS` flag to `true`.
-    pub fn ms_efs(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn ms_efs(&mut self) -> &mut Self {
         self.other("msEFS")
     }
 
     /// Sets the `nsSGC` flag to `true`.
-    pub fn ns_sgc(&mut self) -> &mut ExtendedKeyUsage {
+    pub fn ns_sgc(&mut self) -> &mut Self {
         self.other("nsSGC")
     }
 
     /// Sets a flag not already defined.
-    pub fn other(&mut self, other: &str) -> &mut ExtendedKeyUsage {
+    pub fn other(&mut self, other: &str) -> &mut Self {
         self.items.push(other.to_string());
         self
     }
@@ -325,20 +325,20 @@ pub struct SubjectKeyIdentifier {
 }
 
 impl Default for SubjectKeyIdentifier {
-    fn default() -> SubjectKeyIdentifier {
-        SubjectKeyIdentifier::new()
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl SubjectKeyIdentifier {
     /// Construct a new `SubjectKeyIdentifier` extension.
     #[must_use]
-    pub fn new() -> SubjectKeyIdentifier {
-        SubjectKeyIdentifier { critical: false }
+    pub const fn new() -> Self {
+        Self { critical: false }
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
-    pub fn critical(&mut self) -> &mut SubjectKeyIdentifier {
+    pub const fn critical(&mut self) -> &mut Self {
         self.critical = true;
         self
     }
@@ -362,16 +362,16 @@ pub struct AuthorityKeyIdentifier {
 }
 
 impl Default for AuthorityKeyIdentifier {
-    fn default() -> AuthorityKeyIdentifier {
-        AuthorityKeyIdentifier::new()
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl AuthorityKeyIdentifier {
     /// Construct a new `AuthorityKeyIdentifier` extension.
     #[must_use]
-    pub fn new() -> AuthorityKeyIdentifier {
-        AuthorityKeyIdentifier {
+    pub const fn new() -> Self {
+        Self {
             critical: false,
             keyid: None,
             issuer: None,
@@ -379,19 +379,19 @@ impl AuthorityKeyIdentifier {
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
-    pub fn critical(&mut self) -> &mut AuthorityKeyIdentifier {
+    pub const fn critical(&mut self) -> &mut Self {
         self.critical = true;
         self
     }
 
     /// Sets the `keyid` flag.
-    pub fn keyid(&mut self, always: bool) -> &mut AuthorityKeyIdentifier {
+    pub const fn keyid(&mut self, always: bool) -> &mut Self {
         self.keyid = Some(always);
         self
     }
 
     /// Sets the `issuer` flag.
-    pub fn issuer(&mut self, always: bool) -> &mut AuthorityKeyIdentifier {
+    pub const fn issuer(&mut self, always: bool) -> &mut Self {
         self.issuer = Some(always);
         self
     }
@@ -431,53 +431,53 @@ pub struct SubjectAlternativeName {
 }
 
 impl Default for SubjectAlternativeName {
-    fn default() -> SubjectAlternativeName {
-        SubjectAlternativeName::new()
+    fn default() -> Self {
+        Self::new()
     }
 }
 
 impl SubjectAlternativeName {
     /// Construct a new `SubjectAlternativeName` extension.
     #[must_use]
-    pub fn new() -> SubjectAlternativeName {
-        SubjectAlternativeName {
+    pub const fn new() -> Self {
+        Self {
             critical: false,
             items: vec![],
         }
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
-    pub fn critical(&mut self) -> &mut SubjectAlternativeName {
+    pub const fn critical(&mut self) -> &mut Self {
         self.critical = true;
         self
     }
 
     /// Sets the `email` flag.
-    pub fn email(&mut self, email: &str) -> &mut SubjectAlternativeName {
+    pub fn email(&mut self, email: &str) -> &mut Self {
         self.items.push(RustGeneralName::Email(email.to_owned()));
         self
     }
 
     /// Sets the `uri` flag.
-    pub fn uri(&mut self, uri: &str) -> &mut SubjectAlternativeName {
+    pub fn uri(&mut self, uri: &str) -> &mut Self {
         self.items.push(RustGeneralName::Uri(uri.to_owned()));
         self
     }
 
     /// Sets the `dns` flag.
-    pub fn dns(&mut self, dns: &str) -> &mut SubjectAlternativeName {
+    pub fn dns(&mut self, dns: &str) -> &mut Self {
         self.items.push(RustGeneralName::Dns(dns.to_owned()));
         self
     }
 
     /// Sets the `rid` flag.
-    pub fn rid(&mut self, rid: &str) -> &mut SubjectAlternativeName {
+    pub fn rid(&mut self, rid: &str) -> &mut Self {
         self.items.push(RustGeneralName::Rid(rid.to_owned()));
         self
     }
 
     /// Sets the `ip` flag.
-    pub fn ip(&mut self, ip: &str) -> &mut SubjectAlternativeName {
+    pub fn ip(&mut self, ip: &str) -> &mut Self {
         self.items.push(RustGeneralName::Ip(ip.to_owned()));
         self
     }
@@ -486,7 +486,7 @@ impl SubjectAlternativeName {
     ///
     /// Not currently actually supported, always panics.
     #[deprecated = "dir_name is deprecated and always panics. Please file a bug if you have a use case for this."]
-    pub fn dir_name(&mut self, _dir_name: &str) -> &mut SubjectAlternativeName {
+    pub fn dir_name(&mut self, _dir_name: &str) -> &mut Self {
         unimplemented!(
             "This has not yet been adapted for the new internals. File a bug if you need this."
         );
@@ -496,7 +496,7 @@ impl SubjectAlternativeName {
     ///
     /// Not currently actually supported, always panics.
     #[deprecated = "other_name is deprecated and always panics. Please file a bug if you have a use case for this."]
-    pub fn other_name(&mut self, _other_name: &str) -> &mut SubjectAlternativeName {
+    pub fn other_name(&mut self, _other_name: &str) -> &mut Self {
         unimplemented!(
             "This has not yet been adapted for the new internals. File a bug if you need this."
         );

@@ -82,8 +82,8 @@ impl str::FromStr for Asn1GeneralizedTime {
     /// The string must be a valid GeneralizedTime. Returns an error if the
     /// string is not valid.
     #[corresponds(ASN1_GENERALIZEDTIME_set_string)]
-    fn from_str(s: &str) -> Result<Asn1GeneralizedTime, ErrorStack> {
-        let time = Asn1GeneralizedTime::new()?;
+    fn from_str(s: &str) -> Result<Self, ErrorStack> {
+        let time = Self::new()?;
         let s = CString::new(s).map_err(ErrorStack::internal_error)?;
         unsafe {
             cvt(ffi::ASN1_GENERALIZEDTIME_set_string(
@@ -119,98 +119,98 @@ pub struct Asn1Type(c_int);
 
 impl Asn1Type {
     /// End-of-contents marker.
-    pub const EOC: Asn1Type = Asn1Type(ffi::V_ASN1_EOC);
+    pub const EOC: Self = Self(ffi::V_ASN1_EOC);
 
     /// Boolean value.
-    pub const BOOLEAN: Asn1Type = Asn1Type(ffi::V_ASN1_BOOLEAN);
+    pub const BOOLEAN: Self = Self(ffi::V_ASN1_BOOLEAN);
 
     /// Integer value.
-    pub const INTEGER: Asn1Type = Asn1Type(ffi::V_ASN1_INTEGER);
+    pub const INTEGER: Self = Self(ffi::V_ASN1_INTEGER);
 
     /// Bit string.
-    pub const BIT_STRING: Asn1Type = Asn1Type(ffi::V_ASN1_BIT_STRING);
+    pub const BIT_STRING: Self = Self(ffi::V_ASN1_BIT_STRING);
 
     /// Octet string.
-    pub const OCTET_STRING: Asn1Type = Asn1Type(ffi::V_ASN1_OCTET_STRING);
+    pub const OCTET_STRING: Self = Self(ffi::V_ASN1_OCTET_STRING);
 
     /// Null value.
-    pub const NULL: Asn1Type = Asn1Type(ffi::V_ASN1_NULL);
+    pub const NULL: Self = Self(ffi::V_ASN1_NULL);
 
     /// Object identifier.
-    pub const OBJECT: Asn1Type = Asn1Type(ffi::V_ASN1_OBJECT);
+    pub const OBJECT: Self = Self(ffi::V_ASN1_OBJECT);
 
     /// Object descriptor.
-    pub const OBJECT_DESCRIPTOR: Asn1Type = Asn1Type(ffi::V_ASN1_OBJECT_DESCRIPTOR);
+    pub const OBJECT_DESCRIPTOR: Self = Self(ffi::V_ASN1_OBJECT_DESCRIPTOR);
 
     /// External value.
-    pub const EXTERNAL: Asn1Type = Asn1Type(ffi::V_ASN1_EXTERNAL);
+    pub const EXTERNAL: Self = Self(ffi::V_ASN1_EXTERNAL);
 
     /// Real number.
-    pub const REAL: Asn1Type = Asn1Type(ffi::V_ASN1_REAL);
+    pub const REAL: Self = Self(ffi::V_ASN1_REAL);
 
     /// Enumerated value.
-    pub const ENUMERATED: Asn1Type = Asn1Type(ffi::V_ASN1_ENUMERATED);
+    pub const ENUMERATED: Self = Self(ffi::V_ASN1_ENUMERATED);
 
     /// UTF-8 string.
-    pub const UTF8STRING: Asn1Type = Asn1Type(ffi::V_ASN1_UTF8STRING);
+    pub const UTF8STRING: Self = Self(ffi::V_ASN1_UTF8STRING);
 
     /// Ordered sequence.
-    pub const SEQUENCE: Asn1Type = Asn1Type(ffi::V_ASN1_SEQUENCE);
+    pub const SEQUENCE: Self = Self(ffi::V_ASN1_SEQUENCE);
 
     /// Set of values.
-    pub const SET: Asn1Type = Asn1Type(ffi::V_ASN1_SET);
+    pub const SET: Self = Self(ffi::V_ASN1_SET);
 
     /// Numeric string.
-    pub const NUMERICSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_NUMERICSTRING);
+    pub const NUMERICSTRING: Self = Self(ffi::V_ASN1_NUMERICSTRING);
 
     /// Printable string.
-    pub const PRINTABLESTRING: Asn1Type = Asn1Type(ffi::V_ASN1_PRINTABLESTRING);
+    pub const PRINTABLESTRING: Self = Self(ffi::V_ASN1_PRINTABLESTRING);
 
     /// T.61 string.
-    pub const T61STRING: Asn1Type = Asn1Type(ffi::V_ASN1_T61STRING);
+    pub const T61STRING: Self = Self(ffi::V_ASN1_T61STRING);
 
     /// Teletex string.
-    pub const TELETEXSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_TELETEXSTRING);
+    pub const TELETEXSTRING: Self = Self(ffi::V_ASN1_TELETEXSTRING);
 
     /// Videotex string.
-    pub const VIDEOTEXSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_VIDEOTEXSTRING);
+    pub const VIDEOTEXSTRING: Self = Self(ffi::V_ASN1_VIDEOTEXSTRING);
 
     /// IA5 string.
-    pub const IA5STRING: Asn1Type = Asn1Type(ffi::V_ASN1_IA5STRING);
+    pub const IA5STRING: Self = Self(ffi::V_ASN1_IA5STRING);
 
     /// UTC time.
-    pub const UTCTIME: Asn1Type = Asn1Type(ffi::V_ASN1_UTCTIME);
+    pub const UTCTIME: Self = Self(ffi::V_ASN1_UTCTIME);
 
     /// Generalized time.
-    pub const GENERALIZEDTIME: Asn1Type = Asn1Type(ffi::V_ASN1_GENERALIZEDTIME);
+    pub const GENERALIZEDTIME: Self = Self(ffi::V_ASN1_GENERALIZEDTIME);
 
     /// Graphic string.
-    pub const GRAPHICSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_GRAPHICSTRING);
+    pub const GRAPHICSTRING: Self = Self(ffi::V_ASN1_GRAPHICSTRING);
 
     /// ISO 64 string.
-    pub const ISO64STRING: Asn1Type = Asn1Type(ffi::V_ASN1_ISO64STRING);
+    pub const ISO64STRING: Self = Self(ffi::V_ASN1_ISO64STRING);
 
     /// Visible string.
-    pub const VISIBLESTRING: Asn1Type = Asn1Type(ffi::V_ASN1_VISIBLESTRING);
+    pub const VISIBLESTRING: Self = Self(ffi::V_ASN1_VISIBLESTRING);
 
     /// General string.
-    pub const GENERALSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_GENERALSTRING);
+    pub const GENERALSTRING: Self = Self(ffi::V_ASN1_GENERALSTRING);
 
     /// Universal string.
-    pub const UNIVERSALSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_UNIVERSALSTRING);
+    pub const UNIVERSALSTRING: Self = Self(ffi::V_ASN1_UNIVERSALSTRING);
 
     /// Basic multilingual plane string.
-    pub const BMPSTRING: Asn1Type = Asn1Type(ffi::V_ASN1_BMPSTRING);
+    pub const BMPSTRING: Self = Self(ffi::V_ASN1_BMPSTRING);
 
     /// Constructs an `Asn1Type` from a raw OpenSSL value.
     #[must_use]
-    pub fn from_raw(value: c_int) -> Self {
-        Asn1Type(value)
+    pub const fn from_raw(value: c_int) -> Self {
+        Self(value)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
     #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    pub const fn as_raw(&self) -> c_int {
         self.0
     }
 }
@@ -256,7 +256,8 @@ impl Asn1TimeRef {
         let mut secs = 0;
         let other = compare.as_ptr();
 
-        let err = unsafe { ffi::ASN1_TIME_diff(&mut days, &mut secs, self.as_ptr(), other) };
+        let err =
+            unsafe { ffi::ASN1_TIME_diff(&raw mut days, &raw mut secs, self.as_ptr(), other) };
 
         match err {
             0 => Err(ErrorStack::get()),
@@ -280,7 +281,7 @@ impl Asn1TimeRef {
 }
 
 impl PartialEq for Asn1TimeRef {
-    fn eq(&self, other: &Asn1TimeRef) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         self.diff(other)
             .map(|t| t.days == 0 && t.secs == 0)
             .unwrap_or(false)
@@ -304,7 +305,7 @@ impl PartialEq<Asn1Time> for &Asn1TimeRef {
 }
 
 impl PartialOrd for Asn1TimeRef {
-    fn partial_cmp(&self, other: &Asn1TimeRef) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.compare(other).ok()
     }
 }
@@ -345,12 +346,12 @@ impl fmt::Debug for Asn1TimeRef {
 
 impl Asn1Time {
     #[corresponds(ASN1_TIME_new)]
-    fn new() -> Result<Asn1Time, ErrorStack> {
+    fn new() -> Result<Self, ErrorStack> {
         ffi::init();
 
         unsafe {
             let handle = cvt_p(ffi::ASN1_TIME_new())?;
-            Ok(Asn1Time::from_ptr(handle))
+            Ok(Self::from_ptr(handle))
         }
     }
 
@@ -389,8 +390,8 @@ impl Asn1Time {
     /// GeneralizedTime to UTCTime if it is in the range where UTCTime is used.
     /// See RFC 5280, section 4.1.2.5.
     #[corresponds(ASN1_TIME_set_string_X509)]
-    pub fn from_str_x509(s: &str) -> Result<Asn1Time, ErrorStack> {
-        let time = Asn1Time::new()?;
+    pub fn from_str_x509(s: &str) -> Result<Self, ErrorStack> {
+        let time = Self::new()?;
         let s = CString::new(s).map_err(ErrorStack::internal_error)?;
         unsafe {
             cvt(ffi::ASN1_TIME_set_string_X509(time.as_ptr(), s.as_ptr()))?;
@@ -404,8 +405,8 @@ impl str::FromStr for Asn1Time {
 
     /// Creates a new time corresponding to the specified ASN1 time string.
     #[corresponds(ASN1_TIME_set_string)]
-    fn from_str(s: &str) -> Result<Asn1Time, ErrorStack> {
-        let time = Asn1Time::new()?;
+    fn from_str(s: &str) -> Result<Self, ErrorStack> {
+        let time = Self::new()?;
         let s = CString::new(s).map_err(ErrorStack::internal_error)?;
         unsafe {
             cvt(ffi::ASN1_TIME_set_string(time.as_ptr(), s.as_ptr()))?;
@@ -415,7 +416,7 @@ impl str::FromStr for Asn1Time {
 }
 
 impl PartialEq for Asn1Time {
-    fn eq(&self, other: &Asn1Time) -> bool {
+    fn eq(&self, other: &Self) -> bool {
         self.diff(other)
             .map(|t| t.days == 0 && t.secs == 0)
             .unwrap_or(false)
@@ -439,7 +440,7 @@ impl<'a> PartialEq<&'a Asn1TimeRef> for Asn1Time {
 }
 
 impl PartialOrd for Asn1Time {
-    fn partial_cmp(&self, other: &Asn1Time) -> Option<Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.compare(other).ok()
     }
 }
@@ -479,7 +480,7 @@ impl Asn1StringRef {
     pub fn as_utf8(&self) -> Result<OpensslString, ErrorStack> {
         unsafe {
             let mut ptr = ptr::null_mut();
-            let len = ffi::ASN1_STRING_to_UTF8(&mut ptr, self.as_ptr());
+            let len = ffi::ASN1_STRING_to_UTF8(&raw mut ptr, self.as_ptr());
             if len < 0 {
                 return Err(ErrorStack::get());
             }
@@ -731,13 +732,13 @@ impl str::FromStr for Asn1Object {
 
     /// Constructs an ASN.1 Object Identifier from a string representation of the OID.
     #[corresponds(OBJ_txt2obj)]
-    fn from_str(txt: &str) -> Result<Asn1Object, ErrorStack> {
+    fn from_str(txt: &str) -> Result<Self, ErrorStack> {
         ffi::init();
 
         let txt = CString::new(txt).map_err(ErrorStack::internal_error)?;
         unsafe {
             let obj = cvt_p(ffi::OBJ_txt2obj(txt.as_ptr(), 0))?;
-            Ok(Asn1Object::from_ptr(obj))
+            Ok(Self::from_ptr(obj))
         }
     }
 }

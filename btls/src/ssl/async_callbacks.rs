@@ -237,7 +237,7 @@ impl SslCredentialBuilder {
 impl SslRef {
     pub fn set_async_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
     where
-        F: Fn(&mut SslRef) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
+        F: Fn(&mut Self) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
     {
         self.set_custom_verify_callback(mode, async_custom_verify_callback(callback));
     }

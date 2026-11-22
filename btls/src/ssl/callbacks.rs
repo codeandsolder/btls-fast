@@ -788,9 +788,9 @@ struct CryptoBufferBuilder<'a> {
 }
 
 impl<'a> CryptoBufferBuilder<'a> {
-    fn with_capacity(capacity: usize) -> Result<CryptoBufferBuilder<'a>, ErrorStack> {
+    fn with_capacity(capacity: usize) -> Result<Self, ErrorStack> {
         let mut data: *mut u8 = ptr::null_mut();
-        let buffer = unsafe { crate::cvt_p(ffi::CRYPTO_BUFFER_alloc(&mut data, capacity))? };
+        let buffer = unsafe { crate::cvt_p(ffi::CRYPTO_BUFFER_alloc(&raw mut data, capacity))? };
         Ok(CryptoBufferBuilder {
             buffer,
             cursor: std::io::Cursor::new(unsafe { slice::from_raw_parts_mut(data, capacity) }),

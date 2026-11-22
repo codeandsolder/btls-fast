@@ -19,45 +19,43 @@ pub struct ErrorCode(c_int);
 
 impl ErrorCode {
     /// No error.
-    pub const NONE: ErrorCode = ErrorCode(ffi::SSL_ERROR_NONE);
+    pub const NONE: Self = Self(ffi::SSL_ERROR_NONE);
 
     /// The SSL session has been closed.
-    pub const ZERO_RETURN: ErrorCode = ErrorCode(ffi::SSL_ERROR_ZERO_RETURN);
+    pub const ZERO_RETURN: Self = Self(ffi::SSL_ERROR_ZERO_RETURN);
 
     /// An attempt to read data from the underlying socket returned `WouldBlock`.
     ///
     /// Wait for read readiness and retry the operation.
-    pub const WANT_READ: ErrorCode = ErrorCode(ffi::SSL_ERROR_WANT_READ);
+    pub const WANT_READ: Self = Self(ffi::SSL_ERROR_WANT_READ);
 
     /// An attempt to write data to the underlying socket returned `WouldBlock`.
     ///
     /// Wait for write readiness and retry the operation.
-    pub const WANT_WRITE: ErrorCode = ErrorCode(ffi::SSL_ERROR_WANT_WRITE);
+    pub const WANT_WRITE: Self = Self(ffi::SSL_ERROR_WANT_WRITE);
 
-    pub const WANT_X509_LOOKUP: ErrorCode = ErrorCode(ffi::SSL_ERROR_WANT_X509_LOOKUP);
+    pub const WANT_X509_LOOKUP: Self = Self(ffi::SSL_ERROR_WANT_X509_LOOKUP);
 
-    pub const PENDING_SESSION: ErrorCode = ErrorCode(ffi::SSL_ERROR_PENDING_SESSION);
+    pub const PENDING_SESSION: Self = Self(ffi::SSL_ERROR_PENDING_SESSION);
 
-    pub const PENDING_CERTIFICATE: ErrorCode = ErrorCode(ffi::SSL_ERROR_PENDING_CERTIFICATE);
+    pub const PENDING_CERTIFICATE: Self = Self(ffi::SSL_ERROR_PENDING_CERTIFICATE);
 
-    pub const WANT_CERTIFICATE_VERIFY: ErrorCode =
-        ErrorCode(ffi::SSL_ERROR_WANT_CERTIFICATE_VERIFY);
+    pub const WANT_CERTIFICATE_VERIFY: Self = Self(ffi::SSL_ERROR_WANT_CERTIFICATE_VERIFY);
 
-    pub const WANT_PRIVATE_KEY_OPERATION: ErrorCode =
-        ErrorCode(ffi::SSL_ERROR_WANT_PRIVATE_KEY_OPERATION);
+    pub const WANT_PRIVATE_KEY_OPERATION: Self = Self(ffi::SSL_ERROR_WANT_PRIVATE_KEY_OPERATION);
 
-    pub const PENDING_TICKET: ErrorCode = ErrorCode(ffi::SSL_ERROR_PENDING_TICKET);
+    pub const PENDING_TICKET: Self = Self(ffi::SSL_ERROR_PENDING_TICKET);
 
     /// The server rejected the early data of this client. Call
     /// [`SslRef::reset_early_data_reject`](super::SslRef::reset_early_data_reject) to continue
     /// the handshake without it.
-    pub const EARLY_DATA_REJECTED: ErrorCode = ErrorCode(ffi::SSL_ERROR_EARLY_DATA_REJECTED);
+    pub const EARLY_DATA_REJECTED: Self = Self(ffi::SSL_ERROR_EARLY_DATA_REJECTED);
 
     /// A non-recoverable IO error occurred.
-    pub const SYSCALL: ErrorCode = ErrorCode(ffi::SSL_ERROR_SYSCALL);
+    pub const SYSCALL: Self = Self(ffi::SSL_ERROR_SYSCALL);
 
     /// An error occurred in the SSL library.
-    pub const SSL: ErrorCode = ErrorCode(ffi::SSL_ERROR_SSL);
+    pub const SSL: Self = Self(ffi::SSL_ERROR_SSL);
 
     /// Wrap an `SSL_ERROR_*` error code.
     ///
@@ -65,8 +63,8 @@ impl ErrorCode {
     #[must_use]
     #[inline]
     #[cfg_attr(debug_assertions, track_caller)]
-    pub fn from_raw(raw: c_int) -> ErrorCode {
-        let code = ErrorCode(raw);
+    pub fn from_raw(raw: c_int) -> Self {
+        let code = Self(raw);
         debug_assert!(
             raw < 64 || code.description().is_some(),
             "{raw} is not an SSL_ERROR_* code"
@@ -78,7 +76,7 @@ impl ErrorCode {
     ///
     /// This is different than [packed error codes](crate::error::Error).
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 
@@ -123,19 +121,19 @@ pub struct Error {
 impl Error {
     /// An `SSL_ERROR_*` error code.
     #[must_use]
-    pub fn code(&self) -> ErrorCode {
+    pub const fn code(&self) -> ErrorCode {
         self.code
     }
 
     #[must_use]
-    pub fn io_error(&self) -> Option<&io::Error> {
+    pub const fn io_error(&self) -> Option<&io::Error> {
         match self.cause {
             Some(InnerError::Io(ref e)) => Some(e),
             _ => None,
         }
     }
 
-    pub fn into_io_error(self) -> Result<io::Error, Error> {
+    pub fn into_io_error(self) -> Result<io::Error, Self> {
         match self.cause {
             Some(InnerError::Io(e)) => Ok(e),
             _ => Err(self),
@@ -144,7 +142,7 @@ impl Error {
 
     /// Stack of [library-specific errors](crate::error::Error), if available.
     #[must_use]
-    pub fn ssl_error(&self) -> Option<&ErrorStack> {
+    pub const fn ssl_error(&self) -> Option<&ErrorStack> {
         match self.cause {
             Some(InnerError::Ssl(ref e)) => Some(e),
             _ => None,
@@ -152,7 +150,7 @@ impl Error {
     }
 
     #[must_use]
-    pub fn would_block(&self) -> bool {
+    pub const fn would_block(&self) -> bool {
         matches!(
             self.code,
             ErrorCode::WANT_READ
@@ -168,8 +166,8 @@ impl Error {
 }
 
 impl From<ErrorStack> for Error {
-    fn from(e: ErrorStack) -> Error {
-        Error {
+    fn from(e: ErrorStack) -> Self {
+        Self {
             code: ErrorCode::SSL,
             cause: Some(InnerError::Ssl(e)),
         }
@@ -229,8 +227,8 @@ pub enum HandshakeError<S> {
 impl<S: fmt::Debug> StdError for HandshakeError<S> {
     fn source(&self) -> Option<&(dyn StdError + 'static)> {
         match *self {
-            HandshakeError::SetupFailure(ref e) => Some(e),
-            HandshakeError::Failure(ref s) | HandshakeError::WouldBlock(ref s) => Some(s.error()),
+            Self::SetupFailure(ref e) => Some(e),
+            Self::Failure(ref s) | Self::WouldBlock(ref s) => Some(s.error()),
         }
     }
 }
@@ -238,13 +236,11 @@ impl<S: fmt::Debug> StdError for HandshakeError<S> {
 impl<S> fmt::Display for HandshakeError<S> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
-            HandshakeError::SetupFailure(ref e) => {
+            Self::SetupFailure(ref e) => {
                 write!(f, "TLS stream setup failed {e}")
             }
-            HandshakeError::Failure(ref s) => fmt_mid_handshake_error(s, f, "TLS handshake failed"),
-            HandshakeError::WouldBlock(ref s) => {
-                fmt_mid_handshake_error(s, f, "TLS handshake interrupted")
-            }
+            Self::Failure(ref s) => fmt_mid_handshake_error(s, f, "TLS handshake failed"),
+            Self::WouldBlock(ref s) => fmt_mid_handshake_error(s, f, "TLS handshake interrupted"),
         }
     }
 }
@@ -270,7 +266,7 @@ fn fmt_mid_handshake_error(
 }
 
 impl<S> From<ErrorStack> for HandshakeError<S> {
-    fn from(e: ErrorStack) -> HandshakeError<S> {
-        HandshakeError::SetupFailure(e)
+    fn from(e: ErrorStack) -> Self {
+        Self::SetupFailure(e)
     }
 }

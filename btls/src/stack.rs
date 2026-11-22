@@ -53,11 +53,11 @@ impl<T: Stackable> Drop for Stack<T> {
 }
 
 impl<T: Stackable> Stack<T> {
-    pub fn new() -> Result<Stack<T>, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
         unsafe {
             ffi::init();
             let ptr = cvt_p(OPENSSL_sk_new_null())?;
-            Ok(Stack(ptr.cast()))
+            Ok(Self(ptr.cast()))
         }
     }
 }
@@ -93,13 +93,13 @@ unsafe impl<T: Stackable> ForeignType for Stack<T> {
     type Ref = StackRef<T>;
 
     #[inline]
-    unsafe fn from_ptr(ptr: *mut T::StackType) -> Stack<T> {
+    unsafe fn from_ptr(ptr: *mut T::StackType) -> Self {
         assert!(
             !ptr.is_null(),
             "Must not instantiate a Stack from a null-ptr - use Stack::new() in \
              that case"
         );
-        Stack(ptr)
+        Self(ptr)
     }
 
     #[inline]

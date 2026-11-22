@@ -19,7 +19,7 @@ impl Drop for MemBioSlice<'_> {
 }
 
 impl<'a> MemBioSlice<'a> {
-    pub fn new(buf: &'a [u8]) -> Result<MemBioSlice<'a>, ErrorStack> {
+    pub fn new(buf: &'a [u8]) -> Result<Self, ErrorStack> {
         ffi::init();
 
         let bio = unsafe { cvt_p(BIO_new_mem_buf(buf.as_ptr().cast(), try_int(buf.len())?))? };
@@ -27,7 +27,7 @@ impl<'a> MemBioSlice<'a> {
         Ok(MemBioSlice(bio, PhantomData))
     }
 
-    pub fn as_ptr(&self) -> *mut ffi::BIO {
+    pub const fn as_ptr(&self) -> *mut ffi::BIO {
         self.0
     }
 }
@@ -43,21 +43,21 @@ impl Drop for MemBio {
 }
 
 impl MemBio {
-    pub fn new() -> Result<MemBio, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
         ffi::init();
 
         let bio = unsafe { cvt_p(ffi::BIO_new(ffi::BIO_s_mem()))? };
-        Ok(MemBio(bio))
+        Ok(Self(bio))
     }
 
-    pub fn as_ptr(&self) -> *mut ffi::BIO {
+    pub const fn as_ptr(&self) -> *mut ffi::BIO {
         self.0
     }
 
     pub fn get_buf(&self) -> &[u8] {
         unsafe {
             let mut ptr = ptr::null_mut();
-            let len = ffi::BIO_get_mem_data(self.0, &mut ptr);
+            let len = ffi::BIO_get_mem_data(self.0, &raw mut ptr);
             if ptr.is_null() || len < 0 {
                 return &[];
             }

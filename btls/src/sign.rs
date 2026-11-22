@@ -55,22 +55,22 @@ pub struct RsaPssSaltlen(c_int);
 
 impl RsaPssSaltlen {
     /// Returns the integer representation of `RsaPssSaltlen`.
-    fn as_raw(&self) -> c_int {
+    const fn as_raw(&self) -> c_int {
         self.0
     }
 
     /// Sets the salt length to the given value.
     #[must_use]
-    pub fn custom(val: c_int) -> RsaPssSaltlen {
-        RsaPssSaltlen(val)
+    pub const fn custom(val: c_int) -> Self {
+        Self(val)
     }
 
     /// The salt length is set to the digest length.
     /// Corresponds to the special value `-1`.
-    pub const DIGEST_LENGTH: RsaPssSaltlen = RsaPssSaltlen(-1);
+    pub const DIGEST_LENGTH: Self = Self(-1);
     /// The salt length is set to the maximum permissible value.
     /// Corresponds to the special value `-2`.
-    pub const MAXIMUM_LENGTH: RsaPssSaltlen = RsaPssSaltlen(-2);
+    pub const MAXIMUM_LENGTH: Self = Self(-2);
 }
 
 /// A type which computes cryptographic signatures of data.
@@ -98,7 +98,7 @@ impl<'a> Signer<'a> {
     /// This cannot be used with Ed25519 or Ed448 keys. Please refer to
     /// `new_without_digest`.
     #[corresponds(EVP_DigestSignInit)]
-    pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Signer<'a>, ErrorStack>
+    pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPrivate,
     {
@@ -110,17 +110,14 @@ impl<'a> Signer<'a> {
     /// This is the only way to create a `Verifier` for Ed25519 or Ed448 keys.
     /// It can also be used to create a CMAC.
     #[corresponds(EVP_DigestSignInit)]
-    pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Signer<'a>, ErrorStack>
+    pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPrivate,
     {
         Self::new_intern(None, pkey)
     }
 
-    fn new_intern<T>(
-        type_: Option<MessageDigest>,
-        pkey: &'a PKeyRef<T>,
-    ) -> Result<Signer<'a>, ErrorStack>
+    fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPrivate,
     {
@@ -131,7 +128,7 @@ impl<'a> Signer<'a> {
             let mut pctx: *mut ffi::EVP_PKEY_CTX = ptr::null_mut();
             let r = ffi::EVP_DigestSignInit(
                 ctx,
-                &mut pctx,
+                &raw mut pctx,
                 type_.map(|t| t.as_ptr()).unwrap_or(ptr::null()),
                 ptr::null_mut(),
                 pkey.as_ptr(),
@@ -158,7 +155,7 @@ impl<'a> Signer<'a> {
     pub fn rsa_padding(&self) -> Result<Padding, ErrorStack> {
         unsafe {
             let mut pad = 0;
-            cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &mut pad))
+            cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &raw mut pad))
                 .map(|_| Padding::from_raw(pad))
         }
     }
@@ -228,7 +225,7 @@ impl<'a> Signer<'a> {
             cvt(ffi::EVP_DigestSign(
                 self.md_ctx,
                 ptr::null_mut(),
-                &mut len,
+                &raw mut len,
                 ptr::null(),
                 0,
             ))?;
@@ -247,7 +244,7 @@ impl<'a> Signer<'a> {
             cvt(ffi::EVP_DigestSignFinal(
                 self.md_ctx,
                 buf.as_mut_ptr().cast(),
-                &mut len,
+                &raw mut len,
             ))?;
             Ok(len)
         }
@@ -282,7 +279,7 @@ impl<'a> Signer<'a> {
             cvt(ffi::EVP_DigestSign(
                 self.md_ctx,
                 sig_buf.as_mut_ptr(),
-                &mut sig_len,
+                &raw mut sig_len,
                 data_buf.as_ptr(),
                 data_buf.len(),
             ))?;
@@ -338,7 +335,7 @@ impl<'a> Verifier<'a> {
     /// This cannot be used with Ed25519 or Ed448 keys. Please refer to
     /// `new_without_digest`.
     #[corresponds(EVP_DigestVerifyInit)]
-    pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Verifier<'a>, ErrorStack>
+    pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPublic,
     {
@@ -349,17 +346,14 @@ impl<'a> Verifier<'a> {
     ///
     /// This is the only way to create a `Verifier` for Ed25519 or Ed448 keys.
     #[corresponds(EVP_DigestVerifyInit)]
-    pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Verifier<'a>, ErrorStack>
+    pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPublic,
     {
         Verifier::new_intern(None, pkey)
     }
 
-    fn new_intern<T>(
-        type_: Option<MessageDigest>,
-        pkey: &'a PKeyRef<T>,
-    ) -> Result<Verifier<'a>, ErrorStack>
+    fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPublic,
     {
@@ -370,7 +364,7 @@ impl<'a> Verifier<'a> {
             let mut pctx: *mut ffi::EVP_PKEY_CTX = ptr::null_mut();
             let r = ffi::EVP_DigestVerifyInit(
                 ctx,
-                &mut pctx,
+                &raw mut pctx,
                 type_.map(|t| t.as_ptr()).unwrap_or(ptr::null()),
                 ptr::null_mut(),
                 pkey.as_ptr(),
@@ -397,7 +391,7 @@ impl<'a> Verifier<'a> {
     pub fn rsa_padding(&self) -> Result<Padding, ErrorStack> {
         unsafe {
             let mut pad = 0;
-            cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &mut pad))
+            cvt(ffi::EVP_PKEY_CTX_get_rsa_padding(self.pctx, &raw mut pad))
                 .map(|_| Padding::from_raw(pad))
         }
     }

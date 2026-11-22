@@ -83,7 +83,7 @@ pub struct EchGreaseSizeInfo<'a>(pub(crate) &'a ffi::SSL_ECH_GREASE_SIZE_INFO);
 
 impl EchGreaseSizeInfo<'_> {
     /// Cipher suite IDs in wire order, each encoded as two big-endian bytes.
-    pub fn cipher_suites(&self) -> &[u8] {
+    pub const fn cipher_suites(&self) -> &[u8] {
         if self.0.cipher_suites_length == 0 {
             return &[];
         }
@@ -110,12 +110,12 @@ impl EchGreaseSizeInfo<'_> {
 
     /// Wire preamble length, including the session ID and DTLS cookie, excluding
     /// handshake and extensions headers. This is not an encoded ECH Inner size.
-    pub fn preamble_length(&self) -> usize {
+    pub const fn preamble_length(&self) -> usize {
         self.0.preamble_length
     }
 
     /// Pending PSK extension body length; zero if absent.
-    pub fn psk_extension_length(&self) -> usize {
+    pub const fn psk_extension_length(&self) -> usize {
         self.0.psk_extension_length
     }
 
@@ -126,12 +126,12 @@ impl EchGreaseSizeInfo<'_> {
     }
 
     /// AEAD BoringSSL would advertise without this callback.
-    pub fn default_aead(&self) -> EchGreaseAead {
+    pub const fn default_aead(&self) -> EchGreaseAead {
         EchGreaseAead(self.0.default_aead_id)
     }
 
     /// Ciphertext expansion, shared by both supported GREASE AEADs.
-    pub fn aead_overhead(&self) -> usize {
+    pub const fn aead_overhead(&self) -> usize {
         self.0.aead_overhead
     }
 
@@ -139,7 +139,7 @@ impl EchGreaseSizeInfo<'_> {
     /// See [`message_length`](Self::message_length) for the 16 KiB BoringSSL limit.
     /// HRR may need more room for a cookie or a larger key share in CH2;
     /// dropping CH1's padding can also make CH2 shorter.
-    pub fn max_payload_length(&self) -> usize {
+    pub const fn max_payload_length(&self) -> usize {
         self.0.max_payload_length
     }
 
@@ -150,17 +150,17 @@ impl EchGreaseSizeInfo<'_> {
     /// above 16 KiB unless it requests client certificates.
     ///
     /// [RFC 7685]: https://www.rfc-editor.org/rfc/rfc7685.html
-    pub fn message_length(&self) -> usize {
+    pub const fn message_length(&self) -> usize {
         self.0.message_length
     }
 
     /// Whether this is a DTLS ClientHello.
-    pub fn is_dtls(&self) -> bool {
+    pub const fn is_dtls(&self) -> bool {
         self.0.is_dtls != 0
     }
 
     /// Whether this connection uses QUIC.
-    pub fn is_quic(&self) -> bool {
+    pub const fn is_quic(&self) -> bool {
         self.0.is_quic != 0
     }
 
@@ -430,7 +430,7 @@ impl SslRef {
     #[corresponds(SSL_set_ech_grease_callback)]
     pub fn set_ech_grease_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
-        F: Fn(&SslRef, EchGreaseSizeInfo<'_>) -> Result<EchGreaseParameters, ErrorStack>
+        F: Fn(&Self, EchGreaseSizeInfo<'_>) -> Result<EchGreaseParameters, ErrorStack>
             + Send
             + Sync
             + 'static,

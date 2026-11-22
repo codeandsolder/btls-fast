@@ -28,7 +28,7 @@ foreign_type_and_impl_send_sync! {
 impl EcdsaSig {
     /// Computes a digital signature of the hash value `data` using the private EC key eckey.
     #[corresponds(ECDSA_do_sign)]
-    pub fn sign<T>(data: &[u8], eckey: &EcKeyRef<T>) -> Result<EcdsaSig, ErrorStack>
+    pub fn sign<T>(data: &[u8], eckey: &EcKeyRef<T>) -> Result<Self, ErrorStack>
     where
         T: HasPrivate,
     {
@@ -39,19 +39,19 @@ impl EcdsaSig {
                 data.len(),
                 eckey.as_ptr(),
             ))?;
-            Ok(EcdsaSig::from_ptr(sig))
+            Ok(Self::from_ptr(sig))
         }
     }
 
     /// Returns a new `EcdsaSig` by setting the `r` and `s` values associated with a
     /// ECDSA signature.
     #[corresponds(ECDSA_SIG_set0)]
-    pub fn from_private_components(r: BigNum, s: BigNum) -> Result<EcdsaSig, ErrorStack> {
+    pub fn from_private_components(r: BigNum, s: BigNum) -> Result<Self, ErrorStack> {
         unsafe {
             let sig = cvt_p(ffi::ECDSA_SIG_new())?;
             ECDSA_SIG_set0(sig, r.as_ptr(), s.as_ptr());
             mem::forget((r, s));
-            Ok(EcdsaSig::from_ptr(sig))
+            Ok(Self::from_ptr(sig))
         }
     }
 
@@ -97,7 +97,7 @@ impl EcdsaSigRef {
     pub fn r(&self) -> &BigNumRef {
         unsafe {
             let mut r = ptr::null();
-            ECDSA_SIG_get0(self.as_ptr(), &mut r, ptr::null_mut());
+            ECDSA_SIG_get0(self.as_ptr(), &raw mut r, ptr::null_mut());
             BigNumRef::from_ptr(r.cast_mut())
         }
     }
@@ -108,7 +108,7 @@ impl EcdsaSigRef {
     pub fn s(&self) -> &BigNumRef {
         unsafe {
             let mut s = ptr::null();
-            ECDSA_SIG_get0(self.as_ptr(), ptr::null_mut(), &mut s);
+            ECDSA_SIG_get0(self.as_ptr(), ptr::null_mut(), &raw mut s);
             BigNumRef::from_ptr(s.cast_mut())
         }
     }

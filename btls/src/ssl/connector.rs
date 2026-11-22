@@ -246,7 +246,7 @@ pub(super) struct ClientSessionCallback {
 
 impl ClientSession {
     pub(super) fn new(session: SslSession, peer: SessionPeer, ssl: &SslRef) -> Self {
-        ClientSession {
+        Self {
             session,
             peer,
             verify_peer: verifies_peer(ssl),
@@ -316,7 +316,8 @@ where
         .filter_map(|cert| {
             let mut not_after = 0;
             // SAFETY: `cert` is valid, and `not_after` is a valid output.
-            let ok = unsafe { ffi::ASN1_TIME_to_posix(cert.not_after().as_ptr(), &mut not_after) };
+            let ok =
+                unsafe { ffi::ASN1_TIME_to_posix(cert.not_after().as_ptr(), &raw mut not_after) };
             (ok == 1).then_some(not_after)
         })
         .min()
@@ -339,7 +340,7 @@ fn verifies_peer(ssl: &SslRef) -> bool {
 impl ConnectConfiguration {
     /// A builder-style version of `set_use_server_name_indication`.
     #[must_use]
-    pub fn use_server_name_indication(mut self, use_sni: bool) -> ConnectConfiguration {
+    pub fn use_server_name_indication(mut self, use_sni: bool) -> Self {
         self.set_use_server_name_indication(use_sni);
         self
     }
@@ -347,13 +348,13 @@ impl ConnectConfiguration {
     /// Configures the use of Server Name Indication (SNI) when connecting.
     ///
     /// Defaults to `true`.
-    pub fn set_use_server_name_indication(&mut self, use_sni: bool) {
+    pub const fn set_use_server_name_indication(&mut self, use_sni: bool) {
         self.sni = use_sni;
     }
 
     /// A builder-style version of `set_verify_hostname`.
     #[must_use]
-    pub fn verify_hostname(mut self, verify_hostname: bool) -> ConnectConfiguration {
+    pub fn verify_hostname(mut self, verify_hostname: bool) -> Self {
         self.set_verify_hostname(verify_hostname);
         self
     }
@@ -367,13 +368,13 @@ impl ConnectConfiguration {
     /// You should think very carefully before you use this method. If hostname verification is not
     /// used, *any* valid certificate for *any* site will be trusted for use from any other. This
     /// introduces a significant vulnerability to man-in-the-middle attacks.
-    pub fn set_verify_hostname(&mut self, verify_hostname: bool) {
+    pub const fn set_verify_hostname(&mut self, verify_hostname: bool) {
         self.verify_hostname = verify_hostname;
     }
 
     /// A builder-style version of `set_client_session`.
     #[must_use]
-    pub fn client_session(mut self, session: ClientSession) -> ConnectConfiguration {
+    pub fn client_session(mut self, session: ClientSession) -> Self {
         self.set_client_session(session);
         self
     }

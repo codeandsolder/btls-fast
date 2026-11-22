@@ -10,7 +10,7 @@ pub struct Index<T, U>(c_int, PhantomData<(T, U)>);
 impl<T, U> Copy for Index<T, U> {}
 
 impl<T, U> Clone for Index<T, U> {
-    fn clone(&self) -> Index<T, U> {
+    fn clone(&self) -> Self {
         *self
     }
 }
@@ -22,12 +22,12 @@ impl<T, U> Index<T, U> {
     ///
     /// The caller must ensure that the index correctly maps to a `U` value stored in a `T`.
     #[must_use]
-    pub unsafe fn from_raw(idx: c_int) -> Index<T, U> {
-        Index(idx, PhantomData)
+    pub const unsafe fn from_raw(idx: c_int) -> Self {
+        Self(idx, PhantomData)
     }
 
     #[must_use = "The returned native representation is needed by the caller."]
-    pub fn as_raw(self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
