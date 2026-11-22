@@ -15,6 +15,7 @@ use crate::ffi;
 use crate::nid::Nid;
 use crate::pkey::{HasParams, HasPrivate, HasPublic, Params, Private, Public};
 use crate::try_int;
+use crate::util::ForeignTypeRefExt;
 use crate::{cvt, cvt_n, cvt_p, init};
 
 /// Supported X9.62 point encoding formats.
