@@ -11,14 +11,15 @@ use super::{
 use crate::error::ErrorStack;
 use crate::ffi;
 use crate::hmac::HmacCtxRef;
-use crate::ssl::TicketKeyCallbackResult;
+use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
 use crate::symm::CipherCtxRef;
+use crate::util::catch_native;
 use crate::x509::X509StoreContextRef;
 use foreign_types::ForeignType;
 use foreign_types::ForeignTypeRef;
 use libc::{c_char, c_int, c_uchar, c_uint, c_void};
 use std::ffi::CStr;
-use std::mem::{self, MaybeUninit};
+use std::mem;
 use std::ptr;
 use std::slice;
 use std::str;
@@ -37,7 +38,7 @@ where
     let Some(verify) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
         return 0;
     };
-    crate::util::catch_native(|| c_int::from(verify(preverify_ok != 0, ctx))).unwrap_or(0)
+    catch_native(|| c_int::from(verify(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn raw_custom_verify<F>(
@@ -77,7 +78,7 @@ where
     let Some(verify) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
         return 0;
     };
-    crate::util::catch_native(|| c_int::from(verify(ctx))).unwrap_or(0)
+    catch_native(|| c_int::from(verify(ctx))).unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn ssl_raw_custom_verify<F>(
@@ -104,19 +105,54 @@ unsafe fn raw_custom_verify_callback(
     out_alert: *mut u8,
     callback: impl FnOnce(&mut SslRef) -> Result<(), SslVerifyError>,
 ) -> ffi::ssl_verify_result_t {
-    // SAFETY: btls provides valid inputs.
+    if ssl.is_null() || out_alert.is_null() {
+        return ffi::ssl_verify_result_t::ssl_verify_invalid;
+    }
+    // SAFETY: native verification owns exclusive access to the live SSL.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let out_alert = unsafe { &mut *out_alert };
-
-    match callback(ssl) {
-        Ok(()) => ffi::ssl_verify_result_t::ssl_verify_ok,
-        Err(SslVerifyError::Invalid(alert)) => {
-            *out_alert = alert.0 as u8;
-
+    match catch_native(|| callback(ssl)) {
+        Some(Ok(())) => ffi::ssl_verify_result_t::ssl_verify_ok,
+        Some(Err(SslVerifyError::Retry)) => ffi::ssl_verify_result_t::ssl_verify_retry,
+        failure => {
+            let alert = match failure {
+                Some(Err(SslVerifyError::Invalid(alert))) => alert,
+                _ => SslAlert::INTERNAL_ERROR,
+            };
+            // SAFETY: the caller supplies a writable alert output slot, which
+            // need not have been initialized before this callback.
+            unsafe { out_alert.write(u8::try_from(alert.0).unwrap_or(80)) };
             ffi::ssl_verify_result_t::ssl_verify_invalid
         }
-        Err(SslVerifyError::Retry) => ffi::ssl_verify_result_t::ssl_verify_retry,
     }
+}
+
+// Caller provides len exclusively writable bytes with a lifetime bounded
+// by the synchronous native callback. Null is permitted only for empty output.
+unsafe fn native_output<'a>(ptr: *mut u8, len: usize) -> Option<&'a mut [u8]> {
+    if len == 0 {
+        return Some(&mut []);
+    }
+    if ptr.is_null() || len > isize::MAX.unsigned_abs() {
+        return None;
+    }
+    // SAFETY: the caller guarantees writable disjoint storage. Initialize it
+    // before creating an initialized byte slice.
+    unsafe {
+        ptr.write_bytes(0, len);
+        Some(slice::from_raw_parts_mut(ptr, len))
+    }
+}
+
+fn psk_result(capacity: usize, callback: impl FnOnce() -> Result<usize, ErrorStack>) -> c_uint {
+    catch_native(|| match callback() {
+        Ok(written) if written <= capacity => c_uint::try_from(written).unwrap_or(0),
+        Ok(_) => 0,
+        Err(error) => {
+            error.put();
+            0
+        }
+    })
+    .unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn raw_client_psk<F>(
@@ -133,33 +169,42 @@ where
         + Sync
         + Send,
 {
-    // SAFETY: btls provides valid inputs.
-
+    if ssl_ptr.is_null() {
+        return 0;
+    }
+    // SAFETY: the native callback exclusively borrows SSL and supplies a
+    // readable NUL-terminated hint when present.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl_ptr) };
-
     let hint = if hint.is_null() {
         None
     } else {
         Some(unsafe { CStr::from_ptr(hint) }.to_bytes())
     };
-
-    // Give the callback mutable slices into which it can write the identity and psk.
-    let identity_sl =
-        unsafe { slice::from_raw_parts_mut(identity.cast::<u8>(), max_identity_len as usize) };
-    let psk_sl = unsafe { slice::from_raw_parts_mut(psk, max_psk_len as usize) };
-
-    let ssl_context = ssl.ssl_context().to_owned();
-    let callback = ssl_context
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: psk callback missing");
-
-    match callback(ssl, hint, identity_sl, psk_sl) {
-        Ok(psk_len) => psk_len as u32,
-        Err(e) => {
-            e.put();
-            0
-        }
+    let (Ok(identity_capacity), Ok(psk_capacity)) = (
+        usize::try_from(max_identity_len),
+        usize::try_from(max_psk_len),
+    ) else {
+        return 0;
+    };
+    // SAFETY: both native buffers are disjoint, writable output storage.
+    let Some(identity) = (unsafe { native_output(identity.cast(), identity_capacity) }) else {
+        return 0;
+    };
+    // SAFETY: psk describes the second exclusive native output allocation.
+    let Some(psk) = (unsafe { native_output(psk, psk_capacity) }) else {
+        return 0;
+    };
+    if identity.is_empty() {
+        return 0;
     }
+    psk_result(psk_capacity, || {
+        let context = ssl.ssl_context().to_owned();
+        let Some(callback) = context.ex_data(SslContext::cached_ex_index::<F>()) else {
+            return Ok(0);
+        };
+        let len = callback(ssl, hint, identity, psk)?;
+        Ok(if identity.contains(&0) { len } else { 0 })
+    })
 }
 
 pub(super) unsafe extern "C" fn raw_server_psk<F>(
@@ -174,31 +219,31 @@ where
         + Sync
         + Send,
 {
-    // SAFETY: btls provides valid inputs.
-
+    if ssl.is_null() {
+        return 0;
+    }
+    // SAFETY: native handshake exclusively borrows SSL and supplies a
+    // readable NUL-terminated identity when present.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-
     let identity = if identity.is_null() {
         None
     } else {
         Some(unsafe { CStr::from_ptr(identity) }.to_bytes())
     };
-
-    // Give the callback mutable slices into which it can write the psk.
-    let psk_sl = unsafe { slice::from_raw_parts_mut(psk, max_psk_len as usize) };
-
-    let ssl_context = ssl.ssl_context().to_owned();
-    let callback = ssl_context
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: psk callback missing");
-
-    match callback(ssl, identity, psk_sl) {
-        Ok(psk_len) => psk_len as u32,
-        Err(e) => {
-            e.put();
-            0
-        }
-    }
+    let Ok(capacity) = usize::try_from(max_psk_len) else {
+        return 0;
+    };
+    // SAFETY: the native caller provides capacity bytes of exclusive output.
+    let Some(psk) = (unsafe { native_output(psk, capacity) }) else {
+        return 0;
+    };
+    psk_result(capacity, || {
+        let context = ssl.ssl_context().to_owned();
+        let Some(callback) = context.ex_data(SslContext::cached_ex_index::<F>()) else {
+            return Ok(0);
+        };
+        callback(ssl, identity, psk)
+    })
 }
 
 pub(super) unsafe extern "C" fn ssl_raw_verify<F>(
@@ -217,7 +262,7 @@ where
     else {
         return 0;
     };
-    crate::util::catch_native(|| c_int::from(callback(preverify_ok != 0, ctx))).unwrap_or(0)
+    catch_native(|| c_int::from(callback(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
 pub(super) unsafe extern "C" fn raw_sni<F>(
@@ -228,32 +273,30 @@ pub(super) unsafe extern "C" fn raw_sni<F>(
 where
     F: Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + 'static + Sync + Send,
 {
-    // SAFETY: btls provides valid inputs.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let al = unsafe { &mut *al };
-
-    // SAFETY: We can make `callback` outlive `ssl` because it is a callback
-    // stored in the original context with which `ssl` was built. That
-    // original context is always stored as the session context in
-    // `Ssl::new` so it is always guaranteed to outlive the lifetime of
-    // this function's scope.
-    let callback = unsafe { &*(arg as *const F) };
-
-    let mut alert = SslAlert(*al);
-
-    let r = callback(ssl, &mut alert);
-
-    *al = alert.0;
-
-    match r {
-        Ok(()) => ffi::SSL_TLSEXT_ERR_OK,
-        Err(e) => e.0,
+    if ssl.is_null() || al.is_null() || arg.is_null() {
+        return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
     }
-}
-
-unsafe fn to_uninit<'a, T: 'a>(ptr: *mut T) -> &'a mut MaybeUninit<T> {
-    assert!(!ptr.is_null());
-    unsafe { &mut *ptr.cast::<MaybeUninit<T>>() }
+    // SAFETY: SNI runs with exclusive access to the live SSL. BoringSSL
+    // selects the callback from current context or original session context.
+    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    // Hold the current context across a possible context switch in the callback.
+    let _current_context = ssl.ssl_context().to_owned();
+    // SAFETY: the callback arg is the registered stable boxed F, owned by
+    // either the retained current context or the native session context.
+    let callback = unsafe { &*arg.cast::<F>() };
+    // SAFETY: BoringSSL initializes this alert to UNRECOGNIZED_NAME.
+    let mut alert = SslAlert(unsafe { al.read() });
+    let result = catch_native(|| callback(ssl, &mut alert));
+    if result.is_none() {
+        alert = SslAlert::INTERNAL_ERROR;
+    }
+    // SAFETY: the initialized alert slot is writable for the duration of SNI.
+    unsafe { al.write(alert.0) };
+    match result {
+        Some(Ok(())) => ffi::SSL_TLSEXT_ERR_OK,
+        Some(Err(error)) => error.0,
+        None => ffi::SSL_TLSEXT_ERR_ALERT_FATAL,
+    }
 }
 
 pub(super) unsafe extern "C" fn raw_ticket_key<F>(
@@ -267,50 +310,71 @@ pub(super) unsafe extern "C" fn raw_ticket_key<F>(
 where
     F: Fn(
             &SslRef,
-            &mut [u8; 16],
-            &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+            TicketKeyMode<'_>,
             &mut CipherCtxRef,
             &mut HmacCtxRef,
-            bool,
         ) -> TicketKeyCallbackResult
         + 'static
         + Sync
         + Send,
 {
-    // SAFETY: btls provides valid inputs.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-
-    let ssl_context = ssl.ssl_context().to_owned();
-    let callback = ssl_context
-        .ex_data::<F>(SslContext::cached_ex_index::<F>())
-        .expect("expected session resumption callback");
-
-    // SAFETY: the callback guarantees that key_name is 16 bytes
-    let key_name =
-        unsafe { to_uninit(key_name.cast::<[u8; ffi::SSL_TICKET_KEY_NAME_LEN as usize]>()) };
-
-    // SAFETY: the callback provides 16 bytes iv
-    //
-    // https://github.com/google/boringssl/blob/main/ssl/ssl_session.cc#L331
-    let iv = unsafe { to_uninit(iv.cast::<[u8; ffi::EVP_MAX_IV_LENGTH as usize]>()) };
-
-    // When encrypting a new ticket, encrypt will be one.
-    let encrypt = encrypt == 1;
-
-    // Zero-initialize the key_name and iv, since the application is expected to populate these
-    // fields in the encrypt mode.
-    if encrypt {
-        *key_name = MaybeUninit::zeroed();
-        *iv = MaybeUninit::zeroed();
+    if ssl.is_null()
+        || key_name.is_null()
+        || iv.is_null()
+        || evp_ctx.is_null()
+        || hmac_ctx.is_null()
+    {
+        return TicketKeyCallbackResult::Error.into();
     }
-    let key_name = unsafe { key_name.assume_init_mut() };
-    let iv = unsafe { iv.assume_init_mut() };
-
-    // The EVP_CIPHER_CTX and HMAC_CTX are owned by boringSSL.
+    // SAFETY: ticket processing borrows the live SSL and provides initialized
+    // uniquely borrowed cipher/HMAC contexts.
+    let ssl = unsafe { SslRef::from_ptr(ssl) };
     let evp_ctx = unsafe { CipherCtxRef::from_ptr_mut(evp_ctx) };
     let hmac_ctx = unsafe { HmacCtxRef::from_ptr_mut(hmac_ctx) };
+    let key_name = key_name.cast::<[u8; 16]>();
+    let iv = iv.cast::<[u8; ffi::EVP_MAX_IV_LENGTH as usize]>();
+    let mode = match encrypt {
+        1 => {
+            // SAFETY: encryption receives writable output arrays which are
+            // uninitialized on entry. Initialize each before mutable borrowing.
+            unsafe {
+                key_name.write([0; 16]);
+                iv.write([0; ffi::EVP_MAX_IV_LENGTH as usize]);
+                TicketKeyMode::Encrypt {
+                    key_name: &mut *key_name,
+                    iv: &mut *iv,
+                }
+            }
+        }
+        0 => {
+            // SAFETY: decryption receives pointers into immutable ticket input
+            // (native API const_casts them). Expose shared references only.
+            unsafe {
+                TicketKeyMode::Decrypt {
+                    key_name: &*key_name,
+                    iv: &*iv,
+                }
+            }
+        }
+        _ => return TicketKeyCallbackResult::Error.into(),
+    };
 
-    callback(ssl, key_name, iv, evp_ctx, hmac_ctx, encrypt).into()
+    // BoringSSL always invokes the callback of the original session context,
+    // even if SNI has switched the connection's current context.
+    let result = catch_native(|| {
+        let Some(callback) = ssl
+            .ex_data(*SESSION_CTX_INDEX)
+            .and_then(|ctx| ctx.ex_data(SslContext::cached_ex_index::<F>()))
+        else {
+            return TicketKeyCallbackResult::Error;
+        };
+        callback(ssl, mode, evp_ctx, hmac_ctx)
+    })
+    .unwrap_or(TicketKeyCallbackResult::Error);
+    if encrypt == 1 && result == TicketKeyCallbackResult::DecryptSuccessRenew {
+        return TicketKeyCallbackResult::Error.into();
+    }
+    result.into()
 }
 
 pub(super) unsafe extern "C" fn raw_alpn_select<F>(
@@ -324,26 +388,58 @@ pub(super) unsafe extern "C" fn raw_alpn_select<F>(
 where
     F: for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + 'static + Sync + Send,
 {
-    // SAFETY: btls provides valid inputs.
+    if ssl.is_null() || out.is_null() || outlen.is_null() {
+        return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
+    }
+    let Ok(inlen) = usize::try_from(inlen) else {
+        return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
+    };
+    // SAFETY: native handshake owns SSL exclusively and supplies the readable
+    // ALPN wire-format protocol list for the duration of this call.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let protos = unsafe { slice::from_raw_parts(inbuf, inlen as usize) };
-    let out = unsafe { &mut *out };
-    let outlen = unsafe { &mut *outlen };
+    let Some(protos) = (unsafe { native_input(inbuf, inlen) }) else {
+        return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
+    };
+    let result = catch_native(|| {
+        let context = ssl.ssl_context().to_owned();
+        let Some(callback) = context.ex_data(SslContext::cached_ex_index::<F>()) else {
+            return Err(AlpnError::ALERT_FATAL);
+        };
+        let selected = callback(ssl, protos)?;
+        offered_protocol(protos, selected).ok_or(AlpnError::ALERT_FATAL)
+    });
 
-    let ssl_context = ssl.ssl_context().to_owned();
-    let callback = ssl_context
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: alpn callback missing");
-
-    match callback(ssl, protos) {
-        Ok(proto) => {
-            *out = proto.as_ptr();
-            *outlen = proto.len() as c_uchar;
-
+    match result {
+        Some(Ok(proto)) => {
+            let Ok(len) = u8::try_from(proto.len()) else {
+                return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
+            };
+            // SAFETY: native output slots may be uninitialized. The selected
+            // entry points into the caller's ALPN input, which outlives the callback.
+            unsafe {
+                out.write(proto.as_ptr());
+                outlen.write(len);
+            }
             ffi::SSL_TLSEXT_ERR_OK
         }
-        Err(e) => e.0,
+        Some(Err(error)) => error.0,
+        None => ffi::SSL_TLSEXT_ERR_ALERT_FATAL,
     }
+}
+
+fn offered_protocol<'a>(mut offered: &'a [u8], selected: &[u8]) -> Option<&'a [u8]> {
+    let mut matched = None;
+    while let Some((&len, rest)) = offered.split_first() {
+        if len == 0 {
+            return None;
+        }
+        let (protocol, remaining) = rest.split_at_checked(usize::from(len))?;
+        if protocol == selected {
+            matched = Some(protocol);
+        }
+        offered = remaining;
+    }
+    matched
 }
 
 pub(super) unsafe extern "C" fn raw_select_cert<F>(
@@ -357,17 +453,23 @@ where
     let ech_accepted = client_hello.ssl().ech_accepted();
 
     let ssl_context = client_hello.ssl().ssl_context().to_owned();
-    let callback = ssl_context
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: select cert callback missing");
-
-    match callback(client_hello) {
-        Ok(SelectCertAction::Success) => ffi::ssl_select_cert_result_t::ssl_select_cert_success,
-        Ok(SelectCertAction::DisableEch) if ech_accepted => {
+    let result = catch_native(|| {
+        let Some(callback) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+            return Err(SelectCertError(
+                ffi::ssl_select_cert_result_t::ssl_select_cert_error,
+            ));
+        };
+        callback(client_hello)
+    });
+    match result {
+        Some(Ok(SelectCertAction::Success)) => {
+            ffi::ssl_select_cert_result_t::ssl_select_cert_success
+        }
+        Some(Ok(SelectCertAction::DisableEch)) if ech_accepted => {
             ffi::ssl_select_cert_result_t::ssl_select_cert_disable_ech
         }
-        Ok(SelectCertAction::DisableEch) => ffi::ssl_select_cert_result_t::ssl_select_cert_error,
-        Err(e) => e.0,
+        Some(Err(error)) => error.0,
+        _ => ffi::ssl_select_cert_result_t::ssl_select_cert_error,
     }
 }
 
@@ -379,11 +481,13 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context().to_owned();
-    let callback = ssl_context
-        .ex_data(SslContext::cached_ex_index::<F>())
-        .expect("BUG: ocsp callback missing");
-
-    let ret = callback(ssl);
+    let ret = catch_native(|| {
+        let Some(callback) = ssl_context.ex_data(SslContext::cached_ex_index::<F>()) else {
+            return Err(ErrorStack::internal_error_str("missing OCSP callback"));
+        };
+        callback(ssl)
+    })
+    .unwrap_or_else(|| Err(ErrorStack::internal_error_str("OCSP callback panicked")));
 
     if ssl.is_server() {
         match ret {
@@ -543,7 +647,7 @@ where
 
 // The caller must ensure that nonempty input points to readable bytes for
 // the returned lifetime, and that output storage does not overlap it.
-unsafe fn private_key_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     if len == 0 {
         return Some(&[]);
     }
@@ -568,7 +672,7 @@ where
 {
     // SAFETY: the native private-key callback supplies readable input for
     // the duration of the call.
-    let Some(input) = (unsafe { private_key_input(in_, in_len) }) else {
+    let Some(input) = (unsafe { native_input(in_, in_len) }) else {
         return PrivateKeyMethodError::FAILURE.0;
     };
 
@@ -595,7 +699,7 @@ where
 {
     // SAFETY: the native private-key callback supplies readable input for
     // the duration of the call.
-    let Some(input) = (unsafe { private_key_input(in_, in_len) }) else {
+    let Some(input) = (unsafe { native_input(in_, in_len) }) else {
         return PrivateKeyMethodError::FAILURE.0;
     };
 
@@ -641,20 +745,14 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     // SAFETY: use a raw write, because the output length need not be initialized.
     unsafe { out_len.write(0) };
-    let output = if max_out == 0 {
-        &mut []
-    } else {
-        // SAFETY: initialize all bytes before exposing the output as a safe
-        // slice, even if the native caller has left the buffer uninitialized.
-        unsafe {
-            out.write_bytes(0, max_out);
-            slice::from_raw_parts_mut(out, max_out)
-        }
+    // SAFETY: the native caller provides max_out writable disjoint bytes.
+    let Some(output) = (unsafe { native_output(out, max_out) }) else {
+        return PrivateKeyMethodError::FAILURE.0;
     };
 
     // Hold a separate Arc while calling application code, rather than borrow
     // data through an SSL/credential whose configuration the callback can change.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let result = catch_native(|| {
         let method: Option<Arc<M>> = if CREDENTIAL {
             #[cfg(feature = "credential")]
             {
@@ -683,22 +781,17 @@ where
                 .cloned()
         };
         Some(callback(method.as_deref()?, ssl, output))
-    }));
+    })
+    .flatten();
 
     match result {
-        Ok(Some(Ok(written))) if written <= max_out => {
+        Some(Ok(written)) if written <= max_out => {
             // SAFETY: out_len is the native caller's writable output slot.
             unsafe { out_len.write(written) };
             ffi::ssl_private_key_result_t::ssl_private_key_success
         }
-        Ok(Some(Err(err))) => err.0,
-        Ok(_) => PrivateKeyMethodError::FAILURE.0,
-        Err(payload) => {
-            // Native code cannot carry a Rust unwind. Do not drop arbitrary
-            // panic payloads here: their destructor could itself panic.
-            mem::forget(payload);
-            PrivateKeyMethodError::FAILURE.0
-        }
+        Some(Err(err)) => err.0,
+        _ => PrivateKeyMethodError::FAILURE.0,
     }
 }
 
@@ -867,5 +960,35 @@ impl Drop for CryptoBufferBuilder<'_> {
                 btls_sys::CRYPTO_BUFFER_free(self.buffer);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod boundary_tests {
+    use super::*;
+    use std::mem::MaybeUninit;
+
+    #[test]
+    fn initialized_callback_output_and_result_bounds() {
+        let mut bytes = MaybeUninit::<[u8; 8]>::uninit();
+        // SAFETY: this local storage is exclusively writable for eight bytes.
+        let output = unsafe { native_output(bytes.as_mut_ptr().cast(), 8) }.unwrap();
+        assert_eq!(output, &[0; 8]);
+        assert_eq!(psk_result(output.len(), || Ok(1)), 1);
+        assert_eq!(psk_result(output.len(), || Ok(output.len() + 1)), 0);
+        assert_eq!(
+            psk_result(output.len(), || panic!("PSK application panic")),
+            0
+        );
+    }
+
+    #[test]
+    fn alpn_selection_requires_whole_valid_offer() {
+        let offered = b"\x02h2\x08http/1.1";
+        assert_eq!(offered_protocol(offered, b"h2"), Some(&offered[1..3]));
+        assert_eq!(offered_protocol(offered, b"http/1.1"), Some(&offered[4..]));
+        assert!(offered_protocol(offered, b"http").is_none());
+        assert!(offered_protocol(b"\x02h2\x00", b"h2").is_none());
+        assert!(offered_protocol(b"\x02h2\x05abc", b"h2").is_none());
     }
 }

@@ -15,7 +15,7 @@ use crate::ssl::SslSessionCacheMode;
 use crate::ssl::SslVerifyError;
 use crate::ssl::SslVerifyMode;
 use crate::ssl::SslVersion;
-use crate::ssl::TicketKeyCallbackResult;
+use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
 use crate::symm::Cipher;
 use crate::symm::CipherCtxRef;
 use crate::x509::extension::SubjectAlternativeName;
@@ -387,11 +387,9 @@ fn custom_callback_unrecognized_decryption_ticket() {
 // TicketKeyCallbackResult::Noop in decryption mode.
 fn test_noop_tickey_key_callback(
     _ssl: &SslRef,
-    key_name: &mut [u8; 16],
-    iv: &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    mode: TicketKeyMode<'_>,
     evp_ctx: &mut CipherCtxRef,
     hmac_ctx: &mut HmacCtxRef,
-    encrypt: bool,
 ) -> TicketKeyCallbackResult {
     // These should only be used for testing purposes.
     const TEST_KEY_NAME: [u8; 16] = [5; 16];
@@ -402,47 +400,48 @@ fn test_noop_tickey_key_callback(
     let digest = MessageDigest::sha256();
     let cipher = Cipher::aes_128_cbc();
 
-    if encrypt {
-        NOOP_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+    match mode {
+        TicketKeyMode::Encrypt { key_name, iv } => {
+            NOOP_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Ensure key_name and iv are initialized and set test values.
-        assert_eq!(key_name, &[0; 16]);
-        assert_eq!(iv, &[0; 16]);
-        key_name.copy_from_slice(&TEST_KEY_NAME);
-        iv.copy_from_slice(&TEST_CBC_IV);
+            // Ensure key_name and iv are initialized and set test values.
+            assert_eq!(key_name, &[0; 16]);
+            assert_eq!(iv, &[0; 16]);
+            key_name.copy_from_slice(&TEST_KEY_NAME);
+            iv.copy_from_slice(&TEST_CBC_IV);
 
-        // Set the encryption context.
-        evp_ctx
-            .init(
-                cipher,
-                crate::symm::Mode::Encrypt,
-                &TEST_AES_128_CBC_KEY,
-                Some(&TEST_CBC_IV),
-            )
-            .unwrap();
+            // Set the encryption context.
+            evp_ctx
+                .init(
+                    cipher,
+                    crate::symm::Mode::Encrypt,
+                    &TEST_AES_128_CBC_KEY,
+                    Some(&TEST_CBC_IV),
+                )
+                .unwrap();
 
-        // Set the hmac context.
-        hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+            // Set the hmac context.
+            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
 
-        TicketKeyCallbackResult::Success
-    } else {
-        NOOP_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+            TicketKeyCallbackResult::Success
+        }
+        TicketKeyMode::Decrypt { key_name, iv: _ } => {
+            NOOP_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Check key_name matches.
-        assert_eq!(key_name, &TEST_KEY_NAME);
+            // Check key_name matches.
+            assert_eq!(key_name, &TEST_KEY_NAME);
 
-        TicketKeyCallbackResult::Noop
+            TicketKeyCallbackResult::Noop
+        }
     }
 }
 
 // Custom callback to encrypt and decrypt session tickets
 fn test_success_tickey_key_callback(
     _ssl: &SslRef,
-    key_name: &mut [u8; 16],
-    iv: &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    mode: TicketKeyMode<'_>,
     evp_ctx: &mut CipherCtxRef,
     hmac_ctx: &mut HmacCtxRef,
-    encrypt: bool,
 ) -> TicketKeyCallbackResult {
     // These should only be used for testing purposes.
     const TEST_KEY_NAME: [u8; 16] = [5; 16];
@@ -453,45 +452,48 @@ fn test_success_tickey_key_callback(
     let digest = MessageDigest::sha256();
     let cipher = Cipher::aes_128_cbc();
 
-    if encrypt {
-        SUCCESS_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+    match mode {
+        TicketKeyMode::Encrypt { key_name, iv } => {
+            SUCCESS_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Ensure key_name and iv are initialized and set test values.
-        assert_eq!(key_name, &[0; 16]);
-        assert_eq!(iv, &[0; 16]);
-        key_name.copy_from_slice(&TEST_KEY_NAME);
-        iv.copy_from_slice(&TEST_CBC_IV);
+            // Ensure key_name and iv are initialized and set test values.
+            assert_eq!(key_name, &[0; 16]);
+            assert_eq!(iv, &[0; 16]);
+            key_name.copy_from_slice(&TEST_KEY_NAME);
+            iv.copy_from_slice(&TEST_CBC_IV);
 
-        // Set the encryption context.
-        evp_ctx
-            .init(
-                cipher,
-                crate::symm::Mode::Encrypt,
-                &TEST_AES_128_CBC_KEY,
-                Some(&TEST_CBC_IV),
-            )
-            .unwrap();
+            // Set the encryption context.
+            evp_ctx
+                .init(
+                    cipher,
+                    crate::symm::Mode::Encrypt,
+                    &TEST_AES_128_CBC_KEY,
+                    Some(&TEST_CBC_IV),
+                )
+                .unwrap();
 
-        // Set the hmac context.
-        hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
-    } else {
-        SUCCESS_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+            // Set the hmac context.
+            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+        }
+        TicketKeyMode::Decrypt { key_name, iv } => {
+            SUCCESS_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Check key_name matches.
-        assert_eq!(key_name, &TEST_KEY_NAME);
+            // Check key_name matches.
+            assert_eq!(key_name, &TEST_KEY_NAME);
 
-        // Set the decryption context.
-        evp_ctx
-            .init(
-                cipher,
-                crate::symm::Mode::Decrypt,
-                &TEST_AES_128_CBC_KEY,
-                Some(iv),
-            )
-            .unwrap();
+            // Set the decryption context.
+            evp_ctx
+                .init(
+                    cipher,
+                    crate::symm::Mode::Decrypt,
+                    &TEST_AES_128_CBC_KEY,
+                    Some(iv),
+                )
+                .unwrap();
 
-        // Set the hmac context.
-        hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+            // Set the hmac context.
+            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+        }
     }
 
     TicketKeyCallbackResult::Success

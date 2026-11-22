@@ -321,6 +321,19 @@ fn test_alpn_server_advertise_multiple() {
 }
 
 #[test]
+fn alpn_rejects_unoffered_protocol() {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_alpn_select_callback(|_, _| Ok(b"unoffered"));
+    server.should_error();
+    let server = server.build();
+    let mut client = server.client();
+    client.ctx().set_alpn_protos(b"\x02h2").unwrap();
+    client.connect_err();
+}
+
+#[test]
 fn test_alpn_server_select_none_fatal() {
     let mut server = Server::builder();
     server.ctx().set_alpn_select_callback(|_, client| {
@@ -1223,6 +1236,41 @@ fn psk_ciphers() {
     client.connect();
 
     assert!(CLIENT_CALLED.load(Ordering::SeqCst) && SERVER_CALLED.load(Ordering::SeqCst));
+}
+
+#[test]
+fn psk_callbacks_reject_invalid_output() {
+    const CIPHER: &str = "PSK-AES128-CBC-SHA";
+    for invalid_length in [false, true] {
+        let mut server = Server::builder();
+        server.ctx().set_cipher_list(CIPHER).unwrap();
+        server.ctx().set_psk_server_callback(|_, _, output| {
+            output[0] = 1;
+            Ok(1)
+        });
+        server.should_error();
+        let server = server.build();
+        let mut client = server.client();
+        client.ctx().set_options(SslOptions::NO_TLSV1_3);
+        client.ctx().set_cipher_list(CIPHER).unwrap();
+        let invoked = std::sync::Arc::new(AtomicBool::new(false));
+        let called = invoked.clone();
+        client
+            .ctx()
+            .set_psk_client_callback(move |_, _, identity, output| {
+                called.store(true, Ordering::SeqCst);
+                assert!(identity.iter().chain(output.iter()).all(|&byte| byte == 0));
+                output[0] = 1;
+                if invalid_length {
+                    Ok(output.len() + 1)
+                } else {
+                    identity.fill(b'a');
+                    Ok(1)
+                }
+            });
+        client.connect_err();
+        assert!(invoked.load(Ordering::SeqCst));
+    }
 }
 
 #[test]

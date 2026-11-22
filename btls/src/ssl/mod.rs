@@ -1038,6 +1038,20 @@ pub enum SslInfoCallbackValue {
     Alert(SslInfoCallbackAlert),
 }
 
+/// Session-ticket key callback mode and the corresponding ticket header buffers.
+pub enum TicketKeyMode<'a> {
+    /// Populate the key name and IV for a new ticket.
+    Encrypt {
+        key_name: &'a mut [u8; 16],
+        iv: &'a mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    },
+    /// Inspect the immutable key name and IV supplied by the peer.
+    Decrypt {
+        key_name: &'a [u8; 16],
+        iv: &'a [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    },
+}
+
 /// Ticket key callback status.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum TicketKeyCallbackResult {
@@ -1367,11 +1381,9 @@ impl SslContextBuilder {
     where
         F: Fn(
                 &SslRef,
-                &mut [u8; 16],
-                &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+                TicketKeyMode<'_>,
                 &mut CipherCtxRef,
                 &mut HmacCtxRef,
-                bool,
             ) -> TicketKeyCallbackResult
             + 'static
             + Sync
