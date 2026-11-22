@@ -5510,10 +5510,7 @@ impl<S> SslStreamBuilder<S> {
     /// Returns a shared reference to the underlying stream.
     #[must_use]
     pub fn get_ref(&self) -> &S {
-        unsafe {
-            let bio = self.inner.ssl.get_raw_rbio();
-            bio::get_ref(bio)
-        }
+        self.inner.get_ref()
     }
 
     /// Returns a mutable reference to the underlying stream.
@@ -5523,10 +5520,7 @@ impl<S> SslStreamBuilder<S> {
     /// It is inadvisable to read from or write to the underlying stream as it
     /// will most likely corrupt the SSL session.
     pub fn get_mut(&mut self) -> &mut S {
-        unsafe {
-            let bio = self.inner.ssl.get_raw_rbio();
-            bio::get_mut(bio)
-        }
+        self.inner.get_mut()
     }
 
     /// Returns a shared reference to the `Ssl` object associated with this builder.
