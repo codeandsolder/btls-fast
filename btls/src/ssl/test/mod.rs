@@ -1365,22 +1365,24 @@ fn used_hello_retry_request_false() {
 #[test]
 fn test_get_ciphers() {
     let ctx_builder = SslContext::builder(SslMethod::tls()).unwrap();
-    let ctx_builder_ciphers: Vec<&str> = ctx_builder
+    let ctx_builder_ciphers: Vec<Option<&str>> = ctx_builder
         .ciphers()
         .unwrap()
         .into_iter()
         .map(|v| v.name())
         .collect();
-    assert!(!(ctx_builder_ciphers.is_empty()));
+    assert!(!ctx_builder_ciphers.is_empty());
+    assert!(ctx_builder_ciphers.iter().all(Option::is_some));
 
     let ctx = ctx_builder.build();
-    let ctx_ciphers: Vec<&str> = ctx
+    let ctx_ciphers: Vec<Option<&str>> = ctx
         .ciphers()
         .unwrap()
         .into_iter()
         .map(|v| v.name())
         .collect();
-    assert!(!(ctx_ciphers.is_empty()));
+    assert!(!ctx_ciphers.is_empty());
+    assert!(ctx_ciphers.iter().all(Option::is_some));
 
     assert_eq!(ctx_builder_ciphers.len(), ctx_ciphers.len());
 
@@ -1508,7 +1510,7 @@ fn test_set_compliance() {
     assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
 
     for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
-        assert_eq!(cipher.0.name(), cipher.1);
+        assert_eq!(cipher.0.name(), Some(cipher.1));
     }
 
     #[cfg(not(feature = "legacy-compat-deprecated"))]
@@ -1529,7 +1531,7 @@ fn test_set_compliance() {
         assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
 
         for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
-            assert_eq!(cipher.0.name(), cipher.1);
+            assert_eq!(cipher.0.name(), Some(cipher.1));
         }
 
         ctx.set_compliance_policy(CompliancePolicy::NONE)
@@ -1608,7 +1610,7 @@ fn test_ssl_set_compliance() {
     assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
 
     for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
-        assert_eq!(cipher.0.name(), cipher.1);
+        assert_eq!(cipher.0.name(), Some(cipher.1));
     }
 
     #[cfg(not(feature = "legacy-compat-deprecated"))]
@@ -1630,7 +1632,7 @@ fn test_ssl_set_compliance() {
         assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
 
         for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
-            assert_eq!(cipher.0.name(), cipher.1);
+            assert_eq!(cipher.0.name(), Some(cipher.1));
         }
 
         ssl.set_compliance_policy(CompliancePolicy::NONE)

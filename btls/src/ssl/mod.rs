@@ -570,7 +570,7 @@ impl SslAlert {
 
     /// Returns the alert's description code.
     #[must_use = "Use the returned native representation when crossing the native API boundary."]
-    pub const fn as_raw(&self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 
@@ -1083,14 +1083,14 @@ pub struct SslInfoCallbackAlert(c_int);
 impl SslInfoCallbackAlert {
     /// The level of the SSL alert.
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
-    pub const fn alert_level(&self) -> Ssl3AlertLevel {
+    pub const fn alert_level(self) -> Ssl3AlertLevel {
         let value = self.0 >> 8;
         Ssl3AlertLevel(value)
     }
 
     /// The value of the SSL alert.
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
-    pub fn alert(&self) -> SslAlert {
+    pub fn alert(self) -> SslAlert {
         let value = self.0 & i32::from(u8::MAX);
         SslAlert(value)
     }
@@ -2885,7 +2885,7 @@ impl SslContextRef {
         self.check_x509();
 
         let mode = unsafe { ffi::SSL_CTX_get_verify_mode(self.as_ptr()) };
-        SslVerifyMode::from_bits(mode).expect("SSL_CTX_get_verify_mode returned invalid mode")
+        SslVerifyMode::from_bits_retain(mode)
     }
 
     /// Assumes that this `SslContext` is configured for X.509 certificates.
@@ -3090,9 +3090,17 @@ impl Deref for SslCipher {
 /// [`SslCipher`]: struct.SslCipher.html
 pub struct SslCipherRef(Opaque);
 
+// SAFETY: native SSL_CIPHER descriptors are immutable static data. The
+// `Opaque` field intentionally blocks derived auto-traits, not this contract.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "SSL_CIPHER descriptors are immutable and global; Opaque deliberately blocks auto-Send"
+)]
 unsafe impl Send for SslCipherRef {}
+// SAFETY: all public accessors query immutable native cipher metadata.
 unsafe impl Sync for SslCipherRef {}
 
+// SAFETY: foreign references borrow a valid native SSL_CIPHER descriptor.
 unsafe impl ForeignTypeRef for SslCipherRef {
     type CType = ffi::SSL_CIPHER;
 }
@@ -3105,13 +3113,18 @@ impl SslCipherRef {
         unsafe { ffi::SSL_CIPHER_get_protocol_id(self.as_ptr()) }
     }
 
-    /// Returns the name of the cipher.
+    /// Returns the cipher name, or `None` for absent or invalid native metadata.
     #[corresponds(SSL_CIPHER_get_name)]
     #[must_use = "Use the returned name for reporting or selecting the native identifier."]
-    pub fn name(&self) -> &'static str {
+    pub fn name(&self) -> Option<&'static str> {
+        // SAFETY: the native name is a static NUL-terminated string when
+        // non-null. Its UTF-8 validity is checked before returning to Rust.
         unsafe {
             let ptr = ffi::SSL_CIPHER_get_name(self.as_ptr());
-            CStr::from_ptr(ptr).to_str().unwrap()
+            if ptr.is_null() {
+                return None;
+            }
+            CStr::from_ptr(ptr).to_str().ok()
         }
     }
 
@@ -3119,26 +3132,33 @@ impl SslCipherRef {
     #[corresponds(SSL_CIPHER_standard_name)]
     #[must_use = "Use the standardized cipher suite name for protocol diagnostics."]
     pub fn standard_name(&self) -> Option<&'static str> {
+        // SAFETY: a non-null result points to static NUL-terminated native
+        // metadata. The RFC name is omitted if the bytes are not UTF-8.
         unsafe {
             let ptr = ffi::SSL_CIPHER_standard_name(self.as_ptr());
             if ptr.is_null() {
                 None
             } else {
-                Some(CStr::from_ptr(ptr).to_str().unwrap())
+                CStr::from_ptr(ptr).to_str().ok()
             }
         }
     }
 
-    /// Returns the SSL/TLS protocol version that first defined the cipher.
+    /// Returns the protocol version that introduced the cipher, or `None` if
+    /// native metadata is absent or not valid UTF-8.
     #[corresponds(SSL_CIPHER_get_version)]
     #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
-    pub fn version(&self) -> &'static str {
-        let version = unsafe {
+    pub fn version(&self) -> Option<&'static str> {
+        // SAFETY: non-null native version strings have static storage and are
+        // NUL terminated; invalid UTF-8 is represented as `None`.
+        unsafe {
             let ptr = ffi::SSL_CIPHER_get_version(self.as_ptr());
-            CStr::from_ptr(ptr)
-        };
-
-        version.to_str().unwrap()
+            if ptr.is_null() {
+                None
+            } else {
+                CStr::from_ptr(ptr).to_str().ok()
+            }
+        }
     }
 
     /// Returns the number of bits used for the cipher.
@@ -3158,12 +3178,18 @@ impl SslCipherRef {
     /// Returns a textual description of the cipher.
     #[corresponds(SSL_CIPHER_description)]
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
-    pub fn description(&self) -> String {
+    pub fn description(&self) -> Option<String> {
+        // SAFETY: the native API writes into this 128-byte stack buffer and
+        // returns the buffer or null on error. Check null before reading its
+        // NUL-terminated output; no native allocation escapes this call.
         unsafe {
-            // SSL_CIPHER_description requires a buffer of at least 128 bytes.
             let mut buf = [0; 128];
             let ptr = ffi::SSL_CIPHER_description(self.as_ptr(), buf.as_mut_ptr(), 128);
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            }
         }
     }
 
@@ -3627,7 +3653,7 @@ impl SslRef {
         self.ssl_context().check_x509();
 
         let mode = unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) };
-        SslVerifyMode::from_bits(mode).expect("SSL_get_verify_mode returned invalid mode")
+        SslVerifyMode::from_bits_retain(mode)
     }
 
     /// Like [`SslContextBuilder::set_verify_callback`].
