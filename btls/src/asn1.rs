@@ -46,17 +46,7 @@ foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_GENERALIZEDTIME;
     fn drop = ffi::ASN1_GENERALIZEDTIME_free;
 
-    /// Non-UTC representation of time
-    ///
-    /// If a time can be represented by UTCTime, UTCTime is used
-    /// otherwise, ASN1_GENERALIZEDTIME is used.  This would be, for
-    /// example outside the year range of 1950-2049.
-    ///
-    /// [ASN1_GENERALIZEDTIME_set] documentation from OpenSSL provides
-    /// further details of implmentation.  Note: these docs are from the master
-    /// branch as documentation on the 1.1.0 branch did not include this page.
-    ///
-    /// [ASN1_GENERALIZEDTIME_set]: https://www.openssl.org/docs/manmaster/man3/ASN1_GENERALIZEDTIME_set.html
+    /// GeneralizedTime encoding of an ASN.1 timestamp, supporting years outside 1950–2049.
     pub struct Asn1GeneralizedTime;
 }
 
@@ -65,6 +55,8 @@ impl Asn1GeneralizedTime {
     fn new() -> Result<Self, ErrorStack> {
         ffi::init();
 
+        // SAFETY: the native allocator returns an independently owned
+        // generalized-time object (or null) and no borrowed pointers.
         unsafe {
             let handle = cvt_p(ffi::ASN1_GENERALIZEDTIME_new())?;
             Ok(Self::from_ptr(handle))
@@ -84,6 +76,8 @@ impl str::FromStr for Asn1GeneralizedTime {
     fn from_str(s: &str) -> Result<Self, ErrorStack> {
         let time = Self::new()?;
         let s = CString::new(s).map_err(ErrorStack::internal_error)?;
+        // SAFETY: the owned time is uniquely writable, and the CString
+        // remains NUL-terminated and readable for native parsing.
         unsafe {
             cvt(ffi::ASN1_GENERALIZEDTIME_set_string(
                 time.as_ptr(),
@@ -96,19 +90,18 @@ impl str::FromStr for Asn1GeneralizedTime {
 
 impl fmt::Display for Asn1GeneralizedTimeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let bio = MemBio::new().ok();
-        let msg = bio
-            .as_ref()
-            .and_then(|mem_bio| unsafe {
-                cvt(ffi::ASN1_GENERALIZEDTIME_print(
-                    mem_bio.as_ptr(),
-                    self.as_ptr(),
-                ))
-                .ok()?;
-                str::from_utf8(mem_bio.get_buf().ok()?).ok()
-            })
-            .unwrap_or("error");
-        f.write_str(msg)
+        let Ok(bio) = MemBio::new() else {
+            return f.write_str("error");
+        };
+        // SAFETY: both native handles remain live for the synchronous
+        // conversion; the BIO owns the output memory.
+        if unsafe { ffi::ASN1_GENERALIZEDTIME_print(bio.as_ptr(), self.as_ptr()) } != 1 {
+            return f.write_str("error");
+        }
+        let Ok(text) = bio.get_buf() else {
+            return f.write_str("error");
+        };
+        f.write_str(str::from_utf8(text).unwrap_or("error"))
     }
 }
 
@@ -211,7 +204,7 @@ impl Asn1Type {
 
     /// Returns the raw OpenSSL value represented by this type.
     #[must_use = "Use the returned native representation when crossing the native API boundary."]
-    pub const fn as_raw(&self) -> c_int {
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -236,16 +229,7 @@ pub struct TimeDiff {
 foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_TIME;
     fn drop = ffi::ASN1_TIME_free;
-    /// Time storage and comparison
-    ///
-    /// Asn1Time should be used to store and share time information
-    /// using certificates.  If Asn1Time is set using a string, it must
-    /// be in either YYMMDDHHMMSSZ, YYYYMMDDHHMMSSZ, or another ASN.1 format.
-    ///
-    /// [ASN_TIME_set] documentation at OpenSSL explains the ASN.1 implementation
-    /// used by OpenSSL.
-    ///
-    /// [ASN_TIME_set]: https://www.openssl.org/docs/man1.1.0/crypto/ASN1_TIME_set.html
+    /// ASN.1 certificate time in UTC or GeneralizedTime representation.
     pub struct Asn1Time;
 }
 
@@ -257,6 +241,8 @@ impl Asn1TimeRef {
         let mut secs = 0;
         let other = compare.as_ptr();
 
+        // SAFETY: the two time objects remain borrowed; the native function
+        // writes both local output counters on success.
         let err =
             unsafe { ffi::ASN1_TIME_diff(&raw mut days, &raw mut secs, self.as_ptr(), other) };
 
@@ -283,25 +269,19 @@ impl Asn1TimeRef {
 
 impl PartialEq for Asn1TimeRef {
     fn eq(&self, other: &Self) -> bool {
-        self.diff(other)
-            .map(|t| t.days == 0 && t.secs == 0)
-            .unwrap_or(false)
+        self.diff(other).is_ok_and(|t| t.days == 0 && t.secs == 0)
     }
 }
 
 impl PartialEq<Asn1Time> for Asn1TimeRef {
     fn eq(&self, other: &Asn1Time) -> bool {
-        self.diff(other)
-            .map(|t| t.days == 0 && t.secs == 0)
-            .unwrap_or(false)
+        self.diff(other).is_ok_and(|t| t.days == 0 && t.secs == 0)
     }
 }
 
 impl PartialEq<Asn1Time> for &Asn1TimeRef {
     fn eq(&self, other: &Asn1Time) -> bool {
-        self.diff(other)
-            .map(|t| t.days == 0 && t.secs == 0)
-            .unwrap_or(false)
+        self.diff(other).is_ok_and(|t| t.days == 0 && t.secs == 0)
     }
 }
 
@@ -325,23 +305,18 @@ impl PartialOrd<Asn1Time> for &Asn1TimeRef {
 
 impl fmt::Display for Asn1TimeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unsafe {
-            let mem_bio = match MemBio::new() {
-                Err(_) => return f.write_str("error"),
-                Ok(m) => m,
-            };
-            let print_result = cvt(ffi::ASN1_TIME_print(mem_bio.as_ptr(), self.as_ptr()));
-            match print_result {
-                Err(_) => f.write_str("error"),
-                Ok(()) => {
-                    let text = mem_bio
-                        .get_buf()
-                        .ok()
-                        .and_then(|bytes| str::from_utf8(bytes).ok());
-                    f.write_str(text.unwrap_or("error"))
-                }
-            }
+        let Ok(bio) = MemBio::new() else {
+            return f.write_str("error");
+        };
+        // SAFETY: the native time is live and shared-borrowed; the output
+        // BIO is owned and remains valid for the duration of this call.
+        if unsafe { ffi::ASN1_TIME_print(bio.as_ptr(), self.as_ptr()) } != 1 {
+            return f.write_str("error");
         }
+        let Ok(text) = bio.get_buf() else {
+            return f.write_str("error");
+        };
+        f.write_str(str::from_utf8(text).unwrap_or("error"))
     }
 }
 
@@ -356,6 +331,7 @@ impl Asn1Time {
     fn new() -> Result<Self, ErrorStack> {
         ffi::init();
 
+        // SAFETY: this allocator returns an independently owned native time.
         unsafe {
             let handle = cvt_p(ffi::ASN1_TIME_new())?;
             Ok(Self::from_ptr(handle))
@@ -363,6 +339,10 @@ impl Asn1Time {
     }
 
     /// Creates a new time on the specified interval in days from now.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unrepresentable day offset or native conversion failure.
     pub fn days_from_now(days: u32) -> Result<Self, ErrorStack> {
         let days = c_int::try_from(days).map_err(ErrorStack::internal_error)?;
         ffi::init();
@@ -380,6 +360,10 @@ impl Asn1Time {
     }
 
     /// Creates a new time from seconds since the Unix epoch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the time is outside the native supported range.
     #[corresponds(ASN1_TIME_set_posix)]
     pub fn from_unix(time: i64) -> Result<Self, ErrorStack> {
         ffi::init();
@@ -396,10 +380,16 @@ impl Asn1Time {
     /// Behaves like parsing with [`str::FromStr`] except it additionally converts
     /// GeneralizedTime to UTCTime if it is in the range where UTCTime is used.
     /// See RFC 5280, section 4.1.2.5.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid time syntax, embedded NUL or native allocation failure.
     #[corresponds(ASN1_TIME_set_string_X509)]
     pub fn from_str_x509(s: &str) -> Result<Self, ErrorStack> {
         let time = Self::new()?;
         let s = CString::new(s).map_err(ErrorStack::internal_error)?;
+        // SAFETY: the owned time is uniquely writable, and the CString
+        // outlives the synchronous native parse.
         unsafe {
             cvt(ffi::ASN1_TIME_set_string_X509(time.as_ptr(), s.as_ptr()))?;
         }
@@ -415,6 +405,8 @@ impl str::FromStr for Asn1Time {
     fn from_str(s: &str) -> Result<Self, ErrorStack> {
         let time = Self::new()?;
         let s = CString::new(s).map_err(ErrorStack::internal_error)?;
+        // SAFETY: the owned time is uniquely writable, and the CString
+        // outlives the synchronous native parse.
         unsafe {
             cvt(ffi::ASN1_TIME_set_string(time.as_ptr(), s.as_ptr()))?;
         }
@@ -424,25 +416,19 @@ impl str::FromStr for Asn1Time {
 
 impl PartialEq for Asn1Time {
     fn eq(&self, other: &Self) -> bool {
-        self.diff(other)
-            .map(|t| t.days == 0 && t.secs == 0)
-            .unwrap_or(false)
+        self.diff(other).is_ok_and(|t| t.days == 0 && t.secs == 0)
     }
 }
 
 impl PartialEq<Asn1TimeRef> for Asn1Time {
     fn eq(&self, other: &Asn1TimeRef) -> bool {
-        self.diff(other)
-            .map(|t| t.days == 0 && t.secs == 0)
-            .unwrap_or(false)
+        self.diff(other).is_ok_and(|t| t.days == 0 && t.secs == 0)
     }
 }
 
 impl<'a> PartialEq<&'a Asn1TimeRef> for Asn1Time {
     fn eq(&self, other: &&'a Asn1TimeRef) -> bool {
-        self.diff(other)
-            .map(|t| t.days == 0 && t.secs == 0)
-            .unwrap_or(false)
+        self.diff(other).is_ok_and(|t| t.days == 0 && t.secs == 0)
     }
 }
 
@@ -467,13 +453,7 @@ impl<'a> PartialOrd<&'a Asn1TimeRef> for Asn1Time {
 foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_STRING;
     fn drop = ffi::ASN1_STRING_free;
-    /// Primary ASN.1 type used by OpenSSL
-    ///
-    /// Almost all ASN.1 types in OpenSSL are represented by ASN1_STRING
-    /// structures.  This implementation uses [ASN1_STRING-to_UTF8] to preserve
-    /// compatibility with Rust's String.
-    ///
-    /// [ASN1_STRING-to_UTF8]: https://www.openssl.org/docs/man1.1.0/crypto/ASN1_STRING_to_UTF8.html
+    /// Owned native ASN.1 string with checked UTF-8 conversion.
     pub struct Asn1String;
 }
 
@@ -506,6 +486,8 @@ impl Asn1StringRef {
     #[corresponds(ASN1_STRING_get0_data)]
     #[must_use = "Use the borrowed ASN.1 contents while the containing value remains alive."]
     pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: the native string is live and immutably borrowed.
+        // The data pointer, when non-null, remains valid for the reported length.
         unsafe {
             let ptr = ffi::ASN1_STRING_get0_data(self.as_ptr().cast());
             if ptr.is_null() {
@@ -519,7 +501,9 @@ impl Asn1StringRef {
     #[corresponds(ASN1_STRING_length)]
     #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn len(&self) -> usize {
-        unsafe { ffi::ASN1_STRING_length(self.as_ptr()) as usize }
+        // SAFETY: the shared native string is live. A malformed native length
+        // cannot become a gigantic Rust slice length.
+        usize::try_from(unsafe { ffi::ASN1_STRING_length(self.as_ptr()) }).unwrap_or(0)
     }
 
     /// Determines if the string is empty.
@@ -543,15 +527,7 @@ foreign_type_and_impl_send_sync! {
     fn drop = ffi::ASN1_INTEGER_free;
     fn clone = ffi::ASN1_INTEGER_dup;
 
-    /// Numeric representation
-    ///
-    /// Integers in ASN.1 may include BigNum, int64 or uint64.  BigNum implementation
-    /// can be found within [`bn`] module.
-    ///
-    /// OpenSSL documentation includes [`ASN1_INTEGER_set`].
-    ///
-    /// [`bn`]: ../bn/index.html
-    /// [`ASN1_INTEGER_set`]: https://www.openssl.org/docs/man1.1.0/crypto/ASN1_INTEGER_set.html
+    /// Owned ASN.1 integer, supporting arbitrarily large signed values.
     pub struct Asn1Integer;
 }
 
@@ -563,6 +539,10 @@ impl Asn1Integer {
     ///
     /// [`BN_to_ASN1_INTEGER`]: https://www.openssl.org/docs/man1.1.0/crypto/BN_to_ASN1_INTEGER.html
     /// [`BigNumRef::to_asn1_integer`]: ../bn/struct.BigNumRef.html#method.to_asn1_integer
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native allocation or integer conversion fails.
     pub fn from_bn(bn: &BigNumRef) -> Result<Self, ErrorStack> {
         bn.to_asn1_integer()
     }
@@ -571,6 +551,7 @@ impl Asn1Integer {
 impl Ord for Asn1IntegerRef {
     #[corresponds(ASN1_INTEGER_cmp)]
     fn cmp(&self, other: &Self) -> Ordering {
+        // SAFETY: both native integers are live and immutable for comparison.
         let res = unsafe { ffi::ASN1_INTEGER_cmp(self.as_ptr(), other.as_ptr()) };
         res.cmp(&0)
     }
@@ -639,6 +620,8 @@ impl Asn1IntegerRef {
     /// Converts the integer to a `BigNum`.
     #[corresponds(ASN1_INTEGER_to_BN)]
     pub fn to_bn(&self) -> Result<BigNum, ErrorStack> {
+        // SAFETY: the source remains borrowed; null destination instructs
+        // the native converter to allocate a new owned big integer.
         unsafe {
             cvt_p(ffi::ASN1_INTEGER_to_BN(self.as_ptr(), ptr::null_mut()))
                 .map(|p| BigNum::from_ptr(p))
@@ -677,6 +660,8 @@ impl Asn1IntegerRef {
     /// [`bn`]: ../bn/struct.BigNumRef.html#method.to_asn1_integer
     #[corresponds(ASN1_INTEGER_set)]
     pub fn set(&mut self, value: i32) -> Result<(), ErrorStack> {
+        // SAFETY: the integer is exclusively borrowed, and i32 fits c_long
+        // on every supported target.
         unsafe { cvt(ffi::ASN1_INTEGER_set(self.as_ptr(), c_long::from(value))) }
     }
 }
@@ -684,12 +669,7 @@ impl Asn1IntegerRef {
 foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_BIT_STRING;
     fn drop = ffi::ASN1_BIT_STRING_free;
-    /// Sequence of bytes
-    ///
-    /// Asn1BitString is used in [`x509`] certificates for the signature.
-    /// The bit string acts as a collection of bytes.
-    ///
-    /// [`x509`]: ../x509/struct.X509.html#method.signature
+    /// Owned ASN.1 bit string used for certificate signatures.
     pub struct Asn1BitString;
 }
 
@@ -698,6 +678,8 @@ impl Asn1BitStringRef {
     #[corresponds(ASN1_STRING_get0_data)]
     #[must_use = "Use the borrowed ASN.1 contents while the containing value remains alive."]
     pub fn as_slice(&self) -> &[u8] {
+        // SAFETY: the native string is live and immutably borrowed.
+        // The data pointer, when non-null, remains valid for the reported length.
         unsafe {
             let ptr = ffi::ASN1_STRING_get0_data(self.as_ptr().cast());
             if ptr.is_null() {
@@ -718,7 +700,9 @@ impl Asn1BitStringRef {
     #[corresponds(ASN1_STRING_length)]
     #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn len(&self) -> usize {
-        unsafe { ffi::ASN1_STRING_length(self.as_ptr().cast_const()) as usize }
+        // SAFETY: the borrowed native bit string remains live. Negative lengths
+        // are invalid and must not be reinterpreted as large slice sizes.
+        usize::try_from(unsafe { ffi::ASN1_STRING_length(self.as_ptr().cast_const()) }).unwrap_or(0)
     }
 
     /// Determines if the string is empty.
@@ -732,19 +716,7 @@ foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_OBJECT;
     fn drop = ffi::ASN1_OBJECT_free;
 
-    /// Object Identifier
-    ///
-    /// Represents an ASN.1 Object.  Typically, NIDs, or numeric identifiers
-    /// are stored as a table within the [`Nid`] module.  These constants are
-    /// used to determine attributes of a certificate, such as mapping the
-    /// attribute "CommonName" to "CN" which is represented as the OID of 13.
-    /// This attribute is a constant in the [`nid::COMMONNAME`].
-    ///
-    /// OpenSSL documentation at [`OBJ_nid2obj`]
-    ///
-    /// [`Nid`]: ../nid/index.html
-    /// [`nid::COMMONNAME`]: ../nid/constant.COMMONNAME.html
-    /// [`OBJ_nid2obj`]: https://www.openssl.org/docs/man1.1.0/crypto/OBJ_obj2nid.html
+    /// Owned ASN.1 object identifier with named or dotted-decimal representation.
     pub struct Asn1Object;
 }
 
@@ -762,6 +734,8 @@ impl str::FromStr for Asn1Object {
         ffi::init();
 
         let txt = CString::new(txt).map_err(ErrorStack::internal_error)?;
+        // SAFETY: native parses the live NUL-terminated input and returns
+        // a newly owned OID or null without retaining the input pointer.
         unsafe {
             let obj = cvt_p(ffi::OBJ_txt2obj(txt.as_ptr(), 0))?;
             Ok(Self::from_ptr(obj))
@@ -773,26 +747,41 @@ impl Asn1ObjectRef {
     /// Returns the NID associated with this OID.
     #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn nid(&self) -> Nid {
+        // SAFETY: the native object remains borrowed and is not mutated.
         unsafe { Nid::from_raw(ffi::OBJ_obj2nid(self.as_ptr())) }
     }
 }
 
 impl fmt::Display for Asn1ObjectRef {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        unsafe {
-            let mut buf = [0u8; 80];
-            let len = ffi::OBJ_obj2txt(
-                buf.as_mut_ptr().cast(),
-                buf.len() as c_int,
-                self.as_ptr(),
-                0,
-            );
-            fmt.write_str(
-                buf.get(..len as usize)
-                    .and_then(|s| str::from_utf8(s).ok())
-                    .unwrap_or("error"),
-            )
+        // SAFETY: the live borrowed object remains available throughout both
+        // native queries. A null output requests the required text width.
+        let length = unsafe { ffi::OBJ_obj2txt(ptr::null_mut(), 0, self.as_ptr(), 0) };
+        let Ok(length) = usize::try_from(length) else {
+            return fmt.write_str("error");
+        };
+        let Some(capacity) = length.checked_add(1) else {
+            return fmt.write_str("error");
+        };
+        let Ok(native_capacity) = c_int::try_from(capacity) else {
+            return fmt.write_str("error");
+        };
+        let mut buf = Vec::new();
+        if buf.try_reserve_exact(capacity).is_err() {
+            return fmt.write_str("error");
         }
+        // SAFETY: the allocation has capacity for the entire textual value
+        // including its NUL terminator. Native writes no more than that bound.
+        let written =
+            unsafe { ffi::OBJ_obj2txt(buf.as_mut_ptr().cast(), native_capacity, self.as_ptr(), 0) };
+        if usize::try_from(written).ok() != Some(length) {
+            return fmt.write_str("error");
+        }
+        // SAFETY: OBJ_obj2txt initialized exactly length textual bytes and a
+        // terminator, but the Rust String omits the latter. The data is ASCII
+        // for registered names or canonical dotted-number OIDs.
+        unsafe { buf.set_len(length) };
+        fmt.write_str(str::from_utf8(&buf).unwrap_or("error"))
     }
 }
 
@@ -808,6 +797,13 @@ mod tests {
 
     use crate::bn::BigNum;
     use crate::nid::Nid;
+
+    #[test]
+    fn object_display_does_not_truncate_long_oid() {
+        let oid = format!("2.25.{}", ["123456789"; 22].join("."));
+        let parsed: Asn1Object = oid.parse().unwrap();
+        assert_eq!(parsed.to_string(), oid);
+    }
 
     #[test]
     fn utf8_preserves_embedded_nul() {
