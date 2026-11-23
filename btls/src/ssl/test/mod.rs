@@ -1,4 +1,5 @@
 use foreign_types::{ForeignType, ForeignTypeRef};
+use std::ffi::c_int;
 use std::io;
 use std::io::prelude::*;
 use std::mem;
@@ -61,6 +62,13 @@ fn context_extra_chain_handles_empty_and_populated_chains() {
     ctx.add_extra_chain_cert(extra).unwrap();
     let ctx = ctx.build();
     assert_eq!(ctx.extra_chain_certs().unwrap().len(), 1);
+}
+
+#[test]
+fn native_ssl_io_length_is_bounded_without_wrapping() {
+    assert_eq!(super::ssl_io_len(0), 0);
+    assert_eq!(super::ssl_io_len(usize::MAX), c_int::MAX);
+    assert_eq!(super::ssl_io_len(1000), 1000);
 }
 
 #[test]
