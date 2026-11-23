@@ -24,6 +24,25 @@ use std::slice;
 use std::str;
 use std::sync::Arc;
 
+/// BoringSSL retains the pointer to a private-key callback method table.
+/// Every monomorphized table therefore needs storage that outlives the native
+/// context or credential, not a temporary constructed by its setter.
+pub(super) struct PrivateKeyMethodDescriptor<M, const CREDENTIAL: bool>(
+    std::marker::PhantomData<M>,
+);
+
+impl<M: PrivateKeyMethod, const CREDENTIAL: bool> PrivateKeyMethodDescriptor<M, CREDENTIAL> {
+    const TABLE: ffi::SSL_PRIVATE_KEY_METHOD = ffi::SSL_PRIVATE_KEY_METHOD {
+        sign: Some(raw_sign::<M, CREDENTIAL>),
+        decrypt: Some(raw_decrypt::<M, CREDENTIAL>),
+        complete: Some(raw_complete::<M, CREDENTIAL>),
+    };
+
+    pub(super) fn descriptor() -> &'static ffi::SSL_PRIVATE_KEY_METHOD {
+        &Self::TABLE
+    }
+}
+
 pub extern "C" fn raw_verify<F>(preverify_ok: c_int, x509_ctx: *mut ffi::X509_STORE_CTX) -> c_int
 where
     F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,

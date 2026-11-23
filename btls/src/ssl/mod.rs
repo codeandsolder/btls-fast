@@ -2056,11 +2056,7 @@ impl SslContextBuilder {
 
             ffi::SSL_CTX_set_private_key_method(
                 self.as_ptr(),
-                &ffi::SSL_PRIVATE_KEY_METHOD {
-                    sign: Some(callbacks::raw_sign::<M, false>),
-                    decrypt: Some(callbacks::raw_decrypt::<M, false>),
-                    complete: Some(callbacks::raw_complete::<M, false>),
-                },
+                callbacks::PrivateKeyMethodDescriptor::<M, false>::descriptor(),
             );
         }
         Ok(())

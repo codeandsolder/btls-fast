@@ -147,11 +147,7 @@ impl SslCredentialBuilder {
 
             cvt_0i(ffi::SSL_CREDENTIAL_set_private_key_method(
                 self.0.as_ptr(),
-                &ffi::SSL_PRIVATE_KEY_METHOD {
-                    sign: Some(callbacks::raw_sign::<M, true>),
-                    decrypt: Some(callbacks::raw_decrypt::<M, true>),
-                    complete: Some(callbacks::raw_complete::<M, true>),
-                },
+                callbacks::PrivateKeyMethodDescriptor::<M, true>::descriptor(),
             ))
             .map(|_| ())
         }

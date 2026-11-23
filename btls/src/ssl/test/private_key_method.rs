@@ -94,6 +94,23 @@ impl PrivateKeyMethod for Method {
     }
 }
 
+#[test]
+fn native_private_key_method_tables_have_static_identity() {
+    use crate::ssl::callbacks::PrivateKeyMethodDescriptor;
+
+    let context = PrivateKeyMethodDescriptor::<Method, false>::descriptor();
+    let context_again = PrivateKeyMethodDescriptor::<Method, false>::descriptor();
+    let credential = PrivateKeyMethodDescriptor::<Method, true>::descriptor();
+
+    assert!(std::ptr::eq(context, context_again));
+    assert!(context.sign.is_some());
+    assert!(context.decrypt.is_some());
+    assert!(context.complete.is_some());
+    assert!(credential.sign.is_some());
+    assert!(credential.decrypt.is_some());
+    assert!(credential.complete.is_some());
+}
+
 fn builder_with_private_key_method(method: Method) -> Builder {
     let mut builder = Server::builder();
 
