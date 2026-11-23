@@ -10,7 +10,7 @@
 //! use btls::mlkem::{Algorithm, MlKemPrivateKey};
 //!
 //! let (public_key, private_key) = MlKemPrivateKey::generate(Algorithm::MlKem768).unwrap();
-//! let (ciphertext, shared_secret) = public_key.encapsulate().unwrap();
+//! let (ciphertext, shared_secret) = public_key.encapsulate();
 //! let decrypted = private_key.decapsulate(&ciphertext).unwrap();
 //! assert_eq!(shared_secret, decrypted);
 //! ```
@@ -81,6 +81,10 @@ impl MlKemPrivateKey {
     /// Generates a new key pair, returning `(public_key, private_key)`.
     ///
     /// The private key is a 64-byte seed. Keep it secret.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native key generation or public-key parsing fails.
     pub fn generate(algorithm: Algorithm) -> Result<(MlKemPublicKey, Self), ErrorStack> {
         match algorithm {
             Algorithm::MlKem768 => {
@@ -102,6 +106,11 @@ impl MlKemPrivateKey {
 }
 
 impl MlKemPublicKey {
+    /// Parses and validates a serialized public key for the selected parameter set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid length or malformed encoded public key.
     pub fn from_slice(algorithm: Algorithm, public_key: &[u8]) -> Result<Self, ErrorStack> {
         match algorithm {
             Algorithm::MlKem768 => Ok(Self(Either::MlKem768(Arc::new(
@@ -114,6 +123,7 @@ impl MlKemPublicKey {
     }
 
     /// Serialized bytes of the public key
+    #[must_use = "Consume the serialized public key or compare it to another encoded key."]
     pub fn as_bytes(&self) -> &[u8] {
         match &self.0 {
             Either::MlKem768(pk) => &pk.bytes,
@@ -121,22 +131,27 @@ impl MlKemPublicKey {
         }
     }
 
-    /// Encapsulates a shared secret to the given public key, returning
-    /// `(ciphertext, shared_secret)`.
-    pub fn encapsulate(&self) -> Result<(Vec<u8>, MlKemSharedSecret), ErrorStack> {
+    /// Encapsulates a shared secret with the given public key, returning
+    /// its ciphertext and the corresponding secret bytes.
+    ///
+    /// The native encapsulation primitive is infallible for a validated
+    /// public key, and writes exactly the parameter set's fixed output sizes.
+    #[must_use = "Use the ciphertext and secret produced by key encapsulation."]
+    pub fn encapsulate(&self) -> (Vec<u8>, MlKemSharedSecret) {
         match &self.0 {
             Either::MlKem768(pk) => {
-                let (ct, ss) = pk.encapsulate();
-                Ok((ct.to_vec(), ss))
+                let (ciphertext, secret) = pk.encapsulate();
+                (ciphertext.to_vec(), secret)
             }
             Either::MlKem1024(pk) => {
-                let (ct, ss) = pk.encapsulate();
-                Ok((ct.to_vec(), ss))
+                let (ciphertext, secret) = pk.encapsulate();
+                (ciphertext.to_vec(), secret)
             }
         }
     }
 
     /// Query public key and ciphertext length
+    #[must_use = "Use the key parameter set when interpreting its fixed-size representations."]
     pub const fn algorithm(&self) -> Algorithm {
         match self.0 {
             Either::MlKem768(_) => Algorithm::MlKem768,
@@ -146,7 +161,11 @@ impl MlKemPublicKey {
 }
 
 impl MlKemPrivateKey {
-    /// Expand private key from the seed bytes
+    /// Expands the private key from its fixed-length seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native key expansion fails.
     pub fn from_seed(
         algorithm: Algorithm,
         private_seed: &MlKemPrivateKeySeed,
@@ -162,6 +181,7 @@ impl MlKemPrivateKey {
     }
 
     /// Secret seed bytes of this private key
+    #[must_use = "Handle the private seed only through an explicit export or derivation operation."]
     pub fn seed_bytes(&self) -> &MlKemPrivateKeySeed {
         match &self.0 {
             Either::MlKem768(sk) => &sk.seed,
@@ -170,6 +190,10 @@ impl MlKemPrivateKey {
     }
 
     /// Decapsulates a shared secret from a ciphertext using the private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ciphertext length does not match the parameter set.
     pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<MlKemSharedSecret, ErrorStack> {
         match &self.0 {
             Either::MlKem768(sk) => {
@@ -188,6 +212,7 @@ impl MlKemPrivateKey {
     }
 
     /// Query public key and ciphertext length
+    #[must_use = "Use the key parameter set when interpreting its fixed-size representations."]
     pub const fn algorithm(&self) -> Algorithm {
         match self.0 {
             Either::MlKem768(_) => Algorithm::MlKem768,
@@ -364,7 +389,7 @@ macro_rules! define_mlkem {
                 }
             }
 
-            /// Encapsulate: returns (ciphertext, shared_secret).
+            /// Encapsulates a random shared secret and returns ciphertext and secret.
             fn encapsulate(&self) -> ([u8; $private::CIPHERTEXT_BYTES], MlKemSharedSecret) {
                 // SAFETY: buffers correctly sized, parsed key is valid
                 unsafe {
@@ -505,7 +530,7 @@ mod tests {
                     #[test]
                     fn roundtrip() {
                         let (pk, sk) = MlKemPrivateKey::generate($algorithm).unwrap();
-                        let (ct, ss1) = pk.encapsulate().unwrap();
+                        let (ct, ss1) = pk.encapsulate();
                         let ss2 = sk.decapsulate(&ct).unwrap();
                         let ss3 = sk.clone().decapsulate(&ct).unwrap();
                         let cloned = sk.clone();
@@ -525,7 +550,7 @@ mod tests {
                         assert_eq!(pk.as_bytes().len(), $pk_len);
                         assert_eq!(private_key.seed_bytes().len(), PRIVATE_KEY_SEED_BYTES);
 
-                        let (ct, ss) = pk.encapsulate().unwrap();
+                        let (ct, ss) = pk.encapsulate();
                         assert_eq!(ct.len(), $ct_len);
                         assert_eq!(ss.len(), SHARED_SECRET_BYTES);
                     }

@@ -118,7 +118,7 @@ struct SecretBuilder<T: Copy> {
 }
 
 impl<T: Copy> SecretBuilder<T> {
-    fn new(seed: MlDsaPrivateKeySeed) -> Self {
+    const fn new(seed: MlDsaPrivateKeySeed) -> Self {
         Self {
             seed,
             expanded: MaybeUninit::zeroed(),
@@ -266,11 +266,13 @@ impl MlDsaPrivateKey {
     }
 
     /// Returns the algorithm for this key.
+    #[must_use = "Use the selected ML-DSA parameter set when encoding or validating the key."]
     pub const fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
 
     /// Returns the seed bytes for this private key.
+    #[must_use = "Protect and persist the private seed only through the intended key export path."]
     pub fn seed_bytes(&self) -> &MlDsaPrivateKeySeed {
         match &self.inner {
             PrivateKeyInner::MlDsa44(key) => &key.seed,
@@ -285,6 +287,7 @@ impl MlDsaPrivateKey {
     ///
     /// The native public-key derivation fails.
     pub fn public_key(&self) -> Result<MlDsaPublicKey, ErrorStack> {
+        // SAFETY: The immutable private key remains Arc-owned; each native out-pointer uniquely writes a zeroed public representation of the matching parameter set.
         unsafe {
             ffi::init();
             match &self.inner {
@@ -292,7 +295,7 @@ impl MlDsaPrivateKey {
                     let mut pub_key: MaybeUninit<ffi::MLDSA44_public_key> = MaybeUninit::zeroed();
                     cvt(ffi::MLDSA44_public_from_private(
                         pub_key.as_mut_ptr(),
-                        &key.expanded,
+                        &raw const key.expanded,
                     ))?;
                     Ok(MlDsaPublicKey {
                         algorithm: self.algorithm,
@@ -303,7 +306,7 @@ impl MlDsaPrivateKey {
                     let mut pub_key: MaybeUninit<ffi::MLDSA65_public_key> = MaybeUninit::zeroed();
                     cvt(ffi::MLDSA65_public_from_private(
                         pub_key.as_mut_ptr(),
-                        &key.expanded,
+                        &raw const key.expanded,
                     ))?;
                     Ok(MlDsaPublicKey {
                         algorithm: self.algorithm,
@@ -314,7 +317,7 @@ impl MlDsaPrivateKey {
                     let mut pub_key: MaybeUninit<ffi::MLDSA87_public_key> = MaybeUninit::zeroed();
                     cvt(ffi::MLDSA87_public_from_private(
                         pub_key.as_mut_ptr(),
-                        &key.expanded,
+                        &raw const key.expanded,
                     ))?;
                     Ok(MlDsaPublicKey {
                         algorithm: self.algorithm,
@@ -331,6 +334,7 @@ impl MlDsaPrivateKey {
     ///
     /// Native randomized signature generation fails.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+        // SAFETY: The private key remains Arc-owned; each signature buffer matches the native fixed output size and the message slice is readable for the call.
         unsafe {
             ffi::init();
             match &self.inner {
@@ -338,7 +342,7 @@ impl MlDsaPrivateKey {
                     let mut sig = vec![0u8; ffi::MLDSA44_SIGNATURE_BYTES as usize];
                     cvt(ffi::MLDSA44_sign(
                         sig.as_mut_ptr(),
-                        &key.expanded,
+                        &raw const key.expanded,
                         msg.as_ptr(),
                         msg.len(),
                         core::ptr::null(),
@@ -350,7 +354,7 @@ impl MlDsaPrivateKey {
                     let mut sig = vec![0u8; ffi::MLDSA65_SIGNATURE_BYTES as usize];
                     cvt(ffi::MLDSA65_sign(
                         sig.as_mut_ptr(),
-                        &key.expanded,
+                        &raw const key.expanded,
                         msg.as_ptr(),
                         msg.len(),
                         core::ptr::null(),
@@ -362,7 +366,7 @@ impl MlDsaPrivateKey {
                     let mut sig = vec![0u8; ffi::MLDSA87_SIGNATURE_BYTES as usize];
                     cvt(ffi::MLDSA87_sign(
                         sig.as_mut_ptr(),
-                        &key.expanded,
+                        &raw const key.expanded,
                         msg.as_ptr(),
                         msg.len(),
                         core::ptr::null(),
@@ -392,6 +396,7 @@ impl MlDsaPublicKey {
         }
         let mut cbs = cbs_init(serialized_public_key);
 
+        // SAFETY: The input length matches the selected parameter set; native parses the live CBS into a distinct zeroed output buffer.
         unsafe {
             match algorithm {
                 Algorithm::MlDsa44 => {
@@ -447,6 +452,7 @@ impl MlDsaPublicKey {
     }
 
     /// Returns the algorithm for this key.
+    #[must_use = "Use the selected ML-DSA parameter set when encoding or validating the key."]
     pub const fn algorithm(&self) -> Algorithm {
         self.algorithm
     }
@@ -467,8 +473,8 @@ impl MlDsaPublicKey {
                 cbb.as_mut_ptr(),
                 bytes.as_mut_ptr(),
                 bytes.len(),
-            ))?
-        };
+            ))?;
+        }
         // SAFETY: every variant owns a live matching native public key. The
         // builder is initialized and exclusively borrowed until cleanup.
         let result = unsafe {
@@ -516,6 +522,7 @@ impl MlDsaPublicKey {
     ///
     /// The signature or context is invalid or the native verification fails.
     pub fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: The borrowed native public key and the message and signature slices remain live for synchronous verification.
         unsafe {
             ffi::init();
             match &self.inner {
@@ -562,7 +569,7 @@ impl fmt::Debug for MlDsaPrivateKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MlDsaPrivateKey")
             .field("algorithm", &self.algorithm)
-            .field("seed", &"[redacted]")
+            .field("inner", &"[redacted]")
             .finish()
     }
 }
@@ -571,6 +578,7 @@ impl fmt::Debug for MlDsaPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MlDsaPublicKey")
             .field("algorithm", &self.algorithm)
+            .field("inner", &"[opaque public key]")
             .finish()
     }
 }

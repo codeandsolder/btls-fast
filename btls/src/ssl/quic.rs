@@ -348,7 +348,12 @@ impl SslRef {
 
 /// Finds the [`QuicMethod`] of the context `ssl` belongs to and runs `f` with it. A missing
 /// method fails like `f`.
-fn with_method<M: QuicMethod>(
+///
+/// # Safety
+///
+/// The pointer must refer to the live native SSL connection invoking the
+/// QUIC callback; it remains uniquely accessible throughout the callback.
+unsafe fn with_method<M: QuicMethod>(
     ssl: *mut ffi::SSL,
     f: impl FnOnce(&M, &mut SslRef) -> Result<(), QuicMethodError>,
 ) -> c_int {
@@ -381,6 +386,45 @@ fn secret_result(ret: c_int) -> c_int {
     ret
 }
 
+/// Dispatches a native secret callback with one shared validated byte view.
+///
+/// # Safety
+///
+/// The native caller supplies a live SSL connection, and non-null cipher and
+/// secret storage for every nonempty secret during the synchronous callback.
+unsafe fn dispatch_secret<M: QuicMethod>(
+    ssl: *mut ffi::SSL,
+    level: ffi::ssl_encryption_level_t,
+    cipher: *const ffi::SSL_CIPHER,
+    secret: *const u8,
+    secret_len: usize,
+    apply: fn(
+        &M,
+        &mut SslRef,
+        QuicEncryptionLevel,
+        &SslCipherRef,
+        &[u8],
+    ) -> Result<(), QuicMethodError>,
+) -> c_int {
+    if cipher.is_null() || (secret_len != 0 && secret.is_null()) {
+        return secret_result(0);
+    }
+    // SAFETY: the native callback supplies an immutable live cipher object.
+    let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
+    let secret = if secret_len == 0 {
+        &[]
+    } else {
+        // SAFETY: native keeps secret_len bytes readable until callback return.
+        unsafe { slice::from_raw_parts(secret, secret_len) }
+    };
+    // SAFETY: ssl remains live and uniquely accessible for the native callback.
+    secret_result(unsafe {
+        with_method::<M>(ssl, |method, ssl| {
+            apply(method, ssl, QuicEncryptionLevel(level), cipher, secret)
+        })
+    })
+}
+
 unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
@@ -388,18 +432,8 @@ unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
-    // SAFETY: BoringSSL passes the cipher suite and a secret of `secret_len` bytes.
-    let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
-    // A zero-length native buffer is permitted to have a null pointer.
-    let secret = if secret_len == 0 {
-        &[]
-    } else {
-        // SAFETY: the native callback keeps the reported bytes readable.
-        unsafe { slice::from_raw_parts(secret, secret_len) }
-    };
-    secret_result(with_method::<M>(ssl, |method, ssl| {
-        method.set_read_secret(ssl, QuicEncryptionLevel(level), cipher, secret)
-    }))
+    // SAFETY: the native QUIC callback passes a live SSL, cipher, and secret.
+    unsafe { dispatch_secret::<M>(ssl, level, cipher, secret, secret_len, M::set_read_secret) }
 }
 
 unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
@@ -409,18 +443,8 @@ unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
-    // SAFETY: BoringSSL passes the cipher suite and a secret of `secret_len` bytes.
-    let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
-    // A zero-length native buffer is permitted to have a null pointer.
-    let secret = if secret_len == 0 {
-        &[]
-    } else {
-        // SAFETY: the native callback keeps the reported bytes readable.
-        unsafe { slice::from_raw_parts(secret, secret_len) }
-    };
-    secret_result(with_method::<M>(ssl, |method, ssl| {
-        method.set_write_secret(ssl, QuicEncryptionLevel(level), cipher, secret)
-    }))
+    // SAFETY: the native QUIC callback passes a live SSL, cipher, and secret.
+    unsafe { dispatch_secret::<M>(ssl, level, cipher, secret, secret_len, M::set_write_secret) }
 }
 
 unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
@@ -437,13 +461,17 @@ unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
         // SAFETY: native keeps these reported handshake bytes readable.
         unsafe { slice::from_raw_parts(data, len) }
     };
-    with_method::<M>(ssl, |method, ssl| {
-        method.add_handshake_data(ssl, QuicEncryptionLevel(level), data)
-    })
+    // SAFETY: native keeps the SSL owner alive for this callback.
+    unsafe {
+        with_method::<M>(ssl, |method, ssl| {
+            method.add_handshake_data(ssl, QuicEncryptionLevel(level), data)
+        })
+    }
 }
 
 unsafe extern "C" fn raw_flush_flight<M: QuicMethod>(ssl: *mut ffi::SSL) -> c_int {
-    with_method::<M>(ssl, |method, ssl| method.flush_flight(ssl))
+    // SAFETY: native keeps the SSL owner alive for this callback.
+    unsafe { with_method::<M>(ssl, |method, ssl| method.flush_flight(ssl)) }
 }
 
 unsafe extern "C" fn raw_send_alert<M: QuicMethod>(
@@ -451,7 +479,10 @@ unsafe extern "C" fn raw_send_alert<M: QuicMethod>(
     level: ffi::ssl_encryption_level_t,
     alert: u8,
 ) -> c_int {
-    with_method::<M>(ssl, |method, ssl| {
-        method.send_alert(ssl, QuicEncryptionLevel(level), SslAlert(alert.into()))
-    })
+    // SAFETY: native keeps the SSL owner alive for this callback.
+    unsafe {
+        with_method::<M>(ssl, |method, ssl| {
+            method.send_alert(ssl, QuicEncryptionLevel(level), SslAlert(alert.into()))
+        })
+    }
 }
