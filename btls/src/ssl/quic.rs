@@ -45,6 +45,10 @@ pub struct QuicMethodError;
 pub trait QuicMethod: Send + Sync + 'static {
     /// Installs the read secret and cipher suite of `level`. `BoringSSL` calls it at most once per
     /// level, and only after the write secret that ACKs the packets it protects.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot install the negotiated read secret.
     fn set_read_secret(
         &self,
         ssl: &mut SslRef,
@@ -60,6 +64,10 @@ pub trait QuicMethod: Send + Sync + 'static {
     /// asked for a certificate is not authenticated yet. After a 0-RTT reject, the
     /// [`QuicEncryptionLevel::EARLY_DATA`] secret may use another cipher suite than the other
     /// levels.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot install the negotiated write secret.
     fn set_write_secret(
         &self,
         ssl: &mut SslRef,
@@ -69,6 +77,10 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 
     /// Adds handshake data to the current flight at `level`.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot queue the handshake bytes.
     fn add_handshake_data(
         &self,
         ssl: &mut SslRef,
@@ -77,9 +89,17 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 
     /// Signals that the current flight, which may span several levels, is complete.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot flush the current handshake flight.
     fn flush_flight(&self, ssl: &mut SslRef) -> Result<(), QuicMethodError>;
 
     /// Sends a fatal alert at `level`.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot send the alert.
     fn send_alert(
         &self,
         ssl: &mut SslRef,
@@ -386,6 +406,9 @@ fn secret_result(ret: c_int) -> c_int {
     ret
 }
 
+type SecretApplication<M> =
+    fn(&M, &mut SslRef, QuicEncryptionLevel, &SslCipherRef, &[u8]) -> Result<(), QuicMethodError>;
+
 /// Dispatches a native secret callback with one shared validated byte view.
 ///
 /// # Safety
@@ -398,13 +421,7 @@ unsafe fn dispatch_secret<M: QuicMethod>(
     cipher: *const ffi::SSL_CIPHER,
     secret: *const u8,
     secret_len: usize,
-    apply: fn(
-        &M,
-        &mut SslRef,
-        QuicEncryptionLevel,
-        &SslCipherRef,
-        &[u8],
-    ) -> Result<(), QuicMethodError>,
+    apply: SecretApplication<M>,
 ) -> c_int {
     if cipher.is_null() || (secret_len != 0 && secret.is_null()) {
         return secret_result(0);
@@ -471,7 +488,7 @@ unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
 
 unsafe extern "C" fn raw_flush_flight<M: QuicMethod>(ssl: *mut ffi::SSL) -> c_int {
     // SAFETY: native keeps the SSL owner alive for this callback.
-    unsafe { with_method::<M>(ssl, |method, ssl| method.flush_flight(ssl)) }
+    unsafe { with_method::<M>(ssl, M::flush_flight) }
 }
 
 unsafe extern "C" fn raw_send_alert<M: QuicMethod>(

@@ -25,10 +25,16 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl SslCredential {
-    /// Create a credential suitable for a handshake using a raw public key.
+    /// Creates a credential for a raw-public-key handshake.
+    ///
+    /// # Errors
+    ///
+    /// Native credential allocation fails.
     #[corresponds(SSL_CREDENTIAL_new_raw_public_key_empty)]
     #[cfg(feature = "rpk")]
     pub fn new_raw_public_key() -> Result<SslCredentialBuilder, ErrorStack> {
+        // SAFETY: the native constructor returns an owned credential or null;
+        // `cvt_p` rejects null before ownership passes to the builder.
         unsafe {
             Ok(SslCredentialBuilder(Self::from_ptr(cvt_p(
                 ffi::SSL_CREDENTIAL_new_raw_public_key_empty(),
@@ -40,11 +46,17 @@ impl SslCredential {
     ///
     /// Each invocation of this function is guaranteed to return a distinct index. These can be used
     /// to store data in the context that can be retrieved later by callbacks, for example.
+    ///
+    /// # Errors
+    ///
+    /// Native extra-data index allocation fails.
     #[corresponds(SSL_C_get_ex_new_index)]
     pub fn new_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
     where
         T: 'static + Sync + Send,
     {
+        // SAFETY: the registered free callback matches `T`; the native index
+        // is checked before being wrapped in its typed Rust representation.
         unsafe {
             ffi::init();
             let idx = cvt_n(get_new_ssl_credential_idx(Some(free_data_box::<T>)))?;
@@ -66,7 +78,9 @@ impl SslCredentialRef {
     /// Returns a reference to the extra data at the specified index.
     #[corresponds(SSL_CREDENTIAL_get_ex_data)]
     #[must_use = "Use the returned application data, or handle an empty slot."]
-    pub fn ex_data<T>(&self, index: Index<SslCredential, T>) -> Option<&T> {
+    pub fn ex_data<T: 'static + Send + Sync>(&self, index: Index<SslCredential, T>) -> Option<&T> {
+        // SAFETY: `index` identifies a typed, registered native slot. The
+        // borrowed credential owns any non-null allocation for this lifetime.
         unsafe {
             let data = ffi::SSL_CREDENTIAL_get_ex_data(self.as_ptr(), index.as_raw());
             if data.is_null() {
@@ -109,6 +123,10 @@ impl SslCredentialBuilder {
     /// `SslCredential::new_ex_index` method to create an `Index`.
     ///
     /// Any previous value will be returned and replaced by the new one.
+    ///
+    /// # Errors
+    ///
+    /// Native extra-data allocation or replacement fails.
     #[corresponds(SSL_CREDENTIAL_set_ex_data)]
     pub fn replace_ex_data<T: 'static + Send + Sync>(
         &mut self,
@@ -119,9 +137,15 @@ impl SslCredentialBuilder {
         unsafe { self.0.replace_ex_data(index, data) }
     }
 
-    // Sets the private key of the credential.
+    /// Sets the credential's private key.
+    ///
+    /// # Errors
+    ///
+    /// BoringSSL rejects the key or cannot retain its reference.
     #[corresponds(SSL_CREDENTIAL_set1_private_key)]
     pub fn set_private_key(&mut self, private_key: &PKeyRef<Private>) -> Result<(), ErrorStack> {
+        // SAFETY: the builder owns its credential uniquely and the borrowed
+        // private key remains live while BoringSSL retains its own reference.
         unsafe {
             cvt_0i(ffi::SSL_CREDENTIAL_set1_private_key(
                 self.0.as_ptr(),
@@ -134,11 +158,18 @@ impl SslCredentialBuilder {
     /// Configures a custom private key method on the credential.
     ///
     /// See [`PrivateKeyMethod`] for more details.
+    ///
+    /// # Errors
+    ///
+    /// Typed callback storage allocation or native registration fails.
     #[corresponds(SSL_CREDENTIAL_set_private_key_method)]
     pub fn set_private_key_method<M>(&mut self, method: M) -> Result<(), ErrorStack>
     where
         M: PrivateKeyMethod,
     {
+        // SAFETY: the unpublished credential exclusively owns its callback
+        // state. BoringSSL retains the monomorphized static method descriptor,
+        // not a temporary stack allocation.
         unsafe {
             self.replace_ex_data(
                 SslCredential::register_callback::<Arc<M>>()?,
@@ -156,9 +187,16 @@ impl SslCredentialBuilder {
     /// Sets the SPKI of the raw public key credential.
     ///
     /// If `spki` is `None`, the SPKI is extracted from the credential's private key.
+    ///
+    /// # Errors
+    ///
+    /// Native SPKI-buffer creation or credential configuration fails.
     #[corresponds(SSL_CREDENTIAL_set1_spki)]
     #[cfg(feature = "rpk")]
     pub fn set_spki_bytes(&mut self, spki: Option<&[u8]>) -> Result<(), ErrorStack> {
+        // SAFETY: the source slice remains live during native buffer creation;
+        // the native setter retains its own reference if successful. The
+        // temporary CRYPTO_BUFFER is freed exactly once on either result.
         unsafe {
             let spki = spki
                 .map(|spki| {
