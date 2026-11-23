@@ -71,6 +71,24 @@ fn clear_ctx_options() {
 }
 
 #[test]
+fn verify_depth_setters_reject_unsigned_overflow() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    assert!(ctx.set_verify_depth(2).is_ok());
+    assert!(ctx.set_verify_depth(u32::MAX).is_err());
+
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    assert!(ssl.set_verify_depth(2).is_ok());
+    assert!(ssl.set_verify_depth(u32::MAX).is_err());
+}
+
+#[test]
+fn session_id_context_rejects_excess_native_length() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    assert!(ctx.set_session_id_context(&[0; 32]).is_ok());
+    assert!(ctx.set_session_id_context(&[0; 33]).is_err());
+}
+
+#[test]
 fn zero_length_buffers() {
     let server = Server::builder().build();
 
