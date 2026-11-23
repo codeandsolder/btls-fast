@@ -5521,6 +5521,16 @@ impl<S: Read + Write> SslStream<S> {
         }
     }
 
+    // Native SSL_read/SSL_write use signed results. Keep both paths' output
+    // conversion and bounds checks identical, including impossible invalid
+    // positive lengths from native code.
+    fn finish_native_io(&mut self, ret: c_int, offered_len: usize) -> Result<usize, Error> {
+        match usize::try_from(ret) {
+            Ok(n) if n > 0 && n <= offered_len => Ok(n),
+            _ => Err(self.make_error(ret)),
+        }
+    }
+
     /// Like `read_ssl`, but takes a possibly-uninitialized slice.
     ///
     /// # Initialization
@@ -5540,10 +5550,7 @@ impl<S: Read + Write> SslStream<S> {
         // SAFETY: the live SSL stream has exclusive access to a writable
         // `len`-byte prefix. Uninitialized output is valid for SSL_read.
         let ret = unsafe { ffi::SSL_read(self.ssl().as_ptr(), buf.as_mut_ptr().cast(), len) };
-        match usize::try_from(ret) {
-            Ok(n) if n > 0 && n <= buf.len() => Ok(n),
-            _ => Err(self.make_error(ret)),
-        }
+        self.finish_native_io(ret, buf.len())
     }
 
     /// Like `write`, but returns an `ssl::Error` rather than an `io::Error`.
@@ -5564,10 +5571,7 @@ impl<S: Read + Write> SslStream<S> {
         // SAFETY: the borrowed input is readable for its entire lifetime and
         // the live SSL stream reads at most `len` bytes synchronously.
         let ret = unsafe { ffi::SSL_write(self.ssl().as_ptr(), buf.as_ptr().cast(), len) };
-        match usize::try_from(ret) {
-            Ok(n) if n > 0 && n <= buf.len() => Ok(n),
-            _ => Err(self.make_error(ret)),
-        }
+        self.finish_native_io(ret, buf.len())
     }
 
     /// Shuts down the session.
