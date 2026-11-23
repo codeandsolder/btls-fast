@@ -74,6 +74,10 @@ impl SslConnector {
     /// Creates a new builder for TLS connections.
     ///
     /// The default configuration is subject to change, and is currently derived from Python.
+    ///
+    /// # Errors
+    ///
+    /// Native context creation, CA-path initialization, or cipher configuration fails.
     pub fn builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_default_verify_paths()?;
@@ -88,6 +92,10 @@ impl SslConnector {
     /// Creates a bare builder for TLS connections without default CA certificates.
     ///
     /// The caller is responsible for providing a custom certificate store.
+    ///
+    /// # Errors
+    ///
+    /// Native context creation or cipher configuration fails.
     pub fn bare_builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_cipher_list(
@@ -100,6 +108,10 @@ impl SslConnector {
     /// Initiates a client-side TLS session on a stream.
     ///
     /// The domain is used for SNI and hostname verification.
+    ///
+    /// # Errors
+    ///
+    /// The SSL connection cannot be configured or attached to the stream.
     pub fn setup_connect<S>(
         &self,
         domain: &str,
@@ -117,6 +129,10 @@ impl SslConnector {
     ///
     /// This is a convenience method which combines [`Self::setup_connect`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// Connection setup or the TLS handshake fails.
     pub fn connect<S>(&self, domain: &str, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
@@ -127,6 +143,10 @@ impl SslConnector {
     }
 
     /// Returns a structure allowing for configuration of a single TLS session before connection.
+    ///
+    /// # Errors
+    ///
+    /// A new native SSL connection cannot be allocated.
     pub fn configure(&self) -> Result<ConnectConfiguration, ErrorStack> {
         Ssl::new(&self.0).map(|ssl| ConnectConfiguration {
             ssl,
@@ -178,6 +198,8 @@ impl SslConnectorBuilder {
             callback: Box::new(callback),
         };
         self.set_ex_data(CLIENT_SESSION_INDEX.register()?, callback)?;
+        // SAFETY: the builder owns a live native context for each session-cache
+        // configuration call, and the callback is a static C-ABI function.
         unsafe {
             let mode =
                 ffi::SSL_CTX_get_session_cache_mode(self.as_ptr()) | ffi::SSL_SESS_CACHE_CLIENT;
@@ -306,6 +328,8 @@ fn chain_not_after(ssl: &SslRef) -> Option<i64> {
     if chain.is_null() {
         return None;
     }
+    // SAFETY: a non-null chain is borrowed from the live native SSL session;
+    // the reference is used only while `ssl` keeps its owner alive.
     let chain = unsafe { StackRef::<X509>::from_ptr(chain) };
     earliest_not_after(chain)
 }
@@ -345,7 +369,7 @@ fn verifies_peer(ssl: &SslRef) -> bool {
 impl ConnectConfiguration {
     /// A builder-style version of `set_use_server_name_indication`.
     #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
-    pub fn use_server_name_indication(mut self, use_sni: bool) -> Self {
+    pub const fn use_server_name_indication(mut self, use_sni: bool) -> Self {
         self.set_use_server_name_indication(use_sni);
         self
     }
@@ -359,7 +383,7 @@ impl ConnectConfiguration {
 
     /// A builder-style version of `set_verify_hostname`.
     #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
-    pub fn verify_hostname(mut self, verify_hostname: bool) -> Self {
+    pub const fn verify_hostname(mut self, verify_hostname: bool) -> Self {
         self.set_verify_hostname(verify_hostname);
         self
     }
@@ -395,6 +419,10 @@ impl ConnectConfiguration {
     /// Returns an [`Ssl`] configured to connect to the provided domain.
     ///
     /// The domain is used for SNI (if it is not an IP address) and hostname verification if enabled.
+    ///
+    /// # Errors
+    ///
+    /// The domain cannot be configured, extra-data allocation fails, or session installation fails.
     pub fn into_ssl(mut self, domain: &str) -> Result<Ssl, ErrorStack> {
         let sni = self.sni && domain.parse::<IpAddr>().is_err();
         if sni {
@@ -437,6 +465,10 @@ impl ConnectConfiguration {
     ///
     /// This is a convenience method which combines [`Self::into_ssl`] and
     /// [`Ssl::setup_connect`].
+    ///
+    /// # Errors
+    ///
+    /// Domain verification setup or stream attachment fails.
     pub fn setup_connect<S>(
         self,
         domain: &str,
@@ -454,6 +486,10 @@ impl ConnectConfiguration {
     ///
     /// This is a convenience method which combines [`Self::setup_connect`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// Connection setup or the TLS handshake fails.
     pub fn connect<S>(self, domain: &str, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
@@ -493,6 +529,10 @@ impl SslAcceptor {
     /// recommendations. See its [documentation][docs] for more details on specifics.
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
+    ///
+    /// # Errors
+    ///
+    /// Native context, Diffie–Hellman parameters, or cipher configuration is invalid.
     pub fn mozilla_intermediate_v5(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1);
@@ -514,6 +554,10 @@ impl SslAcceptor {
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
     // FIXME remove in next major version
+    ///
+    /// # Errors
+    ///
+    /// Native context, Diffie–Hellman parameters, or cipher configuration is invalid.
     pub fn mozilla_intermediate(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
@@ -540,6 +584,10 @@ impl SslAcceptor {
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
     // FIXME remove in next major version
+    ///
+    /// # Errors
+    ///
+    /// Native context creation or cipher configuration fails.
     pub fn mozilla_modern(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(
@@ -557,6 +605,10 @@ impl SslAcceptor {
     /// Initiates a server-side TLS handshake on a stream.
     ///
     /// See [`Ssl::setup_accept`] for more details.
+    ///
+    /// # Errors
+    ///
+    /// The native SSL connection cannot be allocated or attached to the stream.
     pub fn setup_accept<S>(&self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
@@ -570,6 +622,10 @@ impl SslAcceptor {
     ///
     /// This is a convenience method which combines [`Self::setup_accept`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// Server-side connection setup or the TLS handshake fails.
     pub fn accept<S>(&self, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
