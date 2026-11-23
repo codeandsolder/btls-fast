@@ -1,6 +1,6 @@
 use crate::ffi::{
     self, BIO_clear_retry_flags, BIO_new, BIO_set_retry_read, BIO_set_retry_write, BIO,
-    BIO_CTRL_DGRAM_QUERY_MTU, BIO_CTRL_FLUSH,
+    BIO_CTRL_FLUSH,
 };
 use libc::{c_char, c_int, c_long, c_void, strlen};
 use std::any::Any;
@@ -17,7 +17,6 @@ pub struct StreamState<S> {
     pub stream: S,
     pub error: Option<io::Error>,
     pub panic: Option<Box<dyn Any + Send>>,
-    pub dtls_mtu_size: c_long,
 }
 
 /// Owns the immutable native BIO method until all associated BIOs have been freed.
@@ -62,7 +61,6 @@ pub fn new<S: Read + Write>(stream: S) -> Result<(*mut BIO, BioMethod), ErrorSta
         stream,
         error: None,
         panic: None,
-        dtls_mtu_size: 0,
     });
 
     // SAFETY: A new BIO receives exactly one owned StreamState<S>; method outlives it.
@@ -124,16 +122,6 @@ pub unsafe fn take_stream<S>(bio: *mut BIO) -> S {
     match state {
         Some(state) => state.stream,
         None => unreachable!("a live SslStream owns an attached BIO state"),
-    }
-}
-
-pub unsafe fn set_dtls_mtu_size<S>(bio: *mut BIO, mtu_size: usize) {
-    // SAFETY: The caller exclusively owns the initialized state for this operation.
-    unsafe {
-        if mtu_size as u64 > c_long::MAX as u64 {
-            panic!("Given MTU size {mtu_size} can't be represented in a positive `c_long` range")
-        }
-        state::<S>(bio).dtls_mtu_size = mtu_size as c_long;
     }
 }
 
@@ -275,8 +263,6 @@ unsafe extern "C" fn ctrl<S: Write>(
                 })
                 .max(0),
             )
-        } else if cmd == BIO_CTRL_DGRAM_QUERY_MTU {
-            (*data).dtls_mtu_size
         } else {
             0
         }

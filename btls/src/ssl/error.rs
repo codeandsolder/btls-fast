@@ -85,6 +85,8 @@ impl ErrorCode {
     #[corresponds(SSL_error_description)]
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(self) -> Option<&'static str> {
+        // SAFETY: the native lookup returns a static NUL-terminated error
+        // description or null; the pointer is checked before creating `CStr`.
         unsafe {
             let msg = ffi::SSL_error_description(self.0);
             if msg.is_null() {
@@ -108,7 +110,7 @@ impl fmt::Debug for ErrorCode {
 }
 
 #[derive(Debug)]
-pub(crate) enum InnerError {
+pub enum InnerError {
     Io(io::Error),
     Ssl(ErrorStack),
 }
@@ -135,6 +137,12 @@ impl Error {
         }
     }
 
+    /// Extracts the underlying I/O error, retaining this SSL error when the
+    /// failure did not originate from an I/O operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns the original SSL error if its cause was not an I/O error.
     pub fn into_io_error(self) -> Result<io::Error, Self> {
         match self.cause {
             Some(InnerError::Io(e)) => Ok(e),

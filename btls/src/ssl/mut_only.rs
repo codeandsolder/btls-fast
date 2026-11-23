@@ -1,4 +1,4 @@
-pub(crate) struct MutOnly<T>(T);
+pub struct MutOnly<T>(T);
 
 impl<T> MutOnly<T> {
     pub(crate) const fn new(value: T) -> Self {
