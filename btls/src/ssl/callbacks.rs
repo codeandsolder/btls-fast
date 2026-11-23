@@ -62,6 +62,7 @@ where
         callback(ssl)
     };
 
+    // SAFETY: The native custom verification callback supplies exclusive access to SSL and a writable alert slot; helper checks both.
     unsafe { raw_custom_verify_callback(ssl, out_alert, callback) }
 }
 
@@ -100,6 +101,7 @@ where
         callback(ssl)
     };
 
+    // SAFETY: The native SSL-specific custom verifier uses the same checked pointer and alert contracts.
     unsafe { raw_custom_verify_callback(ssl, out_alert, callback) }
 }
 
@@ -131,7 +133,7 @@ unsafe fn raw_custom_verify_callback(
 
 // Caller provides len exclusively writable bytes with a lifetime bounded
 // by the synchronous native callback. Null is permitted only for empty output.
-unsafe fn native_output<'a>(ptr: *mut u8, len: usize) -> Option<&'a mut [u8]> {
+const unsafe fn native_output<'a>(ptr: *mut u8, len: usize) -> Option<&'a mut [u8]> {
     if len == 0 {
         return Some(&mut []);
     }
@@ -181,6 +183,7 @@ where
     let hint = if hint.is_null() {
         None
     } else {
+        // SAFETY: A non-null PSK hint is a NUL-terminated native string valid for this callback invocation.
         Some(unsafe { CStr::from_ptr(hint) }.to_bytes())
     };
     let (Ok(identity_capacity), Ok(psk_capacity)) = (
@@ -233,6 +236,7 @@ where
     let identity = if identity.is_null() {
         None
     } else {
+        // SAFETY: A non-null peer PSK identity is a NUL-terminated string borrowed for this callback.
         Some(unsafe { CStr::from_ptr(identity) }.to_bytes())
     };
     let Ok(capacity) = usize::try_from(max_psk_len) else {
@@ -336,7 +340,9 @@ where
     // SAFETY: ticket processing borrows the live SSL and provides initialized
     // uniquely borrowed cipher/HMAC contexts.
     let ssl = unsafe { SslRef::from_ptr(ssl) };
+    // SAFETY: The cipher context is non-null and exclusively borrowed during ticket processing.
     let evp_ctx = unsafe { CipherCtxRef::from_ptr_mut(evp_ctx) };
+    // SAFETY: The HMAC context is non-null, disjoint from the cipher context, and exclusive for this callback.
     let hmac_ctx = unsafe { HmacCtxRef::from_ptr_mut(hmac_ctx) };
     let key_name = key_name.cast::<[u8; 16]>();
     let iv = iv.cast::<[u8; ffi::EVP_MAX_IV_LENGTH as usize]>();
@@ -404,6 +410,7 @@ where
     // SAFETY: native handshake owns SSL exclusively and supplies the readable
     // ALPN wire-format protocol list for the duration of this call.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    // SAFETY: The ALPN protocol list belongs to the native handshake and stays valid during the synchronous callback.
     let Some(protos) = (unsafe { native_input(inbuf, inlen) }) else {
         return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
     };
@@ -526,6 +533,7 @@ where
 {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    // SAFETY: The BoringSSL new-session callback supplies an owned session reference for the Rust callback to consume.
     let session = unsafe { SslSession::from_ptr(session) };
 
     if let Some(context) = ssl.session_context().map(ToOwned::to_owned) {
@@ -543,6 +551,7 @@ pub(super) unsafe extern "C" fn raw_client_session(
 ) -> c_int {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    // SAFETY: The new-session callback supplies an owned session reference, even when no application callback is registered.
     let session = unsafe { SslSession::from_ptr(session) };
 
     // Sessions from connections not created by `ConnectConfiguration::into_ssl` have no recorded
@@ -569,6 +578,7 @@ pub(super) unsafe extern "C" fn raw_remove_session<F>(
 {
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { SslContextRef::from_ptr(ctx) };
+    // SAFETY: The removal callback borrows a session owned by the live native context; it must not be freed here.
     let session = unsafe { SslSessionRef::from_ptr(session) };
 
     let Some(callback) = ctx.callback::<F>(CallbackRole::RemoveSession) else {
@@ -602,6 +612,7 @@ where
     let Some(data) = (unsafe { native_input(data, len) }) else {
         return ptr::null_mut();
     };
+    // SAFETY: The native session identifier is readable for the declared checked length and lifetime of the callback.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
         return ptr::null_mut();
@@ -615,6 +626,7 @@ where
             unsafe { copy.write(0) };
             session.into_ptr()
         }
+        // SAFETY: Native session lookup exclusively borrows the live SSL pointer during the synchronous callback.
         Some(Err(GetSessionPendingError)) => unsafe { ffi::SSL_magic_pending_session_ptr() },
         _ => ptr::null_mut(),
     }
@@ -626,6 +638,7 @@ where
 {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr(ssl.cast_mut()) };
+    // SAFETY: BoringSSL exposes a sentinel pointer for an asynchronous pending-session lookup; it is not dereferenced.
     let line = unsafe { CStr::from_ptr(line).to_string_lossy() };
 
     let Some(callback) = ssl.ssl_context().callback::<F>(CallbackRole::Keylog) else {
@@ -637,7 +650,7 @@ where
 
 // The caller must ensure that nonempty input points to readable bytes for
 // the returned lifetime, and that output storage does not overlap it.
-unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+const unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     if len == 0 {
         return Some(&[]);
     }
@@ -827,7 +840,11 @@ where
         assert!(C::CAN_COMPRESS);
     }
 
-    // SAFETY: btls provides valid inputs.
+    if ssl.is_null() || out.is_null() {
+        return 0;
+    }
+    // SAFETY: BoringSSL supplies a live exclusive SSL borrow and valid
+    // output handle for the duration of this callback.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context();
@@ -838,6 +855,7 @@ where
         return 0;
     };
 
+    // SAFETY: Certificate compression borrows the native input for the duration of the synchronous callback.
     let Some(input_slice) = (unsafe { native_input(input, input_len) }) else {
         return 0;
     };
@@ -863,7 +881,11 @@ where
         assert!(C::CAN_DECOMPRESS);
     }
 
-    // SAFETY: btls provides valid inputs.
+    if ssl.is_null() || out.is_null() {
+        return 0;
+    }
+    // SAFETY: BoringSSL supplies a live exclusive SSL borrow and valid
+    // output handle for the duration of this callback.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context();
@@ -878,6 +900,7 @@ where
         return 0;
     };
 
+    // SAFETY: Certificate decompression borrows a valid native input for the duration of the synchronous callback.
     let Some(input_slice) = (unsafe { native_input(input, input_len) }) else {
         return 0;
     };
@@ -896,6 +919,7 @@ where
         return 0;
     };
 
+    // SAFETY: The native decompression callback provides a uniquely writable pointer-to-buffer output slot.
     unsafe { out.write(crypto_buffer) };
     1
 }
@@ -904,12 +928,13 @@ struct CryptoByteBuilder<'a>(*mut ffi::CBB, std::marker::PhantomData<&'a [u8]>);
 
 impl CryptoByteBuilder<'_> {
     fn from_ptr(ptr: *mut ffi::CBB) -> Self {
-        Self(ptr, Default::default())
+        Self(ptr, std::marker::PhantomData::default())
     }
 }
 
 impl std::io::Write for CryptoByteBuilder<'_> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // SAFETY: The native CBB remains live and exclusively borrowed while writing the initialized Rust byte slice.
         let success = unsafe { ffi::CBB_add_bytes(self.0, buf.as_ptr(), buf.len()) == 1 };
         if !success {
             return Err(std::io::Error::other("CBB_add_bytes failed"));
@@ -918,6 +943,7 @@ impl std::io::Write for CryptoByteBuilder<'_> {
     }
 
     fn flush(&mut self) -> std::io::Result<()> {
+        // SAFETY: The native CBB remains live and exclusively borrowed while flushing its pending bytes.
         let success = unsafe { ffi::CBB_flush(self.0) == 1 };
         if !success {
             return Err(std::io::Error::other("CBB_flush failed"));
