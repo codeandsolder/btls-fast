@@ -214,16 +214,6 @@ impl Error {
         (self.library_code() == library_code.0 as c_int).then_some(self.reason_code())
     }
 
-    /// Returns a raw OpenSSL **packed** error code for this error, which **can't be reliably compared to any error constant**.
-    ///
-    /// Use [`Error::library_code()`] and [`Error::library_reason()`] instead.
-    /// Packed error codes are different than [SSL error codes](crate::ssl::ErrorCode).
-    #[must_use = "Use the returned diagnostic information to handle or report the result."]
-    #[deprecated(note = "use library_reason() to compare error codes")]
-    pub const fn code(&self) -> c_uint {
-        self.code
-    }
-
     /// Returns the name of the library reporting the error, if available.
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn library(&self) -> Option<&'static str> {

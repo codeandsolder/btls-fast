@@ -468,18 +468,18 @@ impl RsaPrivateKeyBuilder {
     #[corresponds(RSA_set0_crt_params)]
     pub fn set_crt_params(
         self,
-        dmp1: BigNum,
-        dmq1: BigNum,
-        iqmp: BigNum,
+        exponent_p: BigNum,
+        exponent_q: BigNum,
+        inverse_q: BigNum,
     ) -> Result<Self, ErrorStack> {
         unsafe {
             cvt(RSA_set0_crt_params(
                 self.rsa.as_ptr(),
-                dmp1.as_ptr(),
-                dmq1.as_ptr(),
-                iqmp.as_ptr(),
+                exponent_p.as_ptr(),
+                exponent_q.as_ptr(),
+                inverse_q.as_ptr(),
             ))?;
-            mem::forget((dmp1, dmq1, iqmp));
+            mem::forget((exponent_p, exponent_q, inverse_q));
         }
         Ok(self)
     }

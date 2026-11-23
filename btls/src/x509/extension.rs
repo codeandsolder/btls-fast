@@ -482,26 +482,6 @@ impl SubjectAlternativeName {
         self
     }
 
-    /// Sets the `dirName` flag.
-    ///
-    /// Not currently actually supported, always panics.
-    #[deprecated = "dir_name is deprecated and always panics. Please file a bug if you have a use case for this."]
-    pub fn dir_name(&mut self, _dir_name: &str) -> &mut Self {
-        unimplemented!(
-            "This has not yet been adapted for the new internals. File a bug if you need this."
-        );
-    }
-
-    /// Sets the `otherName` flag.
-    ///
-    /// Not currently actually supported, always panics.
-    #[deprecated = "other_name is deprecated and always panics. Please file a bug if you have a use case for this."]
-    pub fn other_name(&mut self, _other_name: &str) -> &mut Self {
-        unimplemented!(
-            "This has not yet been adapted for the new internals. File a bug if you need this."
-        );
-    }
-
     /// Return a `SubjectAlternativeName` extension as an `X509Extension`.
     pub fn build(&self, _ctx: &X509v3Context<'_>) -> Result<X509Extension, ErrorStack> {
         let mut stack = Stack::new()?;

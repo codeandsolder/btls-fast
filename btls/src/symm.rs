@@ -98,12 +98,12 @@ impl CipherCtxRef {
         };
         let iv = match (iv, cipher.iv_len()) {
             (Some(iv), Some(_)) if !iv.is_empty() => iv,
-            (None, Some(_)) | (Some(_), Some(_)) => {
+            (None | Some(_), Some(_)) => {
                 return Err(ErrorStack::internal_error_str(
                     "cipher requires a nonempty IV",
                 ));
             }
-            (None, None) | (Some([]), None) => &[],
+            (None | Some([]), None) => &[],
             (Some(_), None) => {
                 return Err(ErrorStack::internal_error_str("cipher does not use an IV"))
             }
