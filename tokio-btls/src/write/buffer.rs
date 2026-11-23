@@ -102,7 +102,7 @@ impl WriteBuffer {
 
     /// Whether buffered ciphertext has reached `WRITE_BUF_CAPACITY`.
     #[inline]
-    pub(crate) fn is_full(&self) -> bool {
+    pub(crate) const fn is_full(&self) -> bool {
         self.len() >= WRITE_BUF_CAPACITY
     }
 
