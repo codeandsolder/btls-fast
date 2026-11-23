@@ -184,7 +184,7 @@ impl<'a> EchGreaseSizeInfo<'a> {
     ///
     /// The payload is 128, 160, 192 or 224 bytes plus the AEAD tag, chosen
     /// uniformly, and `enc` is an X25519 public key. Pass
-    /// [`default_aead`](Self::default_aead) to keep BoringSSL's choice, which
+    /// [`default_aead`](Self::default_aead) to keep `BoringSSL`'s choice, which
     /// depends on AES hardware, or a fixed AEAD to advertise the same one on
     /// every host. Fails if the length exceeds
     /// [`max_payload_length`](Self::max_payload_length).

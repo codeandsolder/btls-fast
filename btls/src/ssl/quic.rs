@@ -121,6 +121,8 @@ impl SslContextBuilder {
         )?;
         // A promoted constant, so the table lives for the whole program.
         let table: &'static ffi::SSL_QUIC_METHOD = &QuicMethodTable::<M>::METHOD;
+        // SAFETY: the native context is uniquely borrowed; it retains only
+        // the static function table, and the callback state lives in ex-data.
         unsafe { cvt(ffi::SSL_CTX_set_quic_method(self.as_ptr(), table)) }
     }
 }
@@ -137,6 +139,7 @@ impl Ssl {
     /// ```
     #[corresponds(SSL_set_connect_state)]
     pub fn set_connect_state(&mut self) {
+        // SAFETY: only the owner of this connection may change its role.
         unsafe { ffi::SSL_set_connect_state(self.as_ptr()) }
     }
 
@@ -151,6 +154,7 @@ impl Ssl {
     /// ```
     #[corresponds(SSL_set_accept_state)]
     pub fn set_accept_state(&mut self) {
+        // SAFETY: only the owner of this connection may change its role.
         unsafe { ffi::SSL_set_accept_state(self.as_ptr()) }
     }
 
@@ -168,7 +172,12 @@ impl Ssl {
     /// }
     /// ```
     #[corresponds(SSL_do_handshake)]
+    ///
+    /// # Errors
+    ///
+    /// The native handshake may need peer input or fail with an SSL error code.
     pub fn do_handshake(&mut self) -> Result<(), ErrorCode> {
+        // SAFETY: The owner drives the native handshake, and callback views cannot reenter it.
         let ret = unsafe { ffi::SSL_do_handshake(self.as_ptr()) };
         if ret == 1 {
             Ok(())
@@ -193,11 +202,16 @@ impl Ssl {
     /// }
     /// ```
     #[corresponds(SSL_provide_quic_data)]
+    ///
+    /// # Errors
+    ///
+    /// Native rejects invalid encryption levels, oversized input or invalid state.
     pub fn provide_quic_data(
         &mut self,
         level: QuicEncryptionLevel,
         data: &[u8],
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The owner uniquely holds SSL, and native borrows the data slice only during this call.
         unsafe {
             cvt(ffi::SSL_provide_quic_data(
                 self.as_ptr(),
@@ -220,7 +234,12 @@ impl Ssl {
     /// }
     /// ```
     #[corresponds(SSL_process_quic_post_handshake)]
+    ///
+    /// # Errors
+    ///
+    /// Native rejects malformed post-handshake input or invalid state.
     pub fn process_quic_post_handshake(&mut self) -> Result<(), ErrorCode> {
+        // SAFETY: The owner drives native post-handshake state, and callbacks cannot reenter it.
         let ret = unsafe { ffi::SSL_process_quic_post_handshake(self.as_ptr()) };
         if ret == 1 {
             Ok(())
@@ -234,7 +253,12 @@ impl SslRef {
     /// Sets the transport parameters this endpoint sends
     /// ([RFC 9001 §8.2](https://www.rfc-editor.org/rfc/rfc9001#section-8.2)).
     #[corresponds(SSL_set_quic_transport_params)]
+    ///
+    /// # Errors
+    ///
+    /// The native connection may reject the parameter bytes or current state.
     pub fn set_quic_transport_params(&mut self, params: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: Native copies this readable parameter slice during an exclusive SSL borrow.
         unsafe {
             cvt(ffi::SSL_set_quic_transport_params(
                 self.as_ptr(),
@@ -250,9 +274,11 @@ impl SslRef {
     pub fn peer_quic_transport_params(&self) -> Option<&[u8]> {
         let mut params = ptr::null();
         let mut len = 0;
+        // SAFETY: native returns a borrowed byte view into the live SSL
+        // session. A shared borrow prevents concurrent connection mutation.
         unsafe {
             ffi::SSL_get_peer_quic_transport_params(self.as_ptr(), &raw mut params, &raw mut len);
-            if len == 0 {
+            if len == 0 || params.is_null() {
                 None
             } else {
                 Some(slice::from_raw_parts(params, len))
@@ -264,6 +290,8 @@ impl SslRef {
     /// standard 57, for draft versions of QUIC.
     #[corresponds(SSL_set_quic_use_legacy_codepoint)]
     pub fn set_quic_use_legacy_codepoint(&mut self, use_legacy: bool) {
+        // SAFETY: the connection is exclusively borrowed, and bool converts
+        // infallibly to the C ABI integer flag.
         unsafe { ffi::SSL_set_quic_use_legacy_codepoint(self.as_ptr(), use_legacy.into()) }
     }
 
@@ -273,7 +301,12 @@ impl SslRef {
     /// ([RFC 9000 §7.4.1](https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1)). Without it,
     /// a QUIC server issues no tickets for 0-RTT.
     #[corresponds(SSL_set_quic_early_data_context)]
+    ///
+    /// # Errors
+    ///
+    /// The native connection may reject the early-data context or its state.
     pub fn set_quic_early_data_context(&mut self, context: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: The connection is exclusive and native copies the readable context slice.
         unsafe {
             cvt(ffi::SSL_set_quic_early_data_context(
                 self.as_ptr(),
@@ -289,6 +322,7 @@ impl SslRef {
     #[corresponds(SSL_quic_read_level)]
     #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn quic_read_level(&self) -> QuicEncryptionLevel {
+        // SAFETY: The native QUIC session is live and shared-borrowed.
         QuicEncryptionLevel(unsafe { ffi::SSL_quic_read_level(self.as_ptr()) })
     }
 
@@ -298,6 +332,7 @@ impl SslRef {
     #[corresponds(SSL_quic_write_level)]
     #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn quic_write_level(&self) -> QuicEncryptionLevel {
+        // SAFETY: The native QUIC session is live and shared-borrowed.
         QuicEncryptionLevel(unsafe { ffi::SSL_quic_write_level(self.as_ptr()) })
     }
 
@@ -306,6 +341,7 @@ impl SslRef {
     #[corresponds(SSL_quic_max_handshake_flight_len)]
     #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn quic_max_handshake_flight_len(&self, level: QuicEncryptionLevel) -> usize {
+        // SAFETY: the native QUIC session stays borrowed for this size query.
         unsafe { ffi::SSL_quic_max_handshake_flight_len(self.as_ptr(), level.0) }
     }
 }
@@ -334,7 +370,7 @@ fn secret_result(ret: c_int) -> c_int {
         // SAFETY: the file name is a static C string.
         unsafe {
             ffi::ERR_put_error(
-                ffi::ERR_LIB_SSL.0 as c_int,
+                ffi::ERR_LIB_SSL.0.cast_signed(),
                 0,
                 ffi::SSL_R_QUIC_INTERNAL_ERROR,
                 concat!(file!(), "\0").as_ptr().cast(),
@@ -354,7 +390,13 @@ unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
 ) -> c_int {
     // SAFETY: BoringSSL passes the cipher suite and a secret of `secret_len` bytes.
     let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
-    let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
+    // A zero-length native buffer is permitted to have a null pointer.
+    let secret = if secret_len == 0 {
+        &[]
+    } else {
+        // SAFETY: the native callback keeps the reported bytes readable.
+        unsafe { slice::from_raw_parts(secret, secret_len) }
+    };
     secret_result(with_method::<M>(ssl, |method, ssl| {
         method.set_read_secret(ssl, QuicEncryptionLevel(level), cipher, secret)
     }))
@@ -369,7 +411,13 @@ unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
 ) -> c_int {
     // SAFETY: BoringSSL passes the cipher suite and a secret of `secret_len` bytes.
     let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
-    let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
+    // A zero-length native buffer is permitted to have a null pointer.
+    let secret = if secret_len == 0 {
+        &[]
+    } else {
+        // SAFETY: the native callback keeps the reported bytes readable.
+        unsafe { slice::from_raw_parts(secret, secret_len) }
+    };
     secret_result(with_method::<M>(ssl, |method, ssl| {
         method.set_write_secret(ssl, QuicEncryptionLevel(level), cipher, secret)
     }))
@@ -382,7 +430,13 @@ unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
     len: usize,
 ) -> c_int {
     // SAFETY: BoringSSL passes `len` bytes of handshake data.
-    let data = unsafe { slice::from_raw_parts(data, len) };
+    // A zero-length native buffer is permitted to have a null pointer.
+    let data = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: native keeps these reported handshake bytes readable.
+        unsafe { slice::from_raw_parts(data, len) }
+    };
     with_method::<M>(ssl, |method, ssl| {
         method.add_handshake_data(ssl, QuicEncryptionLevel(level), data)
     })

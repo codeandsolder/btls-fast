@@ -11,12 +11,12 @@
 // limitations under the License.
 //
 
-//! Version and build metadata from the pinned native BoringSSL library.
+//! Version and build metadata from the pinned native `BoringSSL` library.
 //!
-//! BoringSSL deliberately reports stable compatibility strings rather than
+//! `BoringSSL` deliberately reports stable compatibility strings rather than
 //! an OpenSSL release date or configure-time provenance.
 
-use std::ffi::{c_int, CStr};
+use std::ffi::{c_int, c_ulong, CStr};
 
 use crate::ffi::{
     OpenSSL_version, OpenSSL_version_num, OPENSSL_BUILT_ON, OPENSSL_CFLAGS, OPENSSL_DIR,
@@ -25,9 +25,9 @@ use crate::ffi::{
 
 /// Returns the native compatibility version identifier without signed truncation.
 #[must_use = "Use the returned native compatibility version for inspection or diagnostics."]
-pub fn number() -> u64 {
+pub fn number() -> c_ulong {
     // SAFETY: this native constant-returning function has no inputs.
-    u64::from(unsafe { OpenSSL_version_num() })
+    unsafe { OpenSSL_version_num() }
 }
 
 // The pinned native implementation returns static NUL-terminated UTF-8
@@ -45,7 +45,7 @@ fn native_version_info(selector: c_int) -> &'static str {
         .unwrap_or("invalid native version metadata")
 }
 
-/// Returns the native library name (BoringSSL in the pinned implementation).
+/// Returns the native library name (`BoringSSL` in the pinned implementation).
 #[must_use = "Use the returned library name for inspection or diagnostics."]
 pub fn version() -> &'static str {
     native_version_info(OPENSSL_VERSION)
