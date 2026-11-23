@@ -152,6 +152,14 @@ pub mod symm;
 pub mod version;
 pub mod x509;
 
+#[cfg(feature = "rpk")]
+const fn native_u8(value: c_int) -> u8 {
+    let [low, high0, high1, high2] = value.to_le_bytes();
+    // Native TLS certificate-type constants must fit without truncation.
+    assert!(high0 == 0 && high1 == 0 && high2 == 0);
+    low
+}
+
 const fn native_u16(value: c_int) -> u16 {
     let [low, high, upper_low, upper_high] = value.to_le_bytes();
     // These conversions occur only in compile-time native protocol constants.

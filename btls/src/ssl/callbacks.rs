@@ -933,7 +933,7 @@ where
 struct CryptoByteBuilder<'a>(*mut ffi::CBB, std::marker::PhantomData<&'a [u8]>);
 
 impl CryptoByteBuilder<'_> {
-    fn from_ptr(ptr: *mut ffi::CBB) -> Self {
+    const fn from_ptr(ptr: *mut ffi::CBB) -> Self {
         Self(ptr, std::marker::PhantomData)
     }
 }

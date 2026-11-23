@@ -397,7 +397,7 @@ where
     if ssl.version2() != Some(SslVersion::TLS1_3) || suite != Some(SUITE) {
         return Err(format!(
             "negotiated {} {}, expected TLSv1.3 {SUITE}",
-            ssl.version_str(),
+            ssl.version_str().unwrap_or("unknown protocol"),
             suite.unwrap_or("no cipher"),
         )
         .into());

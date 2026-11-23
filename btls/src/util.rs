@@ -111,7 +111,7 @@ where
 /// For every non-null pointer whose positive length fits in `isize`, the
 /// caller must guarantee that many readable bytes remain live and immutable
 /// for the returned lifetime. Invalid pairs are rejected before dereference.
-pub(crate) const unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+pub const unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
     if len == 0 {
         return Some(&[]);
     }

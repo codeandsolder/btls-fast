@@ -295,7 +295,7 @@ fn test_dtls_1_3_version() {
 
     // Also check version string
     let version_str = stream.ssl().version_str();
-    assert_eq!(version_str, "DTLSv1.3");
+    assert_eq!(version_str, Some("DTLSv1.3"));
 
     guard.join().unwrap();
 }
