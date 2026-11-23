@@ -94,7 +94,7 @@ fn signature_algorithm_ids(extension: &[u8]) -> Vec<u16> {
 
 // A fully local TLS 1.2 handshake tests the patch-owned legacy suites,
 // rather than depending on remote endpoints with changing availability.
-fn negotiate_legacy_cipher(cipher: &str, temporary_dh: bool) {
+fn negotiate_legacy_cipher(cipher: &str) {
     let mut server = Server::builder();
     server
         .ctx()
@@ -105,11 +105,6 @@ fn negotiate_legacy_cipher(cipher: &str, temporary_dh: bool) {
         .set_max_proto_version(Some(SslVersion::TLS1_2))
         .unwrap();
     server.ctx().set_cipher_list(cipher).unwrap();
-    if temporary_dh {
-        let group =
-            crate::dh::Dh::params_from_pem(include_bytes!("../../../test/dhparams.pem")).unwrap();
-        server.ctx().set_tmp_dh(&group).unwrap();
-    }
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -382,12 +377,90 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
 
 #[test]
 fn boringssl_patch_3des_negotiates_with_local_rsa_server() {
-    negotiate_legacy_cipher("TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA", false);
+    negotiate_legacy_cipher("TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA");
 }
 
+// The legacy DHE cipher patch adds a TLS 1.2 CLIENT key-exchange path.
+// Native SSL_CTX_set_tmp_dh is intentionally a no-op on BoringSSL's server,
+// so exercise that client against an isolated local OpenSSL server instead.
+// This Linux CI regression needs the OpenSSL command-line test dependency.
+#[cfg(target_os = "linux")]
 #[test]
-fn boringssl_patch_dh2048_negotiates_with_local_rsa_server() {
-    negotiate_legacy_cipher("TLS_DHE_RSA_WITH_AES_128_CBC_SHA256", true);
+fn boringssl_patch_dh2048_negotiates_against_local_openssl() {
+    use std::net::TcpListener;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct ServerProcess(Child);
+
+    impl Drop for ServerProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let address_string = address.to_string();
+
+    let child = Command::new("openssl")
+        .args([
+            "s_server",
+            "-accept",
+            &address_string,
+            "-cert",
+            "test/cert.pem",
+            "-key",
+            "test/key.pem",
+            "-dhparam",
+            "test/dhparams.pem",
+            "-cipher",
+            "DHE-RSA-AES128-SHA256",
+            "-tls1_2",
+            "-naccept",
+            "1",
+            "-quiet",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("OpenSSL s_server is a required Linux integration-test dependency");
+    let mut server = ServerProcess(child);
+
+    let started = Instant::now();
+    let socket = loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(150)) {
+            Ok(socket) => break socket,
+            Err(error) if started.elapsed() >= Duration::from_secs(5) => {
+                panic!(
+                    "local DHE server failed to accept TLS clients: {error}; process status: {:?}",
+                    server.0.try_wait()
+                );
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+
+    let cipher = "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256";
+    let mut connector = crate::ssl::SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    connector
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    connector
+        .set_max_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    connector.set_cipher_list(cipher).unwrap();
+
+    let stream = connector.build().connect("foobar.com", socket).unwrap();
+    assert_eq!(stream.ssl().version2(), Some(SslVersion::TLS1_2));
+    assert_eq!(
+        stream.ssl().current_cipher().unwrap().standard_name(),
+        Some(cipher)
+    );
 }
 
 #[test]
