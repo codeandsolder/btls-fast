@@ -185,7 +185,7 @@ impl Error {
                     Some(Self {
                         code,
                         file,
-                        line: line as c_uint,
+                        line: c_uint::try_from(line).unwrap_or_default(),
                         data,
                     })
                 }
@@ -220,7 +220,8 @@ impl Error {
     #[track_caller]
     pub fn library_reason(&self, library_code: ErrLib) -> Option<c_int> {
         debug_assert!(library_code.0 < ffi::ERR_NUM_LIBS.0);
-        (self.library_code() == library_code.0 as c_int).then_some(self.reason_code())
+        let native_code = c_int::try_from(library_code.0).ok()?;
+        (self.library_code() == native_code).then_some(self.reason_code())
     }
 
     /// Returns the name of the library reporting the error, if available.
@@ -249,11 +250,6 @@ impl Error {
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn library_code(&self) -> c_int {
         ffi::ERR_GET_LIB(self.code)
-    }
-
-    /// Returns `None`. Boring doesn't use function codes.
-    pub const fn function(&self) -> Option<&'static str> {
-        None
     }
 
     /// Returns the reason for the error.

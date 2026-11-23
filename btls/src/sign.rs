@@ -284,8 +284,15 @@ impl Signer<'_> {
     ///
     /// The actual signature may be shorter than this value. Check the return value of
     /// `sign` to get the exact length.
+    ///
+    /// # Errors
+    ///
+    /// Native signature initialization or capacity calculation fails.
     #[corresponds(EVP_DigestSignFinal)]
     pub fn signature_capacity(&mut self) -> Result<usize, ErrorStack> {
+        // SAFETY: this signer exclusively owns a live digest context. The
+        // native call queries the capacity through a writable size slot and
+        // receives null output/data pointers as permitted for this query.
         unsafe {
             let mut len = 0;
             cvt(ffi::EVP_DigestSign(
@@ -303,8 +310,14 @@ impl Signer<'_> {
     ///
     /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
+    ///
+    /// # Errors
+    ///
+    /// The supplied buffer is too small or native signing fails.
     #[corresponds(EVP_DigestSignFinal)]
     pub fn sign(&mut self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
+        // SAFETY: the signer exclusively owns its live digest context; the
+        // output buffer and its writable length slot remain valid for the call.
         unsafe {
             let mut len = buf.len();
             cvt(ffi::EVP_DigestSignFinal(
@@ -319,6 +332,10 @@ impl Signer<'_> {
     /// Returns the signature.
     ///
     /// This is a simple convenience wrapper over `signature_capacity` and `sign`.
+    ///
+    /// # Errors
+    ///
+    /// Capacity calculation or native signing fails.
     pub fn sign_to_vec(&mut self) -> Result<Vec<u8>, ErrorStack> {
         let mut buf = vec![0; self.signature_capacity()?];
         let len = self.sign(&mut buf)?;
@@ -334,12 +351,18 @@ impl Signer<'_> {
     ///
     /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
+    ///
+    /// # Errors
+    ///
+    /// The output is too small or the native one-shot signing operation fails.
     #[corresponds(EVP_DigestSign)]
     pub fn sign_oneshot(
         &mut self,
         sig_buf: &mut [u8],
         data_buf: &[u8],
     ) -> Result<usize, ErrorStack> {
+        // SAFETY: this signer owns the native digest context exclusively;
+        // both input and writable output slices stay live with exact lengths.
         unsafe {
             let mut sig_len = sig_buf.len();
             cvt(ffi::EVP_DigestSign(
@@ -356,6 +379,10 @@ impl Signer<'_> {
     /// Returns the signature.
     ///
     /// This is a simple convenience wrapper over `signature_capacity` and `sign_oneshot`.
+    ///
+    /// # Errors
+    ///
+    /// Capacity calculation or native one-shot signing fails.
     pub fn sign_oneshot_to_vec(&mut self, data_buf: &[u8]) -> Result<Vec<u8>, ErrorStack> {
         let mut sig_buf = vec![0; self.signature_capacity()?];
         let len = self.sign_oneshot(&mut sig_buf, data_buf)?;
@@ -367,8 +394,14 @@ impl Signer<'_> {
 
 impl Verifier<'_> {
     /// Determines if the data fed into the `Verifier` matches the provided signature.
+    ///
+    /// # Errors
+    ///
+    /// Native verification fails for reasons other than a signature mismatch.
     #[corresponds(EVP_DigestVerifyFinal)]
     pub fn verify(&mut self, signature: &[u8]) -> Result<bool, ErrorStack> {
+        // SAFETY: the native verification context remains live and uniquely
+        // borrowed; signature bytes remain readable for the synchronous call.
         unsafe {
             let r = ffi::EVP_DigestVerifyFinal(self.md_ctx, signature.as_ptr(), signature.len());
             match r {
@@ -383,8 +416,14 @@ impl Verifier<'_> {
     }
 
     /// Determines if the data given in buf matches the provided signature.
+    ///
+    /// # Errors
+    ///
+    /// Native verification fails for reasons other than a signature mismatch.
     #[corresponds(EVP_DigestVerify)]
     pub fn verify_oneshot(&mut self, signature: &[u8], buf: &[u8]) -> Result<bool, ErrorStack> {
+        // SAFETY: both borrowed slices and the exclusive native verification
+        // context stay valid until BoringSSL returns its checked status code.
         unsafe {
             let r = ffi::EVP_DigestVerify(
                 self.md_ctx,
