@@ -182,7 +182,7 @@ impl Hasher {
                     self.ctx,
                     self.digest.as_ptr(),
                     ptr::null_mut(),
-                ))?
+                ))?;
             };
             self.finalized = false;
         }

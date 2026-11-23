@@ -85,7 +85,7 @@ impl Hmac {
                 self.0.as_ptr(),
                 out.as_mut_ptr(),
                 &raw mut len,
-            ))?
+            ))?;
         };
         if usize::try_from(len).map_err(ErrorStack::internal_error)? != expected {
             return Err(ErrorStack::internal_error_str(

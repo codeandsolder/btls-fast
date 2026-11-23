@@ -201,6 +201,10 @@ pub struct StackRef<T: Stackable>(Opaque, PhantomData<fn() -> T>);
 
 // SAFETY: StackRef exposes only shared element references, which must support
 // concurrent access when the stack reference moves between threads.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "Opaque deliberately blocks auto-Send; native stack access remains shared and requires Sync elements"
+)]
 unsafe impl<T: Stackable> Send for StackRef<T> where T::Ref: Sync {}
 // SAFETY: all safe access to a borrowed native stack is read-only.
 unsafe impl<T: Stackable> Sync for StackRef<T> where T::Ref: Sync {}
@@ -286,10 +290,7 @@ impl<'a, T: Stackable> IntoIterator for &'a Stack<T> {
 }
 
 /// An iterator over the stack's contents.
-pub struct Iter<'a, T: Stackable>
-where
-    T: 'a,
-{
+pub struct Iter<'a, T: Stackable> {
     stack: &'a StackRef<T>,
     idxs: Range<size_t>,
 }

@@ -89,7 +89,7 @@ impl BasicConstraints {
     }
 }
 
-/// Flags that select individual X.509 KeyUsage bits without storing a separate
+/// Flags that select individual X.509 `KeyUsage` bits without storing a separate
 /// boolean for each possible usage.
 #[repr(u16)]
 #[derive(Clone, Copy)]

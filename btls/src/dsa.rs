@@ -211,7 +211,7 @@ impl Dsa<Params> {
                 self.as_ptr(),
                 public.as_ptr(),
                 private_ptr,
-            ))?
+            ))?;
         };
         mem::forget((public, private));
         Ok(())

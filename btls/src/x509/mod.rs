@@ -162,6 +162,10 @@ impl X509StoreContextRef {
     ///
     /// The native container cannot allocate the slot.
     #[corresponds(X509_STORE_CTX_set_ex_data)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the native extra-data setter mutates the context; exclusive access is required"
+    )]
     pub fn set_ex_data<T: 'static + Send + Sync>(
         &mut self,
         index: Index<X509StoreContext, T>,
@@ -246,6 +250,10 @@ impl X509StoreContext {
     /// * `cert` - The certificate that should be verified.
     /// * `cert_chain` - The certificates chain.
     #[corresponds(X509_STORE_CTX_init)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the native context is reinitialized in place and must be exclusively borrowed"
+    )]
     pub fn reset_with_context_data(
         &mut self,
         trust: store::X509Store,
@@ -533,7 +541,7 @@ impl X509Builder {
         unsafe {
             let mut ctx = mem::zeroed();
 
-            let issuer = issuer.map_or(self.0.as_ptr(), ForeignTypeRef::as_ptr);
+            let issuer = issuer.map_or_else(|| self.0.as_ptr(), ForeignTypeRef::as_ptr);
             let subject = self.0.as_ptr();
             ffi::X509V3_set_ctx(
                 &raw mut ctx,
@@ -1021,26 +1029,25 @@ impl X509Extension {
     ) -> Result<Self, ErrorStack> {
         let name = CString::new(name).map_err(ErrorStack::internal_error)?;
         let value = CString::new(value).map_err(ErrorStack::internal_error)?;
-        let mut ctx;
         // SAFETY: The input strings are owned NUL-terminated buffers and the initialized native context lives until extension construction returns.
         unsafe {
             ffi::init();
+            let mut ctx = mem::zeroed();
             let conf = conf.map_or(ptr::null_mut(), ConfRef::as_ptr);
-            let context_ptr = if let Some(c) = context {
-                c.as_ptr()
-            } else {
-                ctx = mem::zeroed();
-
-                ffi::X509V3_set_ctx(
-                    &raw mut ctx,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                );
-                &raw mut ctx
-            };
+            let context_ptr = context.map_or_else(
+                || {
+                    ffi::X509V3_set_ctx(
+                        &raw mut ctx,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        0,
+                    );
+                    &raw mut ctx
+                },
+                X509v3Context::as_ptr,
+            );
             let name = name.as_ptr().cast_mut();
             let value = value.as_ptr().cast_mut();
 
@@ -1069,26 +1076,25 @@ impl X509Extension {
         value: &str,
     ) -> Result<Self, ErrorStack> {
         let value = CString::new(value).map_err(ErrorStack::internal_error)?;
-        let mut ctx;
         // SAFETY: The input string is owned and NUL-terminated, while the native configuration/context pointers are valid during parsing.
         unsafe {
             ffi::init();
+            let mut ctx = mem::zeroed();
             let conf = conf.map_or(ptr::null_mut(), ConfRef::as_ptr);
-            let context_ptr = if let Some(c) = context {
-                c.as_ptr()
-            } else {
-                ctx = mem::zeroed();
-
-                ffi::X509V3_set_ctx(
-                    &raw mut ctx,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    0,
-                );
-                &raw mut ctx
-            };
+            let context_ptr = context.map_or_else(
+                || {
+                    ffi::X509V3_set_ctx(
+                        &raw mut ctx,
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        ptr::null_mut(),
+                        0,
+                    );
+                    &raw mut ctx
+                },
+                X509v3Context::as_ptr,
+            );
             let name = name.as_raw();
             let value = value.as_ptr().cast_mut();
 

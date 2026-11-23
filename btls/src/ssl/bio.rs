@@ -119,10 +119,10 @@ pub unsafe fn take_stream<S>(bio: *mut BIO) -> S {
     // SAFETY: This call consumes a constructed stream, so its state is live
     // and has not been detached.
     let state = unsafe { detach_state::<S>(bio) };
-    match state {
-        Some(state) => state.stream,
-        None => unreachable!("a live SslStream owns an attached BIO state"),
-    }
+    state.map_or_else(
+        || unreachable!("a live SslStream owns an attached BIO state"),
+        |state| state.stream,
+    )
 }
 
 // Returns a raw pointer without manufacturing a reference at the FFI boundary.

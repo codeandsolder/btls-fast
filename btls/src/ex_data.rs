@@ -11,7 +11,9 @@ use std::sync::{Mutex, OnceLock};
 ///
 /// It is parameterized over the type containing the extra data as well as the
 /// type of the data in the slot.
-pub struct Index<T, U>(c_int, PhantomData<fn(T, U) -> (T, U)>);
+// These two invariant function markers prohibit reinterpreting a native
+// owner/slot index across type or lifetime substitutions.
+pub struct Index<T, U>(c_int, PhantomData<fn(T) -> T>, PhantomData<fn(U) -> U>);
 
 impl<T, U> Copy for Index<T, U> {}
 
@@ -31,7 +33,7 @@ impl<T, U> Index<T, U> {
     /// borrowed-pointer slots must not be represented as owned indices.
     #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub const unsafe fn from_raw(idx: c_int) -> Self {
-        Self(idx, PhantomData)
+        Self(idx, PhantomData, PhantomData)
     }
 
     #[must_use = "The returned native representation is needed by the caller."]
@@ -107,6 +109,7 @@ impl<O, K: Copy + Eq + Hash> IndexRegistry<O, K> {
             std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
             std::collections::hash_map::Entry::Vacant(entry) => *entry.insert(allocate()?.as_raw()),
         };
+        drop(indices);
         // SAFETY: this key is inserted only by the allocator of the exact
         // owner/type pair. The role further distinguishes callback slots.
         Ok(unsafe { Index::from_raw(idx) })
@@ -118,6 +121,7 @@ impl<O, K: Copy + Eq + Hash> IndexRegistry<O, K> {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let &idx = indices.get(&(role, TypeId::of::<T>()))?;
+        drop(indices);
         // SAFETY: register establishes the exact native owner and boxed type.
         Some(unsafe { Index::from_raw(idx) })
     }

@@ -38,7 +38,7 @@ impl Conf {
     ///
     /// # Errors
     ///
-    /// Returns the native error stack if BoringSSL cannot allocate a parser.
+    /// Returns the native error stack if `BoringSSL` cannot allocate a parser.
     pub fn new(method: ConfMethod) -> Result<Self, ErrorStack> {
         // SAFETY: the configuration method is a native handle supplied by the caller.
         // `NCONF_new` returns an owned `CONF` or a null pointer, checked by `cvt_p`.
