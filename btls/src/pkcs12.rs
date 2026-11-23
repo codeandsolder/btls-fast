@@ -308,7 +308,7 @@ mod test {
         let mut name = X509Name::builder().unwrap();
         name.append_entry_by_nid(Nid::COMMONNAME, subject_name)
             .unwrap();
-        let name = name.build();
+        let name = name.build().unwrap();
 
         let key_usage = KeyUsage::new().digital_signature().build().unwrap();
 

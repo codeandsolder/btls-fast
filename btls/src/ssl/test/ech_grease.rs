@@ -695,9 +695,11 @@ fn ech_connector_policy_uses_per_connection_host_length() {
         .set_serial_number(fixture.serial_number())
         .unwrap();
     certificate
-        .set_subject_name(fixture.subject_name())
+        .set_subject_name(fixture.subject_name().unwrap())
         .unwrap();
-    certificate.set_issuer_name(fixture.subject_name()).unwrap();
+    certificate
+        .set_issuer_name(fixture.subject_name().unwrap())
+        .unwrap();
     certificate.set_not_before(fixture.not_before()).unwrap();
     certificate.set_not_after(fixture.not_after()).unwrap();
     certificate.set_pubkey(&key).unwrap();

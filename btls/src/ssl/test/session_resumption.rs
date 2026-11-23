@@ -248,13 +248,13 @@ fn client_session_is_not_offered_after_its_chain_expires() {
     let ca_key = PKey::private_key_from_pem(&fs::read("test/root-ca.key").unwrap()).unwrap();
     let mut name = X509Name::builder().unwrap();
     name.append_entry_by_text("CN", "foobar.com").unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
     let mut leaf = X509::builder().unwrap();
     leaf.set_version(2).unwrap();
     let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
     leaf.set_serial_number(&serial).unwrap();
     leaf.set_subject_name(&name).unwrap();
-    leaf.set_issuer_name(ca.subject_name()).unwrap();
+    leaf.set_issuer_name(ca.subject_name().unwrap()).unwrap();
     leaf.set_pubkey(&key).unwrap();
     leaf.set_not_before(&Asn1Time::from_unix(now - 2 * day).unwrap())
         .unwrap();

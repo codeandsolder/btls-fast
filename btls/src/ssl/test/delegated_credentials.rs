@@ -83,7 +83,7 @@ fn make_delegation_certificate(now: i64) -> (PKey<Private>, X509) {
     let mut name = X509NameBuilder::new().unwrap();
     name.append_entry_by_text("CN", "delegated-credential.test")
         .unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
 
     let mut certificate = X509::builder().unwrap();
     certificate.set_version(2).unwrap();

@@ -20,7 +20,7 @@
 //!
 //! name.append_entry_by_nid(Nid::COMMONNAME, "foobar.com").unwrap();
 //!
-//! let name = name.build();
+//! let name = name.build().unwrap();
 //! let mut builder = X509::builder().unwrap();
 //!
 //! // Sep 27th, 2016
@@ -62,7 +62,13 @@ impl X509StoreBuilder {
     /// Returns a builder for a certificate store.
     ///
     /// The store is initially empty.
+    ///
+    /// # Errors
+    ///
+    /// Native certificate-store allocation fails.
     pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: the native constructor returns an owned store pointer or
+        // null; `cvt_p` checks the allocation before ownership transfer.
         unsafe {
             ffi::init();
 
@@ -79,9 +85,15 @@ impl X509StoreBuilder {
 
 impl X509StoreBuilderRef {
     /// Adds a certificate to the certificate store.
+    ///
+    /// # Errors
+    ///
+    /// The native store cannot retain the certificate (including duplicates).
     #[corresponds(X509_STORE_add_cert)]
     pub fn add_cert(&mut self, cert: impl AsRef<X509Ref>) -> Result<(), ErrorStack> {
         let cert = cert.as_ref();
+        // SAFETY: both the exclusively borrowed store and the certificate are
+        // live; native insertion retains its own certificate reference.
         unsafe { cvt(ffi::X509_STORE_add_cert(self.as_ptr(), cert.as_ptr())) }
     }
 
@@ -90,8 +102,14 @@ impl X509StoreBuilderRef {
     /// These locations are read from the `SSL_CERT_FILE` and `SSL_CERT_DIR`
     /// environment variables if present, or defaults specified at OpenSSL
     /// build time otherwise.
+    ///
+    /// # Errors
+    ///
+    /// Native trust-path initialization fails.
     #[corresponds(X509_STORE_set_default_paths)]
     pub fn set_default_paths(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: the native store is exclusively borrowed while its trust
+        // path configuration is updated synchronously.
         unsafe { cvt(ffi::X509_STORE_set_default_paths(self.as_ptr())) }
     }
 
@@ -109,17 +127,29 @@ impl X509StoreBuilderRef {
     /// Returns a mutable reference to the X509 verification configuration.
     #[corresponds(X509_STORE_get0_param)]
     pub fn verify_param_mut(&mut self) -> &mut X509VerifyParamRef {
+        // SAFETY: the owned store keeps an initialized verification parameter
+        // alive, and the mutable store borrow guarantees exclusive access.
         unsafe { X509VerifyParamRef::from_ptr_mut(ffi::X509_STORE_get0_param(self.as_ptr())) }
     }
 
     /// Sets certificate chain validation related parameters.
+    ///
+    /// # Errors
+    ///
+    /// Native verification-parameter copying fails.
     #[corresponds(X509_STORE_set1_param)]
     pub fn set_param(&mut self, param: &X509VerifyParamRef) -> Result<(), ErrorStack> {
+        // SAFETY: the native store and borrowed parameters remain live while
+        // the native setter takes its own copy.
         unsafe { cvt(ffi::X509_STORE_set1_param(self.as_ptr(), param.as_ptr())) }
     }
 
     /// Returns an owned snapshot of the certificates and CRLs currently cached.
     /// Subsequent native cache mutations do not invalidate this snapshot.
+    ///
+    /// # Errors
+    ///
+    /// The native store cannot allocate the owned snapshot.
     pub fn objects(&self) -> Result<Stack<X509Object>, ErrorStack> {
         snapshot_objects(self.as_ptr())
     }
@@ -142,6 +172,8 @@ impl ToOwned for X509StoreRef {
     type Owned = X509Store;
 
     fn to_owned(&self) -> X509Store {
+        // SAFETY: the borrowed store remains live; increment the native
+        // reference count before creating another owning wrapper.
         unsafe {
             ffi::X509_STORE_up_ref(self.as_ptr());
             X509Store::from_ptr(self.as_ptr())
@@ -158,6 +190,10 @@ impl Clone for X509Store {
 impl X509StoreRef {
     /// Returns an owned snapshot of the certificates and CRLs currently cached.
     /// The snapshot is independent of later native cache mutations and store destruction.
+    ///
+    /// # Errors
+    ///
+    /// The native store cannot allocate the owned snapshot.
     #[corresponds(X509_STORE_get1_objects)]
     pub fn objects(&self) -> Result<Stack<X509Object>, ErrorStack> {
         snapshot_objects(self.as_ptr())

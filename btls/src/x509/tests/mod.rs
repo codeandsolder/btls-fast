@@ -82,7 +82,7 @@ fn test_save_der() {
 fn test_subject_read_cn() {
     let cert = include_bytes!("../../../test/cert.pem");
     let cert = X509::from_pem(cert).unwrap();
-    let subject = cert.subject_name();
+    let subject = cert.subject_name().unwrap();
     let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();
     assert_eq!(cn.data().as_slice(), b"foobar.com");
 }
@@ -91,7 +91,7 @@ fn test_subject_read_cn() {
 fn test_nid_values() {
     let cert = include_bytes!("../../../test/nid_test_cert.pem");
     let cert = X509::from_pem(cert).unwrap();
-    let subject = cert.subject_name();
+    let subject = cert.subject_name().unwrap();
 
     let cn = subject.entries_by_nid(Nid::COMMONNAME).next().unwrap();
     assert_eq!(cn.data().as_slice(), b"example.com");
@@ -110,7 +110,7 @@ fn test_nid_values() {
 fn test_nameref_iterator() {
     let cert = include_bytes!("../../../test/nid_test_cert.pem");
     let cert = X509::from_pem(cert).unwrap();
-    let subject = cert.subject_name();
+    let subject = cert.subject_name().unwrap();
     let mut all_entries = subject.entries();
 
     let email = all_entries.next().unwrap();
@@ -137,7 +137,7 @@ fn test_nameref_iterator() {
 fn test_nid_uid_value() {
     let cert = include_bytes!("../../../test/nid_uid_test_cert.pem");
     let cert = X509::from_pem(cert).unwrap();
-    let subject = cert.subject_name();
+    let subject = cert.subject_name().unwrap();
 
     let cn = subject.entries_by_nid(Nid::USERID).next().unwrap();
     assert_eq!(cn.data().as_slice(), b"this is the userId");
@@ -251,6 +251,7 @@ fn test_x509_name_print_ex() {
 
     let name_no_flags = cert
         .subject_name()
+        .unwrap()
         .print_ex(0)
         .expect("failed to print cert subject name");
     assert_eq!(
@@ -260,6 +261,7 @@ fn test_x509_name_print_ex() {
 
     let name_rfc2253 = cert
         .subject_name()
+        .unwrap()
         .print_ex(ffi::XN_FLAG_RFC2253)
         .expect("failed to print cert subject name");
     assert_eq!(
@@ -275,7 +277,7 @@ fn x509_builder() {
     let mut name = X509Name::builder().unwrap();
     name.append_entry_by_nid(Nid::COMMONNAME, "foobar.com")
         .unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
 
     let mut builder = X509::builder().unwrap();
     builder.set_version(2).unwrap();
@@ -336,6 +338,7 @@ fn x509_builder() {
 
     let cn = x509
         .subject_name()
+        .unwrap()
         .entries_by_nid(Nid::COMMONNAME)
         .next()
         .unwrap();
@@ -404,7 +407,7 @@ fn x509_req_builder() {
     let mut name = X509Name::builder().unwrap();
     name.append_entry_by_nid(Nid::COMMONNAME, "foobar.com")
         .unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
 
     let mut builder = X509Req::builder().unwrap();
     builder.set_version(0).unwrap();
@@ -574,7 +577,7 @@ fn test_save_subject_der() {
     let cert = include_bytes!("../../../test/cert.pem");
     let cert = X509::from_pem(cert).unwrap();
 
-    let der = cert.subject_name().to_der().unwrap();
+    let der = cert.subject_name().unwrap().to_der().unwrap();
     println!("der: {der:?}");
     assert!(!der.is_empty());
 }
