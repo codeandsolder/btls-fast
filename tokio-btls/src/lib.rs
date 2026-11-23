@@ -1,4 +1,4 @@
-//! Async TLS streams backed by BoringSSL.
+//! Async TLS streams backed by `BoringSSL`.
 //!
 //! This crate wraps the [`btls`] crate's [`SslStream`](ssl::SslStream) type so that it works
 //! with [`tokio`]'s [`AsyncRead`] and [`AsyncWrite`] traits rather than std's blocking
@@ -45,6 +45,10 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
     #[inline]
     /// Like [`SslStream::new`](ssl::SslStream::new), but also enables
     /// [`SslMode::ENABLE_PARTIAL_WRITE`] on `ssl`.
+    ///
+    /// # Errors
+    ///
+    /// Native BIO or TLS stream initialization fails.
     pub fn new(mut ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
         // Allow `SSL_write` to return after one plaintext fragment.
         ssl.set_mode(SslMode::ENABLE_PARTIAL_WRITE);
@@ -62,6 +66,10 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
 
     #[inline]
     /// A convenience method wrapping [`poll_connect`](Self::poll_connect).
+    ///
+    /// # Errors
+    ///
+    /// The TLS handshake fails or requires transport I/O that cannot complete.
     pub async fn connect(mut self: Pin<&mut Self>) -> Result<(), ssl::Error> {
         future::poll_fn(|cx| self.as_mut().poll_connect(cx)).await
     }
@@ -74,6 +82,10 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
 
     #[inline]
     /// A convenience method wrapping [`poll_accept`](Self::poll_accept).
+    ///
+    /// # Errors
+    ///
+    /// The TLS handshake fails or requires transport I/O that cannot complete.
     pub async fn accept(mut self: Pin<&mut Self>) -> Result<(), ssl::Error> {
         future::poll_fn(|cx| self.as_mut().poll_accept(cx)).await
     }
@@ -89,6 +101,10 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
 
     #[inline]
     /// A convenience method wrapping [`poll_do_handshake`](Self::poll_do_handshake).
+    ///
+    /// # Errors
+    ///
+    /// The TLS handshake fails or requires transport I/O that cannot complete.
     pub async fn do_handshake(mut self: Pin<&mut Self>) -> Result<(), ssl::Error> {
         future::poll_fn(|cx| self.as_mut().poll_do_handshake(cx)).await
     }
@@ -97,6 +113,7 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
 impl<S> SslStream<S> {
     #[inline]
     /// Returns a shared reference to the `Ssl` object associated with this stream.
+    #[must_use = "Inspect the live SSL connection or its negotiated state."]
     pub fn ssl(&self) -> &SslRef {
         self.0.ssl()
     }
@@ -106,6 +123,7 @@ impl<S> SslStream<S> {
     ///
     /// Its readiness (for example `readable()`) does not reflect ciphertext that has already been
     /// buffered.
+    #[must_use = "Use the borrowed underlying transport for inspection."]
     pub fn get_ref(&self) -> &S {
         &self.0.get_ref().transport.stream
     }
@@ -123,6 +141,7 @@ impl<S> SslStream<S> {
     /// Returns a pinned mutable reference to the underlying stream.
     ///
     /// The same buffering caveats as [`get_mut`](Self::get_mut) apply.
+    #[must_use = "Use the pinned transport to drive asynchronous I/O."]
     pub fn get_pin_mut(self: Pin<&mut Self>) -> Pin<&mut S> {
         // SAFETY: the stream is structurally pinned; it is never moved out of a pinned `SslStream`.
         unsafe { Pin::new_unchecked(&mut self.get_unchecked_mut().0.get_mut().transport.stream) }
@@ -234,7 +253,7 @@ where
         if !self.0.get_ref().shutdown_sent {
             ready!(self.as_mut().with_context(ctx, |s| {
                 match s.shutdown() {
-                    Ok(ShutdownResult::Sent) | Ok(ShutdownResult::Received) => {}
+                    Ok(ShutdownResult::Sent | ShutdownResult::Received) => {}
                     Err(ref e) if e.code() == ErrorCode::ZERO_RETURN => {}
                     // A fatal alert already closed the write side; flush it and close the transport.
                     Err(ref e) if closed_by_alert(e) => {}

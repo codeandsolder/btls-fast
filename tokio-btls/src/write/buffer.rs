@@ -13,7 +13,7 @@ use crate::transport::Transport;
 /// advance `pos` instead of shifting the rest; appends drop the written prefix through
 /// [`make_room`](Self::make_room).
 #[derive(Default)]
-pub(crate) struct WriteBuffer {
+pub struct WriteBuffer {
     bytes: Vec<u8>,
     // `bytes[..pos]` is written. `pos < bytes.len()` unless both are 0.
     pos: usize,
@@ -37,12 +37,12 @@ impl WriteBuffer {
     }
 
     #[inline]
-    pub(crate) fn len(&self) -> usize {
+    pub(crate) const fn len(&self) -> usize {
         self.bytes.len() - self.pos
     }
 
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
@@ -68,7 +68,7 @@ impl WriteBuffer {
 
     /// Seals as much of `bufs` as [`seal_budget`] allows after the buffered records.
     ///
-    /// Returns the plaintext sealed, or `Ok(None)` if BoringSSL declines.
+    /// Returns the plaintext sealed, or `Ok(None)` if `BoringSSL` declines.
     #[inline]
     pub(crate) fn seal(
         &mut self,

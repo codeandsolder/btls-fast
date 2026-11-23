@@ -8,10 +8,10 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{read::ReadBuffer, transport::Transport, write::WriteBuffer};
 
-/// The BIO stream handed to BoringSSL, buffering ciphertext in both directions.
+/// The BIO stream handed to `BoringSSL`, buffering ciphertext in both directions.
 ///
 /// Owned by the BIO for the life of the stream and reached through `SslStreamCore::get_mut`.
-pub(crate) struct StreamWrapper<S> {
+pub struct StreamWrapper<S> {
     pub(crate) transport: Transport<S>,
     pub(crate) read_buf: ReadBuffer,
     pub(crate) write_buf: WriteBuffer,
@@ -26,7 +26,7 @@ pub(crate) struct StreamWrapper<S> {
 
 impl<S> StreamWrapper<S> {
     pub(crate) fn new(stream: S) -> Self {
-        StreamWrapper {
+        Self {
             transport: Transport::new(stream),
             read_buf: ReadBuffer::default(),
             write_buf: WriteBuffer::default(),

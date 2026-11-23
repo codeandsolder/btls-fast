@@ -5,15 +5,15 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::transport::Transport;
 
 /// Capacity of the ciphertext read buffer, enough for a record header plus the largest
-/// ciphertext BoringSSL accepts (`SSL3_RT_MAX_ENCRYPTED_LENGTH`).
+/// ciphertext `BoringSSL` accepts (`SSL3_RT_MAX_ENCRYPTED_LENGTH`).
 ///
-/// BoringSSL may request record headers and bodies in separate BIO reads. Buffering lets these
+/// `BoringSSL` may request record headers and bodies in separate BIO reads. Buffering lets these
 /// reads share data from one underlying read. Larger bursts may require multiple refills.
 const READ_BUF_CAPACITY: usize = 17 * 1024;
 
-/// Ciphertext read from the transport but not yet taken by BoringSSL.
+/// Ciphertext read from the transport but not yet taken by `BoringSSL`.
 #[derive(Default)]
-pub(crate) struct ReadBuffer {
+pub struct ReadBuffer {
     bytes: Vec<u8>,
     // The next byte to hand out is `bytes[pos]`.
     pos: usize,
@@ -22,7 +22,7 @@ pub(crate) struct ReadBuffer {
 impl ReadBuffer {
     /// Whether no ciphertext is waiting; a drained buffer is released at once.
     #[inline]
-    pub(crate) fn is_empty(&self) -> bool {
+    pub(crate) const fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
