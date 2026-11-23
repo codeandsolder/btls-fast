@@ -144,10 +144,9 @@ bitflags! {
     /// Options controlling the behavior of an `SslContext`.
     #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
     pub struct SslOptions: c_uint {
-        /// Disables a countermeasure against an SSLv3/TLSv1.0 vulnerability affecting CBC ciphers.
-        const DONT_INSERT_EMPTY_FRAGMENTS = ffi::SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS as _;
 
-        /// A "reasonable default" set of options which enables compatibility flags.
+        /// `BoringSSL`'s enabled-by-default options, including compatibility
+        /// with legacy servers without the renegotiation-info extension.
         const ALL = ffi::SSL_OP_ALL as _;
 
         /// Do not query the MTU.
@@ -158,37 +157,18 @@ bitflags! {
         /// Disables the use of session tickets for session resumption.
         const NO_TICKET = ffi::SSL_OP_NO_TICKET as _;
 
-        /// Always start a new session when performing a renegotiation on the server side.
-        const NO_SESSION_RESUMPTION_ON_RENEGOTIATION =
-            ffi::SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION as _;
 
-        /// Disables the use of TLS compression.
-        const NO_COMPRESSION = ffi::SSL_OP_NO_COMPRESSION as _;
 
-        /// Allow legacy insecure renegotiation with servers or clients that do not support secure
-        /// renegotiation.
-        const ALLOW_UNSAFE_LEGACY_RENEGOTIATION =
-            ffi::SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION as _;
 
-        /// Creates a new key for each session when using ECDHE.
-        const SINGLE_ECDH_USE = ffi::SSL_OP_SINGLE_ECDH_USE as _;
 
-        /// Creates a new key for each session when using DHE.
-        const SINGLE_DH_USE = ffi::SSL_OP_SINGLE_DH_USE as _;
 
         /// Use the server's preferences rather than the client's when selecting a cipher.
         ///
         /// This has no effect on the client side.
         const CIPHER_SERVER_PREFERENCE = ffi::SSL_OP_CIPHER_SERVER_PREFERENCE as _;
 
-        /// Disables version rollback attach detection.
-        const TLS_ROLLBACK_BUG = ffi::SSL_OP_TLS_ROLLBACK_BUG as _;
 
-        /// Disables the use of `SSLv2`.
-        const NO_SSLV2 = ffi::SSL_OP_NO_SSLv2 as _;
 
-        /// Disables the use of `SSLv3`.
-        const NO_SSLV3 = ffi::SSL_OP_NO_SSLv3 as _;
 
         /// Disables the use of TLSv1.0.
         const NO_TLSV1 = ffi::SSL_OP_NO_TLSv1 as _;
@@ -208,9 +188,6 @@ bitflags! {
         /// Disables the use of DTLSv1.2.
         const NO_DTLSV1_2 = ffi::SSL_OP_NO_DTLSv1_2 as _;
 
-        /// Disallow all renegotiation in TLSv1.2 and earlier.
-        #[cfg(not(feature = "fips"))]
-        const NO_RENEGOTIATION = ffi::SSL_OP_NO_RENEGOTIATION as _;
 
         /// Disables TLS 1.3 PSK resumption and 0-RTT by omitting PSK-DHE-KE.
         ///
@@ -238,16 +215,6 @@ bitflags! {
         /// nonblocking context.
         const ACCEPT_MOVING_WRITE_BUFFER = ffi::SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER as _;
 
-        /// Enables automatic retries after TLS session events such as renegotiations or heartbeats.
-        ///
-        /// By default, OpenSSL will return a `WantRead` error after a renegotiation or heartbeat.
-        /// This option will cause OpenSSL to automatically continue processing the requested
-        /// operation instead.
-        ///
-        /// Note that `SslStream::read` and `SslStream::write` will automatically retry regardless
-        /// of the state of this option. It only affects `SslStream::ssl_read` and
-        /// `SslStream::ssl_write`.
-        const AUTO_RETRY = ffi::SSL_MODE_AUTO_RETRY as _;
 
         /// Disables automatic chain building when verifying a peer's certificate.
         ///
@@ -256,10 +223,6 @@ bitflags! {
         /// out of certificates it knows of, and this option will disable that behavior.
         const NO_AUTO_CHAIN = ffi::SSL_MODE_NO_AUTO_CHAIN as _;
 
-        /// Release memory buffers when the session does not need them.
-        ///
-        /// This saves ~34 KiB of memory for idle streams.
-        const RELEASE_BUFFERS = ffi::SSL_MODE_RELEASE_BUFFERS as _;
 
         /// Sends the fake `TLS_FALLBACK_SCSV` cipher suite in the `ClientHello` message of a
         /// handshake.

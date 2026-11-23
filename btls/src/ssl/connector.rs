@@ -42,20 +42,10 @@ ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
     let mut ctx = SslContextBuilder::new(method)?;
 
-    let mut opts = SslOptions::ALL
-        | SslOptions::NO_COMPRESSION
-        | SslOptions::NO_SSLV2
-        | SslOptions::NO_SSLV3
-        | SslOptions::SINGLE_DH_USE
-        | SslOptions::SINGLE_ECDH_USE;
-    opts &= !SslOptions::DONT_INSERT_EMPTY_FRAGMENTS;
-
-    ctx.set_options(opts);
-
-    let mode =
-        SslMode::AUTO_RETRY | SslMode::ACCEPT_MOVING_WRITE_BUFFER | SslMode::ENABLE_PARTIAL_WRITE;
-
-    ctx.set_mode(mode);
+    // BoringSSL already enables SSL_OP_ALL by default. The remaining OpenSSL
+    // compatibility flags used here had a literal value of zero, so configure
+    // only the two write modes that change the native behavior.
+    ctx.set_mode(SslMode::ACCEPT_MOVING_WRITE_BUFFER | SslMode::ENABLE_PARTIAL_WRITE);
 
     Ok(ctx)
 }
