@@ -2791,15 +2791,27 @@ impl SslContextRef {
         unsafe { X509StoreRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
-    /// Returns a shared reference to the stack of certificates making up the chain from the leaf.
+    /// Returns any extra certificate chain attached to this context.
+    ///
+    /// An empty or unavailable chain is represented as `None`. The native
+    /// getter can succeed without populating the chain pointer.
     #[corresponds(SSL_CTX_get_extra_chain_certs)]
-    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
-    pub fn extra_chain_certs(&self) -> &StackRef<X509> {
+    #[must_use = "Inspect the borrowed chain or handle its absence."]
+    pub fn extra_chain_certs(&self) -> Option<&StackRef<X509>> {
+        self.check_x509();
+        // SAFETY: the native getter writes a nullable, borrowed stack pointer
+        // owned by this live context. It may return success with a null chain.
+        // Only a non-null successful result is exposed as a shared reference.
         unsafe {
             let mut chain = ptr::null_mut();
-            ffi::SSL_CTX_get_extra_chain_certs(self.as_ptr(), &raw mut chain);
-            assert!(!chain.is_null());
-            StackRef::from_ptr(chain)
+            if ffi::SSL_CTX_get_extra_chain_certs(self.as_ptr(), &raw mut chain) == 0 {
+                return None;
+            }
+            if chain.is_null() {
+                None
+            } else {
+                Some(StackRef::from_ptr(chain))
+            }
         }
     }
 

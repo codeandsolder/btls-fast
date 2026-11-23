@@ -50,6 +50,20 @@ static KEY: &[u8] = include_bytes!("../../../test/key.pem");
 const TEST_CERT_DIGEST: &str = "585e3a58acfd3b4e5e2825659407244ddd93539c";
 
 #[test]
+fn context_extra_chain_handles_empty_and_populated_chains() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    assert!(ctx.ctx.extra_chain_certs().is_none());
+
+    ctx.set_certificate(&X509::from_pem(CERT).unwrap()).unwrap();
+    assert!(ctx.ctx.extra_chain_certs().is_none());
+
+    let extra = X509::from_pem(ROOT_CERT).unwrap();
+    ctx.add_extra_chain_cert(extra).unwrap();
+    let ctx = ctx.build();
+    assert_eq!(ctx.extra_chain_certs().unwrap().len(), 1);
+}
+
+#[test]
 fn get_ctx_options() {
     let ctx = SslContext::builder(SslMethod::tls()).unwrap();
     let _ = ctx.options();
