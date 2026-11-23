@@ -3033,7 +3033,10 @@ impl SslContextRef {
     ///
     /// Registration or replacement of the native X.509 marker fails.
     pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
-        self.replace_ex_data(X509_FLAG_INDEX.register()?, true)?;
+        // SAFETY: the caller guarantees this native SSL context really uses
+        // X.509 and owns its native extra-data slots exclusively. The newly
+        // registered typed index therefore matches the stored marker.
+        unsafe { self.replace_ex_data(X509_FLAG_INDEX.register()?, true)? };
         Ok(())
     }
 
