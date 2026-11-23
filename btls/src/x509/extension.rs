@@ -67,6 +67,10 @@ impl BasicConstraints {
     }
 
     /// Return the `BasicConstraints` extension as an `X509Extension`.
+    ///
+    /// # Errors
+    ///
+    /// Native extension creation rejects the supplied constraints.
     pub fn build(&self) -> Result<X509Extension, ErrorStack> {
         let mut value = String::new();
         if self.critical {
@@ -85,18 +89,26 @@ impl BasicConstraints {
     }
 }
 
+/// Flags that select individual X.509 KeyUsage bits without storing a separate
+/// boolean for each possible usage.
+#[repr(u16)]
+#[derive(Clone, Copy)]
+enum KeyUsageFlag {
+    Critical = 1 << 0,
+    DigitalSignature = 1 << 1,
+    NonRepudiation = 1 << 2,
+    KeyEncipherment = 1 << 3,
+    DataEncipherment = 1 << 4,
+    KeyAgreement = 1 << 5,
+    KeyCertSign = 1 << 6,
+    CrlSign = 1 << 7,
+    EncipherOnly = 1 << 8,
+    DecipherOnly = 1 << 9,
+}
+
 /// An extension consisting of a list of names of the permitted key usages.
 pub struct KeyUsage {
-    critical: bool,
-    digital_signature: bool,
-    non_repudiation: bool,
-    key_encipherment: bool,
-    data_encipherment: bool,
-    key_agreement: bool,
-    key_cert_sign: bool,
-    crl_sign: bool,
-    encipher_only: bool,
-    decipher_only: bool,
+    flags: u16,
 }
 
 impl Default for KeyUsage {
@@ -106,117 +118,139 @@ impl Default for KeyUsage {
 }
 
 impl KeyUsage {
+    const fn set(&mut self, flag: KeyUsageFlag) -> &mut Self {
+        self.flags |= flag as u16;
+        self
+    }
+
+    const fn contains(&self, flag: KeyUsageFlag) -> bool {
+        self.flags & flag as u16 != 0
+    }
+
     /// Construct a new `KeyUsage` extension.
     #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub const fn new() -> Self {
-        Self {
-            critical: false,
-            digital_signature: false,
-            non_repudiation: false,
-            key_encipherment: false,
-            data_encipherment: false,
-            key_agreement: false,
-            key_cert_sign: false,
-            crl_sign: false,
-            encipher_only: false,
-            decipher_only: false,
-        }
+        Self { flags: 0 }
     }
 
     /// Sets the `critical` flag to `true`. The extension will be critical.
     pub const fn critical(&mut self) -> &mut Self {
-        self.critical = true;
-        self
+        self.set(KeyUsageFlag::Critical)
     }
 
     /// Sets the `digitalSignature` flag to `true`.
     pub const fn digital_signature(&mut self) -> &mut Self {
-        self.digital_signature = true;
-        self
+        self.set(KeyUsageFlag::DigitalSignature)
     }
 
     /// Sets the `nonRepudiation` flag to `true`.
     pub const fn non_repudiation(&mut self) -> &mut Self {
-        self.non_repudiation = true;
-        self
+        self.set(KeyUsageFlag::NonRepudiation)
     }
 
     /// Sets the `keyEncipherment` flag to `true`.
     pub const fn key_encipherment(&mut self) -> &mut Self {
-        self.key_encipherment = true;
-        self
+        self.set(KeyUsageFlag::KeyEncipherment)
     }
 
     /// Sets the `dataEncipherment` flag to `true`.
     pub const fn data_encipherment(&mut self) -> &mut Self {
-        self.data_encipherment = true;
-        self
+        self.set(KeyUsageFlag::DataEncipherment)
     }
 
     /// Sets the `keyAgreement` flag to `true`.
     pub const fn key_agreement(&mut self) -> &mut Self {
-        self.key_agreement = true;
-        self
+        self.set(KeyUsageFlag::KeyAgreement)
     }
 
     /// Sets the `keyCertSign` flag to `true`.
     pub const fn key_cert_sign(&mut self) -> &mut Self {
-        self.key_cert_sign = true;
-        self
+        self.set(KeyUsageFlag::KeyCertSign)
     }
 
     /// Sets the `cRLSign` flag to `true`.
     pub const fn crl_sign(&mut self) -> &mut Self {
-        self.crl_sign = true;
-        self
+        self.set(KeyUsageFlag::CrlSign)
     }
 
     /// Sets the `encipherOnly` flag to `true`.
     pub const fn encipher_only(&mut self) -> &mut Self {
-        self.encipher_only = true;
-        self
+        self.set(KeyUsageFlag::EncipherOnly)
     }
 
     /// Sets the `decipherOnly` flag to `true`.
     pub const fn decipher_only(&mut self) -> &mut Self {
-        self.decipher_only = true;
-        self
+        self.set(KeyUsageFlag::DecipherOnly)
     }
 
     /// Return the `KeyUsage` extension as an `X509Extension`.
+    ///
+    /// # Errors
+    ///
+    /// Native extension creation rejects the selected key usages.
     pub fn build(&self) -> Result<X509Extension, ErrorStack> {
         let mut value = String::new();
         let mut first = true;
-        append(&mut value, &mut first, self.critical, "critical");
         append(
             &mut value,
             &mut first,
-            self.digital_signature,
+            self.contains(KeyUsageFlag::Critical),
+            "critical",
+        );
+        append(
+            &mut value,
+            &mut first,
+            self.contains(KeyUsageFlag::DigitalSignature),
             "digitalSignature",
         );
         append(
             &mut value,
             &mut first,
-            self.non_repudiation,
+            self.contains(KeyUsageFlag::NonRepudiation),
             "nonRepudiation",
         );
         append(
             &mut value,
             &mut first,
-            self.key_encipherment,
+            self.contains(KeyUsageFlag::KeyEncipherment),
             "keyEncipherment",
         );
         append(
             &mut value,
             &mut first,
-            self.data_encipherment,
+            self.contains(KeyUsageFlag::DataEncipherment),
             "dataEncipherment",
         );
-        append(&mut value, &mut first, self.key_agreement, "keyAgreement");
-        append(&mut value, &mut first, self.key_cert_sign, "keyCertSign");
-        append(&mut value, &mut first, self.crl_sign, "cRLSign");
-        append(&mut value, &mut first, self.encipher_only, "encipherOnly");
-        append(&mut value, &mut first, self.decipher_only, "decipherOnly");
+        append(
+            &mut value,
+            &mut first,
+            self.contains(KeyUsageFlag::KeyAgreement),
+            "keyAgreement",
+        );
+        append(
+            &mut value,
+            &mut first,
+            self.contains(KeyUsageFlag::KeyCertSign),
+            "keyCertSign",
+        );
+        append(
+            &mut value,
+            &mut first,
+            self.contains(KeyUsageFlag::CrlSign),
+            "cRLSign",
+        );
+        append(
+            &mut value,
+            &mut first,
+            self.contains(KeyUsageFlag::EncipherOnly),
+            "encipherOnly",
+        );
+        append(
+            &mut value,
+            &mut first,
+            self.contains(KeyUsageFlag::DecipherOnly),
+            "decipherOnly",
+        );
         X509Extension::new_nid(None, None, Nid::KEY_USAGE, &value)
     }
 }
@@ -307,11 +341,17 @@ impl ExtendedKeyUsage {
     }
 
     /// Return the `ExtendedKeyUsage` extension as an `X509Extension`.
+    ///
+    /// # Errors
+    ///
+    /// A key usage identifier cannot be parsed or the native extension cannot be created.
     pub fn build(&self) -> Result<X509Extension, ErrorStack> {
         let mut stack = Stack::new()?;
         for item in &self.items {
             stack.push(item.parse::<Asn1Object>()?)?;
         }
+        // SAFETY: the stack contains live owned ASN.1 objects; its typed
+        // native pointer stays valid throughout synchronous extension creation.
         unsafe {
             X509Extension::new_internal(Nid::EXT_KEY_USAGE, self.critical, stack.as_ptr().cast())
         }
@@ -344,6 +384,10 @@ impl SubjectKeyIdentifier {
     }
 
     /// Return a `SubjectKeyIdentifier` extension as an `X509Extension`.
+    ///
+    /// # Errors
+    ///
+    /// Native extension creation fails for the supplied context.
     pub fn build(&self, ctx: &X509v3Context) -> Result<X509Extension, ErrorStack> {
         let mut value = String::new();
         let mut first = true;
@@ -397,6 +441,10 @@ impl AuthorityKeyIdentifier {
     }
 
     /// Return a `AuthorityKeyIdentifier` extension as an `X509Extension`.
+    ///
+    /// # Errors
+    ///
+    /// Native extension creation fails for the supplied context.
     pub fn build(&self, ctx: &X509v3Context) -> Result<X509Extension, ErrorStack> {
         let mut value = String::new();
         let mut first = true;
@@ -483,6 +531,10 @@ impl SubjectAlternativeName {
     }
 
     /// Return a `SubjectAlternativeName` extension as an `X509Extension`.
+    ///
+    /// # Errors
+    ///
+    /// An alternative name is invalid or native extension construction fails.
     pub fn build(&self, _ctx: &X509v3Context<'_>) -> Result<X509Extension, ErrorStack> {
         let mut stack = Stack::new()?;
         for item in &self.items {
@@ -498,6 +550,8 @@ impl SubjectAlternativeName {
             stack.push(gn)?;
         }
 
+        // SAFETY: all native general names remain owned by the live stack
+        // until extension construction has completed synchronously.
         unsafe {
             X509Extension::new_internal(Nid::SUBJECT_ALT_NAME, self.critical, stack.as_ptr().cast())
         }
@@ -514,4 +568,33 @@ fn append(value: &mut String, first: &mut bool, should: bool, element: &str) {
     }
     *first = false;
     value.push_str(element);
+}
+
+#[cfg(test)]
+mod key_usage_tests {
+    use super::{KeyUsage, KeyUsageFlag};
+
+    #[test]
+    fn all_key_usage_setters_select_distinct_bits() {
+        let setters: [fn(&mut KeyUsage) -> &mut KeyUsage; 10] = [
+            KeyUsage::critical,
+            KeyUsage::digital_signature,
+            KeyUsage::non_repudiation,
+            KeyUsage::key_encipherment,
+            KeyUsage::data_encipherment,
+            KeyUsage::key_agreement,
+            KeyUsage::key_cert_sign,
+            KeyUsage::crl_sign,
+            KeyUsage::encipher_only,
+            KeyUsage::decipher_only,
+        ];
+        let mut usage = KeyUsage::new();
+        assert_eq!(usage.flags, 0);
+        for (index, set) in setters.into_iter().enumerate() {
+            set(&mut usage);
+            assert_eq!(usage.flags, (1u16 << (index + 1)) - 1);
+        }
+        assert!(usage.contains(KeyUsageFlag::Critical));
+        assert!(usage.contains(KeyUsageFlag::DecipherOnly));
+    }
 }
