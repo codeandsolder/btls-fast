@@ -942,7 +942,11 @@ impl fmt::Debug for X509 {
             .map_or_else(|_| String::new(), |hex| hex.to_string());
         let mut debug_struct = formatter.debug_struct("X509");
         debug_struct.field("serial_number", &serial);
-        debug_struct.field("signature_algorithm", &self.signature_algorithm().object());
+        if let Some(oid) = self.signature_algorithm().object() {
+            debug_struct.field("signature_algorithm", &oid);
+        } else {
+            debug_struct.field("signature_algorithm", &None::<&Asn1ObjectRef>);
+        }
         debug_struct.field("issuer", &self.issuer_name());
         debug_struct.field("subject", &self.subject_name());
         if let Some(subject_alt_names) = &self.subject_alt_names() {
