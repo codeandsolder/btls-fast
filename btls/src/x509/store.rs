@@ -95,16 +95,15 @@ impl X509StoreBuilderRef {
         unsafe { cvt(ffi::X509_STORE_set_default_paths(self.as_ptr())) }
     }
 
-    /// Sets certificate chain validation related flags.
+    /// Sets certificate chain validation flags on this store.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native certificate-store configuration fails.
     #[corresponds(X509_STORE_set_flags)]
-    pub fn try_set_flags(&mut self, flags: X509VerifyFlags) -> Result<(), ErrorStack> {
+    pub fn set_flags(&mut self, flags: X509VerifyFlags) -> Result<(), ErrorStack> {
+        // SAFETY: the native certificate store is exclusively borrowed.
         unsafe { cvt(ffi::X509_STORE_set_flags(self.as_ptr(), flags.bits())) }
-    }
-
-    /// Sets certificate chain validation related flags.
-    #[corresponds(X509_STORE_set_flags)]
-    pub fn set_flags(&mut self, flags: X509VerifyFlags) {
-        self.try_set_flags(flags).expect("use try_set_flags");
     }
 
     /// Returns a mutable reference to the X509 verification configuration.

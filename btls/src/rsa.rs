@@ -100,6 +100,8 @@ impl<T> ToOwned for RsaRef<T> {
     type Owned = Rsa<T>;
 
     fn to_owned(&self) -> Rsa<T> {
+        // SAFETY: this live native RSA key supports shared atomic reference
+        // increments; the new Rust owner holds its own native reference.
         unsafe {
             ffi::RSA_up_ref(self.as_ptr());
             Rsa::from_ptr(self.as_ptr())
@@ -201,6 +203,7 @@ where
     #[corresponds(RSA_get0_key)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn d(&self) -> &BigNumRef {
+        // SAFETY: The live private RSA key contains the private exponent; native returns a borrowed component tied to the key.
         unsafe {
             let mut d = ptr::null();
             RSA_get0_key(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut d);
@@ -212,6 +215,7 @@ where
     #[corresponds(RSA_get0_factors)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn p(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA prime factor tied to this key.
         unsafe {
             let mut p = ptr::null();
             RSA_get0_factors(self.as_ptr(), &raw mut p, ptr::null_mut());
@@ -227,6 +231,7 @@ where
     #[corresponds(RSA_get0_factors)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn q(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA prime factor tied to this key.
         unsafe {
             let mut q = ptr::null();
             RSA_get0_factors(self.as_ptr(), ptr::null_mut(), &raw mut q);
@@ -242,6 +247,7 @@ where
     #[corresponds(RSA_get0_crt_params)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn dmp1(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA CRT exponent tied to this key.
         unsafe {
             let mut dp = ptr::null();
             RSA_get0_crt_params(self.as_ptr(), &raw mut dp, ptr::null_mut(), ptr::null_mut());
@@ -257,6 +263,7 @@ where
     #[corresponds(RSA_get0_crt_params)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn dmq1(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA CRT exponent tied to this key.
         unsafe {
             let mut dq = ptr::null();
             RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), &raw mut dq, ptr::null_mut());
@@ -272,6 +279,7 @@ where
     #[corresponds(RSA_get0_crt_params)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn iqmp(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA CRT coefficient tied to this key.
         unsafe {
             let mut qi = ptr::null();
             RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut qi);
@@ -286,6 +294,7 @@ where
     /// Validates RSA parameters for correctness
     #[corresponds(RSA_check_key)]
     pub fn check_key(&self) -> Result<bool, ErrorStack> {
+        // SAFETY: The native RSA validation call observes the borrowed private key and returns a status code.
         unsafe {
             let result = ffi::RSA_check_key(self.as_ptr());
             if result == -1 {
@@ -337,6 +346,7 @@ where
     #[corresponds(RSA_size)]
     #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn size(&self) -> u32 {
+        // SAFETY: the native RSA key remains live for this read-only size query.
         unsafe { ffi::RSA_size(self.as_ptr()) }
     }
 
@@ -354,6 +364,7 @@ where
     #[corresponds(RSA_get0_key)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn n(&self) -> &BigNumRef {
+        // SAFETY: The live public RSA key contains its modulus; native returns a borrowed component.
         unsafe {
             let mut n = ptr::null();
             RSA_get0_key(self.as_ptr(), &raw mut n, ptr::null_mut(), ptr::null_mut());
@@ -365,6 +376,7 @@ where
     #[corresponds(RSA_get0_key)]
     #[must_use = "The returned key component is the result of this accessor."]
     pub fn e(&self) -> &BigNumRef {
+        // SAFETY: The live public RSA key contains its exponent; native returns a borrowed component.
         unsafe {
             let mut e = ptr::null();
             RSA_get0_key(self.as_ptr(), ptr::null_mut(), &raw mut e, ptr::null_mut());
@@ -380,11 +392,18 @@ impl Rsa<Public> {
     /// `e` is the public exponent.
     #[corresponds(RSA_new)]
     pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: the RSA allocation is owned immediately, so any native
+        // setter failure drops it. The setter transfers the BigNums only on success.
         unsafe {
-            let rsa = cvt_p(ffi::RSA_new())?;
-            cvt(RSA_set0_key(rsa, n.as_ptr(), e.as_ptr(), ptr::null_mut()))?;
+            let rsa = Self::from_ptr(cvt_p(ffi::RSA_new())?);
+            cvt(RSA_set0_key(
+                rsa.as_ptr(),
+                n.as_ptr(),
+                e.as_ptr(),
+                ptr::null_mut(),
+            ))?;
             mem::forget((n, e));
-            Ok(Self::from_ptr(rsa))
+            Ok(rsa)
         }
     }
 
@@ -438,13 +457,18 @@ impl RsaPrivateKeyBuilder {
     /// `e` is the public exponent and `d` is the private exponent.
     #[corresponds(RSA_new)]
     pub fn new(n: BigNum, e: BigNum, d: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: own the new RSA allocation before calling its setter.
+        // Native consumes all provided BigNums only after a successful return.
         unsafe {
-            let rsa = cvt_p(ffi::RSA_new())?;
-            cvt(RSA_set0_key(rsa, n.as_ptr(), e.as_ptr(), d.as_ptr()))?;
+            let rsa = Rsa::from_ptr(cvt_p(ffi::RSA_new())?);
+            cvt(RSA_set0_key(
+                rsa.as_ptr(),
+                n.as_ptr(),
+                e.as_ptr(),
+                d.as_ptr(),
+            ))?;
             mem::forget((n, e, d));
-            Ok(Self {
-                rsa: Rsa::from_ptr(rsa),
-            })
+            Ok(Self { rsa })
         }
     }
 
@@ -453,6 +477,8 @@ impl RsaPrivateKeyBuilder {
     /// `p` and `q` are the first and second factors of `n`.
     #[corresponds(RSA_set0_factors)]
     pub fn set_factors(self, p: BigNum, q: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: this builder owns its RSA object exclusively; native accepts
+        // the two factors only on success, when Rust relinquishes ownership.
         unsafe {
             cvt(RSA_set0_factors(self.rsa.as_ptr(), p.as_ptr(), q.as_ptr()))?;
             mem::forget((p, q));
@@ -471,6 +497,8 @@ impl RsaPrivateKeyBuilder {
         exponent_q: BigNum,
         inverse_q: BigNum,
     ) -> Result<Self, ErrorStack> {
+        // SAFETY: the exclusive builder gives native ownership of its three
+        // CRT values only after the native setter reports success.
         unsafe {
             cvt(RSA_set0_crt_params(
                 self.rsa.as_ptr(),
@@ -505,11 +533,14 @@ impl Rsa<Private> {
     /// Unless you have specific needs and know what you're doing, use `Rsa::generate` instead.
     #[corresponds(RSA_generate_key_ex)]
     pub fn generate_with_e(bits: u32, e: &BigNumRef) -> Result<Self, ErrorStack> {
+        let bits = c_int::try_from(bits).map_err(ErrorStack::internal_error)?;
+        // SAFETY: own the native key before starting generation. The readable
+        // public exponent remains borrowed for the complete native invocation.
         unsafe {
             let rsa = Self::from_ptr(cvt_p(ffi::RSA_new())?);
             cvt(ffi::RSA_generate_key_ex(
                 rsa.0,
-                bits as c_int,
+                bits,
                 e.as_ptr(),
                 ptr::null_mut(),
             ))?;
@@ -581,6 +612,11 @@ mod test {
         .unwrap();
 
         assert!(password_queried);
+    }
+
+    #[test]
+    fn rejects_modulus_bits_outside_native_integer_range() {
+        assert!(Rsa::generate(u32::MAX).is_err());
     }
 
     #[test]
@@ -669,10 +705,9 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
-    fn test_public_key_from_pem_pkcs1_file_panic() {
+    fn rejects_spki_when_pkcs1_public_key_expected() {
         let key = include_bytes!("../test/key.pem.pub");
-        Rsa::public_key_from_pem_pkcs1(key).unwrap();
+        assert!(Rsa::public_key_from_pem_pkcs1(key).is_err());
     }
 
     #[test]
@@ -683,11 +718,10 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
-    fn test_public_key_from_pem_pkcs1_generate_panic() {
+    fn rejects_generated_spki_when_pkcs1_public_key_expected() {
         let keypair = Rsa::generate(512).unwrap();
         let pubkey_pem = keypair.public_key_to_pem().unwrap();
-        Rsa::public_key_from_pem_pkcs1(&pubkey_pem).unwrap();
+        assert!(Rsa::public_key_from_pem_pkcs1(&pubkey_pem).is_err());
     }
 
     #[test]
