@@ -130,131 +130,87 @@ fn state() {
     );
 }
 
-/// Tests that when both the client as well as the server use SRTP and their
-/// lists of supported protocols have an overlap -- with only ONE protocol
-/// being valid for both.
-#[test]
-fn test_connect_with_srtp_ctx() {
+const TEST_SRTP_PROFILES: &str = "SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32";
+
+#[derive(Clone, Copy)]
+enum SrtpConfiguration {
+    Context,
+    Connection,
+}
+
+/// The context and per-connection SRTP configuration paths must agree on the
+/// selected profile and derive identical exporter keys on both peers.
+fn verify_srtp_handshake(configuration: SrtpConfiguration) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
 
-    let guard = thread::spawn(move || {
+    let server = thread::spawn(move || {
         let stream = listener.accept().unwrap().0;
         let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
-        ctx.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
-            .unwrap();
+        if matches!(configuration, SrtpConfiguration::Context) {
+            ctx.set_tlsext_use_srtp(TEST_SRTP_PROFILES).unwrap();
+        }
         ctx.set_certificate_file(Path::new("test/cert.pem"), SslFiletype::PEM)
             .unwrap();
         ctx.set_private_key_file(Path::new("test/key.pem"), SslFiletype::PEM)
             .unwrap();
         let mut ssl = Ssl::new(&ctx.build()).unwrap();
+        if matches!(configuration, SrtpConfiguration::Connection) {
+            ssl.set_tlsext_use_srtp(TEST_SRTP_PROFILES).unwrap();
+            let profile_names = ssl
+                .srtp_profiles()
+                .unwrap()
+                .iter()
+                .map(|profile| profile.name().unwrap())
+                .collect::<Vec<_>>()
+                .join(":");
+            assert_eq!(TEST_SRTP_PROFILES, profile_names);
+        }
         ssl.set_mtu(1500).unwrap();
         let mut stream = ssl.accept(stream).unwrap();
 
-        let mut buf = [0; 60];
+        let mut key = [0; 60];
         stream
             .ssl()
-            .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
+            .export_keying_material(&mut key, "EXTRACTOR-dtls_srtp", None)
             .unwrap();
-
         stream.write_all(&[0]).unwrap();
-
-        buf
+        key
     });
 
     let stream = TcpStream::connect(addr).unwrap();
     let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
-    ctx.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
-        .unwrap();
+    if matches!(configuration, SrtpConfiguration::Context) {
+        ctx.set_tlsext_use_srtp(TEST_SRTP_PROFILES).unwrap();
+    }
     let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    if matches!(configuration, SrtpConfiguration::Connection) {
+        ssl.set_tlsext_use_srtp(TEST_SRTP_PROFILES).unwrap();
+    }
     ssl.set_mtu(1500).unwrap();
     let mut stream = ssl.connect(stream).unwrap();
 
-    let mut buf = [1; 60];
-    {
-        let srtp_profile = stream.ssl().selected_srtp_profile().unwrap();
-        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name().unwrap());
-        assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, srtp_profile.id());
-    }
+    let profile = stream.ssl().selected_srtp_profile().unwrap();
+    assert_eq!("SRTP_AES128_CM_SHA1_80", profile.name().unwrap());
+    assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, profile.id());
+
+    let mut key = [1; 60];
     stream
         .ssl()
-        .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
-        .expect("extract");
-
+        .export_keying_material(&mut key, "EXTRACTOR-dtls_srtp", None)
+        .unwrap();
     stream.read_exact(&mut [0]).unwrap();
-
-    let buf2 = guard.join().unwrap();
-
-    assert_eq!(buf[..], buf2[..]);
+    assert_eq!(key, server.join().unwrap());
 }
 
-/// Tests that when both the client as well as the server use SRTP and their
-/// lists of supported protocols have an overlap -- with only ONE protocol
-/// being valid for both.
+#[test]
+fn test_connect_with_srtp_ctx() {
+    verify_srtp_handshake(SrtpConfiguration::Context);
+}
+
 #[test]
 fn test_connect_with_srtp_ssl() {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let addr = listener.local_addr().unwrap();
-
-    let guard = thread::spawn(move || {
-        let stream = listener.accept().unwrap().0;
-        let mut ctx = SslContext::builder(SslMethod::dtls()).unwrap();
-        ctx.set_certificate_file(Path::new("test/cert.pem"), SslFiletype::PEM)
-            .unwrap();
-        ctx.set_private_key_file(Path::new("test/key.pem"), SslFiletype::PEM)
-            .unwrap();
-        let mut ssl = Ssl::new(&ctx.build()).unwrap();
-        ssl.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
-            .unwrap();
-        let mut profilenames = String::new();
-        for profile in ssl.srtp_profiles().unwrap() {
-            if !profilenames.is_empty() {
-                profilenames.push(':');
-            }
-            profilenames += profile.name().unwrap();
-        }
-        assert_eq!(
-            "SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32",
-            profilenames
-        );
-        ssl.set_mtu(1500).unwrap();
-        let mut stream = ssl.accept(stream).unwrap();
-
-        let mut buf = [0; 60];
-        stream
-            .ssl()
-            .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
-            .unwrap();
-
-        stream.write_all(&[0]).unwrap();
-
-        buf
-    });
-
-    let stream = TcpStream::connect(addr).unwrap();
-    let ctx = SslContext::builder(SslMethod::dtls()).unwrap();
-    let mut ssl = Ssl::new(&ctx.build()).unwrap();
-    ssl.set_tlsext_use_srtp("SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32")
-        .unwrap();
-    ssl.set_mtu(1500).unwrap();
-    let mut stream = ssl.connect(stream).unwrap();
-
-    let mut buf = [1; 60];
-    {
-        let srtp_profile = stream.ssl().selected_srtp_profile().unwrap();
-        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name().unwrap());
-        assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, srtp_profile.id());
-    }
-    stream
-        .ssl()
-        .export_keying_material(&mut buf, "EXTRACTOR-dtls_srtp", None)
-        .expect("extract");
-
-    stream.read_exact(&mut [0]).unwrap();
-
-    let buf2 = guard.join().unwrap();
-
-    assert_eq!(buf[..], buf2[..]);
+    verify_srtp_handshake(SrtpConfiguration::Connection);
 }
 
 /// Tests that DTLS 1.3 can be enabled and negotiated successfully.

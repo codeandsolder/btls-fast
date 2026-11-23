@@ -225,7 +225,7 @@ impl Pkcs12Builder {
             // https://www.openssl.org/docs/man1.0.2/crypto/PKCS12_create.html
             let keytype = 0;
 
-            cvt_p(ffi::PKCS12_create(
+            let archive = cvt_p(ffi::PKCS12_create(
                 pass.as_ptr(),
                 friendly_name.as_ptr(),
                 pkey,
@@ -236,8 +236,9 @@ impl Pkcs12Builder {
                 self.iter,
                 self.mac_iter,
                 keytype,
-            ))
-            .map(Pkcs12::from_ptr)
+            ))?;
+            // The non-null result transfers ownership to the Rust wrapper.
+            Ok(Pkcs12::from_ptr(archive))
         }
     }
 }
