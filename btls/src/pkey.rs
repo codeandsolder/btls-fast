@@ -41,7 +41,7 @@
 //! ```
 
 use foreign_types::{ForeignType, ForeignTypeRef};
-use libc::{c_int, c_long};
+use libc::c_int;
 use openssl_macros::corresponds;
 use std::ffi::CString;
 use std::fmt;
@@ -60,13 +60,19 @@ use crate::util::{invoke_passwd_cb, CallbackState};
 use crate::{cvt, cvt_0i, cvt_p};
 
 /// A tag type indicating that a key only has parameters.
-pub enum Params {}
+pub struct Params {
+    _private: (),
+}
 
 /// A tag type indicating that a key only has public components.
-pub enum Public {}
+pub struct Public {
+    _private: (),
+}
 
 /// A tag type indicating that a key has private components.
-pub enum Private {}
+pub struct Private {
+    _private: (),
+}
 
 /// An identifier of a kind of key.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -104,7 +110,7 @@ impl Id {
 /// A trait indicating that a key has parameters.
 ///
 /// # Safety
-/// The marker must only be used for keys whose native EVP_PKEY contains the algorithm parameters required by parameter operations.
+/// The marker must only be used for keys whose native `EVP_PKEY` contains the algorithm parameters required by parameter operations.
 pub unsafe trait HasParams {}
 
 // SAFETY: Params is constructed only by native parameter constructors.
@@ -148,6 +154,8 @@ impl<T> ToOwned for PKeyRef<T> {
     type Owned = PKey<T>;
 
     fn to_owned(&self) -> PKey<T> {
+        // SAFETY: the live native key supports atomic reference increments.
+        // The new Rust owner receives one additional native reference.
         unsafe {
             EVP_PKEY_up_ref(self.as_ptr());
             PKey::from_ptr(self.as_ptr())
@@ -193,6 +201,8 @@ impl<T> PKeyRef<T> {
     /// Returns a copy of the internal RSA key.
     #[corresponds(EVP_PKEY_get1_RSA)]
     pub fn rsa(&self) -> Result<Rsa<T>, ErrorStack> {
+        // SAFETY: the live native key stays borrowed during extraction;
+        // get1 returns a separate owned reference or null for a type mismatch.
         unsafe {
             let rsa = cvt_p(ffi::EVP_PKEY_get1_RSA(self.as_ptr()))?;
             Ok(Rsa::from_ptr(rsa))
@@ -202,6 +212,8 @@ impl<T> PKeyRef<T> {
     /// Returns a copy of the internal DSA key.
     #[corresponds(EVP_PKEY_get1_DSA)]
     pub fn dsa(&self) -> Result<Dsa<T>, ErrorStack> {
+        // SAFETY: the live native key stays borrowed during extraction;
+        // get1 returns a separate owned reference or null for a type mismatch.
         unsafe {
             let dsa = cvt_p(ffi::EVP_PKEY_get1_DSA(self.as_ptr()))?;
             Ok(Dsa::from_ptr(dsa))
@@ -211,6 +223,8 @@ impl<T> PKeyRef<T> {
     /// Returns a copy of the internal DH key.
     #[corresponds(EVP_PKEY_get1_DH)]
     pub fn dh(&self) -> Result<Dh<T>, ErrorStack> {
+        // SAFETY: the live native key stays borrowed during extraction;
+        // get1 returns a separate owned reference or null for a type mismatch.
         unsafe {
             let dh = cvt_p(ffi::EVP_PKEY_get1_DH(self.as_ptr()))?;
             Ok(Dh::from_ptr(dh))
@@ -220,6 +234,8 @@ impl<T> PKeyRef<T> {
     /// Returns a copy of the internal elliptic curve key.
     #[corresponds(EVP_PKEY_get1_EC_KEY)]
     pub fn ec_key(&self) -> Result<EcKey<T>, ErrorStack> {
+        // SAFETY: the live native key stays borrowed during extraction;
+        // get1 returns a separate owned reference or null for a type mismatch.
         unsafe {
             let ec_key = cvt_p(ffi::EVP_PKEY_get1_EC_KEY(self.as_ptr()))?;
             Ok(EcKey::from_ptr(ec_key))
@@ -230,14 +246,23 @@ impl<T> PKeyRef<T> {
     #[corresponds(EVP_PKEY_id)]
     #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> Id {
+        // SAFETY: the native descriptor is borrowed and remains live.
         unsafe { Id::from_raw(ffi::EVP_PKEY_id(self.as_ptr())) }
     }
 
-    /// Returns the maximum size of a signature in bytes.
+    /// Returns the native signature capacity in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported, missing, or invalid key type.
     #[corresponds(EVP_PKEY_size)]
-    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
-    pub fn size(&self) -> usize {
-        unsafe { ffi::EVP_PKEY_size(self.as_ptr()) as usize }
+    pub fn signature_capacity(&self) -> Result<usize, ErrorStack> {
+        // SAFETY: the borrowed native key remains valid throughout the query.
+        let size = unsafe { ffi::EVP_PKEY_size(self.as_ptr()) };
+        usize::try_from(size)
+            .ok()
+            .filter(|&size| size > 0)
+            .ok_or_else(|| ErrorStack::internal_error_str("no native signature capacity"))
     }
 }
 
@@ -261,13 +286,19 @@ where
         ffi::i2d_PUBKEY
     }
 
-    /// Returns the size of the key.
+    /// Returns the native public-key strength in bits.
     ///
-    /// This corresponds to the bit length of the modulus of an RSA key, and the bit length of the
-    /// group order for an elliptic curve key, for example.
-    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
-    pub fn bits(&self) -> u32 {
-        unsafe { ffi::EVP_PKEY_bits(self.as_ptr()) as u32 }
+    /// # Errors
+    ///
+    /// Returns an error if the key has no supported size or its native size is invalid.
+    #[corresponds(EVP_PKEY_bits)]
+    pub fn bits(&self) -> Result<u32, ErrorStack> {
+        // SAFETY: the borrowed native key remains valid throughout the query.
+        let bits = unsafe { ffi::EVP_PKEY_bits(self.as_ptr()) };
+        u32::try_from(bits)
+            .ok()
+            .filter(|&bits| bits > 0)
+            .ok_or_else(|| ErrorStack::internal_error_str("no native public-key strength"))
     }
 
     /// Compares the public component of this key with another.
@@ -276,6 +307,8 @@ where
     where
         U: HasPublic,
     {
+        // SAFETY: both keys remain immutably borrowed. Native comparison
+        // returns one only for identical public components.
         unsafe { ffi::EVP_PKEY_cmp(self.as_ptr(), other.as_ptr()) == 1 }
     }
 
@@ -357,6 +390,8 @@ impl<T> PKey<T> {
     /// Creates a new `PKey` containing an RSA key.
     #[corresponds(EVP_PKEY_assign_RSA)]
     pub fn from_rsa(rsa: Rsa<T>) -> Result<Self, ErrorStack> {
+        // SAFETY: the new native EVP_PKEY is owned before assignment. Native
+        // takes the supplied algorithm key only on successful assignment.
         unsafe {
             let evp = cvt_p(ffi::EVP_PKEY_new())?;
             let pkey = Self::from_ptr(evp);
@@ -373,6 +408,8 @@ impl<T> PKey<T> {
     /// Creates a new `PKey` containing an elliptic curve key.
     #[corresponds(EVP_PKEY_assign_EC_KEY)]
     pub fn from_ec_key(ec_key: EcKey<T>) -> Result<Self, ErrorStack> {
+        // SAFETY: the new native EVP_PKEY is owned before assignment. Native
+        // takes the supplied algorithm key only on successful assignment.
         unsafe {
             let evp = cvt_p(ffi::EVP_PKEY_new())?;
             let pkey = Self::from_ptr(evp);
@@ -398,7 +435,13 @@ impl PKey<Private> {
     /// key size or an EC group) should use their dedicated APIs instead, such
     /// as [`Rsa::generate`] and [`EcKey::generate`].
     #[corresponds(EVP_PKEY_keygen)]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported algorithms, allocation, or native generation failure.
     pub fn generate(id: Id) -> Result<Self, ErrorStack> {
+        // SAFETY: allocation and keygen initialization use the live algorithm
+        // descriptor; the context is always freed before returning.
         unsafe {
             ffi::init();
 
@@ -449,22 +492,36 @@ impl PKey<Private> {
         ::libc::c_long
     }
 
-    /// Deserializes a DER-formatted PKCS#8 unencrypted private key.
+    /// Decodes an entire DER-encoded, unencrypted PKCS#8 PrivateKeyInfo.
     ///
-    /// This method is mainly for interoperability reasons. Encrypted keyfiles should be preferred.
+    /// # Errors
+    ///
+    /// Returns an error for an unrepresentable size, invalid encoding,
+    /// trailing data, or native conversion failure.
+    #[corresponds(d2i_PKCS8_PRIV_KEY_INFO)]
     pub fn private_key_from_pkcs8(der: &[u8]) -> Result<Self, ErrorStack> {
-        unsafe {
-            ffi::init();
-            let len = der.len().min(c_long::MAX as usize) as c_long;
-            let p8inf = cvt_p(ffi::d2i_PKCS8_PRIV_KEY_INFO(
+        let len = try_int(der.len())?;
+        ffi::init();
+        let mut input = der.as_ptr();
+        // SAFETY: the full DER slice is readable, and null output requests a
+        // new native object. The native parser advances input over consumed bytes.
+        let info = unsafe {
+            cvt_p(ffi::d2i_PKCS8_PRIV_KEY_INFO(
                 ptr::null_mut(),
-                &mut der.as_ptr(),
+                &raw mut input,
                 len,
-            ))?;
-            let res = cvt_p(ffi::EVP_PKCS82PKEY(p8inf)).map(|p| Self::from_ptr(p));
-            ffi::PKCS8_PRIV_KEY_INFO_free(p8inf);
-            res
-        }
+            ))?
+        };
+        let result = if input == der.as_ptr().wrapping_add(der.len()) {
+            // SAFETY: info is a live PKCS#8 object, and conversion returns
+            // an independently allocated owned key on success.
+            unsafe { cvt_p(ffi::EVP_PKCS82PKEY(info)).map(|key| Self::from_ptr(key)) }
+        } else {
+            Err(ErrorStack::internal_error_str("trailing PKCS#8 DER data"))
+        };
+        // SAFETY: native conversion borrows info but never consumes ownership.
+        unsafe { ffi::PKCS8_PRIV_KEY_INFO_free(info) };
+        result
     }
 
     /// Deserializes a DER-formatted PKCS#8 private key, using a callback to retrieve the password
@@ -472,10 +529,17 @@ impl PKey<Private> {
     ///
     /// The callback should copy the password into the provided buffer and return the number of
     /// bytes written.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid DER, an unsuccessful password callback,
+    /// decryption failure, or native allocation failure.
     pub fn private_key_from_pkcs8_callback<F>(der: &[u8], callback: F) -> Result<Self, ErrorStack>
     where
         F: FnOnce(&mut [u8]) -> Result<usize, ErrorStack>,
     {
+        // SAFETY: the BIO and uniquely borrowed callback state survive the
+        // native synchronous invocation, and the FFI callback is panic-contained.
         unsafe {
             ffi::init();
             let mut cb = CallbackState::new(callback);
@@ -493,13 +557,16 @@ impl PKey<Private> {
     /// Deserializes a DER-formatted PKCS#8 private key, using the supplied password if the key is
     /// encrypted.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `passphrase` contains an embedded null.
+    /// Returns an error for embedded NUL, invalid DER, decryption failure,
+    /// or native allocation failure.
     pub fn private_key_from_pkcs8_passphrase(
         der: &[u8],
         passphrase: &[u8],
     ) -> Result<Self, ErrorStack> {
+        // SAFETY: the native decoder borrows both the in-memory BIO and the
+        // NUL-terminated password during this synchronous call only.
         unsafe {
             ffi::init();
             let bio = MemBioSlice::new(der)?;
@@ -564,7 +631,12 @@ mod tests {
     #[test]
     fn test_unencrypted_pkcs8() {
         let key = include_bytes!("../test/pkcs8-nocrypt.der");
-        PKey::private_key_from_pkcs8(key).unwrap();
+        let parsed = PKey::private_key_from_pkcs8(key).unwrap();
+        assert!(parsed.signature_capacity().is_ok());
+        assert!(parsed.bits().unwrap() > 0);
+        let mut trailing = key.to_vec();
+        trailing.push(0);
+        assert!(PKey::private_key_from_pkcs8(&trailing).is_err());
     }
 
     #[test]
