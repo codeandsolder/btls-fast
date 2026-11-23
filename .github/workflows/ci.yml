@@ -21,14 +21,14 @@ jobs:
         with:
           fetch-depth: 2
           persist-credentials: false
-      - uses: codeandsolder/ci-workflows/.github/actions/cargo-release-quarantine@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      - uses: codeandsolder/ci-workflows/.github/actions/cargo-release-quarantine@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         if: github.event_name == 'pull_request'
         with:
           base-ref: ${{ github.event.pull_request.base.sha }}
           lockfile: auto
           hours: "72"
   rust:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
     with:
       runner: ubuntu-26.04
       rust-components: "clippy rustfmt"
