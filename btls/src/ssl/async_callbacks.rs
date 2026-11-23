@@ -221,6 +221,9 @@ impl SslContextBuilder {
             }
         };
 
+        // SAFETY: the callback is installed on a uniquely borrowed context;
+        // its Rust closure is registered with the native extra-data slot and
+        // outlives any session lookup performed by BoringSSL.
         unsafe { self.set_get_session_callback(async_callback) }
     }
 
@@ -334,9 +337,9 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct AsyncSelectCertError;
 
-/// Describes async private key hooks. This is used to off-load signing
-/// operations to a custom, potentially asynchronous, backend. Metadata about the
-/// key such as the type and size are parsed out of the certificate.
+/// Async private-key operations that delegate signing and decryption to a
+/// potentially asynchronous backend. The certificate supplies key metadata
+/// such as the algorithm and key size.
 ///
 /// See [`PrivateKeyMethod`] for the sync version of those hooks.
 ///
@@ -349,6 +352,10 @@ pub trait AsyncPrivateKeyMethod: Send + Sync + 'static {
     /// to finish writing the signature.
     ///
     /// See [`PrivateKeyMethod::sign`] for the sync version of this method.
+    ///
+    /// # Errors
+    ///
+    /// Creating the asynchronous signing operation fails.
     fn sign(
         &self,
         ssl: &mut SslRef,
@@ -364,6 +371,10 @@ pub trait AsyncPrivateKeyMethod: Send + Sync + 'static {
     /// to finish decrypting the input.
     ///
     /// See [`PrivateKeyMethod::decrypt`] for the sync version of this method.
+    ///
+    /// # Errors
+    ///
+    /// Creating the asynchronous decryption operation fails.
     fn decrypt(
         &self,
         ssl: &mut SslRef,
@@ -458,8 +469,8 @@ where
 
 /// Creates and drives a private key method future.
 ///
-/// This is a convenience function for the three methods of impl `PrivateKeyMethod``
-/// for `dyn AsyncPrivateKeyMethod`. It relies on [`with_ex_data_future`] to
+/// This is a convenience function used by the three `PrivateKeyMethod`
+/// operations implemented for `dyn AsyncPrivateKeyMethod`. It relies on [`with_ex_data_future`] to
 /// drive the future and then immediately calls the final [`BoxPrivateKeyMethodFinish`]
 /// when the future is ready.
 fn with_private_key_method(
