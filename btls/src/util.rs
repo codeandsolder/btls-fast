@@ -103,6 +103,25 @@ where
     }
 }
 
+/// Returns a borrowed byte slice only when the native pointer/length pair is
+/// structurally valid. A zero-length buffer can have a null pointer.
+///
+/// # Safety
+///
+/// For every non-null pointer whose positive length fits in `isize`, the
+/// caller must guarantee that many readable bytes remain live and immutable
+/// for the returned lifetime. Invalid pairs are rejected before dereference.
+pub(crate) const unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+    if len == 0 {
+        return Some(&[]);
+    }
+    if ptr.is_null() || len > isize::MAX.unsigned_abs() {
+        return None;
+    }
+    // SAFETY: the caller supplies the readable allocation for this lifetime.
+    Some(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
 /// Owns an allocation transferred by a native OpenSSL output-pointer API.
 pub struct NativeBuffer(*mut u8);
 
@@ -177,6 +196,19 @@ mod tests {
                 0,
                 ptr::from_mut(state).cast(),
             )
+        }
+    }
+
+    #[test]
+    fn native_input_guards_empty_and_invalid_native_buffers() {
+        let input = [0x12, 0x34];
+        // SAFETY: null or impossible-length pairs are rejected before access;
+        // the valid pair borrows `input` for this lexical scope.
+        unsafe {
+            assert_eq!(native_input(ptr::null(), 0), Some(&[][..]));
+            assert_eq!(native_input(ptr::null(), 1), None);
+            assert_eq!(native_input(input.as_ptr(), input.len()), Some(&input[..]));
+            assert_eq!(native_input(input.as_ptr(), usize::MAX), None);
         }
     }
 

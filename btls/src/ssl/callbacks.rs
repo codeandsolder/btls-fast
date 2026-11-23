@@ -12,7 +12,7 @@ use crate::ffi;
 use crate::hmac::HmacCtxRef;
 use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
 use crate::symm::CipherCtxRef;
-use crate::util::catch_native;
+use crate::util::{catch_native, native_input};
 use crate::x509::X509StoreContextRef;
 use foreign_types::ForeignType;
 use foreign_types::ForeignTypeRef;
@@ -665,19 +665,6 @@ where
     };
 
     catch_native(|| callback(ssl, &line));
-}
-
-// The caller must ensure that nonempty input points to readable bytes for
-// the returned lifetime, and that output storage does not overlap it.
-const unsafe fn native_input<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
-    if len == 0 {
-        return Some(&[]);
-    }
-    if ptr.is_null() || len > isize::MAX.unsigned_abs() {
-        return None;
-    }
-    // SAFETY: the caller provides the readable input allocation.
-    Some(unsafe { slice::from_raw_parts(ptr, len) })
 }
 
 pub(super) unsafe extern "C" fn raw_sign<M, const CREDENTIAL: bool>(
