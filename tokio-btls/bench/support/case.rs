@@ -67,7 +67,7 @@ pub enum Clock {
 }
 
 /// A measurement started on one [`Clock`].
-pub(crate) enum Stopwatch {
+pub enum Stopwatch {
     Wall(Instant),
     Cpu(ThreadTime),
 }
@@ -107,7 +107,7 @@ impl Stopwatch {
 
 /// Whether a stream carries TLS records or the bare body.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Tls {
+pub enum Tls {
     Enabled,
     Disabled,
 }
@@ -173,7 +173,7 @@ impl fmt::Display for BodyKind {
 const KIB: usize = 1024;
 
 /// Largest plaintext in one TLS record.
-pub(crate) const MAX_RECORD: usize = 16 * KIB;
+pub const MAX_RECORD: usize = 16 * KIB;
 
 /// Bytes a TLS 1.3 AES-GCM record adds: a 5-byte header, the inner content type and a 16-byte tag
 /// ([RFC 8446 §5.2](https://www.rfc-editor.org/rfc/rfc8446#section-5.2)).
@@ -181,16 +181,16 @@ const RECORD_OVERHEAD: usize = 22;
 
 /// Body bytes a batch moves between two clock reads: whole bodies, at least one. Over TCP a
 /// larger body moves in parts of this size, so a batch always fits the socket buffers.
-pub(crate) const BATCH_LEN: usize = 128 * KIB;
+pub const BATCH_LEN: usize = 128 * KIB;
 
 /// Most slices in one chunked write; they live in a stack array.
-pub(crate) const MAX_SLICES: usize = 16;
+pub const MAX_SLICES: usize = 16;
 
 /// Body sizes measured by every target, each split into 16 chunks.
 ///
 /// The x4 ladder crosses the record size (16 KiB), tokio-btls's 64 KiB seal budget and rustls's
 /// 64 KiB send limit, and extends to a 4 MiB working set.
-pub(crate) const BODY_CASES: &[BodyCase] = &[
+pub const BODY_CASES: &[BodyCase] = &[
     BodyCase {
         len: KIB,
         chunk_size: 64,

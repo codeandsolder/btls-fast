@@ -281,7 +281,7 @@ where
         mut self,
         runtime: &Runtime,
         requests: Receiver<Request>,
-        replies: Sender<()>,
+        replies: &Sender<()>,
     ) -> Result<u64, BoxError> {
         for request in requests {
             match request {
@@ -393,7 +393,7 @@ where
     let ssl = stream.ssl();
     let suite = ssl
         .current_cipher()
-        .and_then(|cipher| cipher.standard_name());
+        .and_then(btls::ssl::SslCipherRef::standard_name);
     if ssl.version2() != Some(SslVersion::TLS1_3) || suite != Some(SUITE) {
         return Err(format!(
             "negotiated {} {}, expected TLSv1.3 {SUITE}",
@@ -422,9 +422,9 @@ fn serve(
     match tls {
         Tls::Enabled => {
             let stream = runtime.block_on(async { accept(&acceptor()?, socket).await })?;
-            Server::new(stream, direction, body).run(&runtime, requests, replies)
+            Server::new(stream, direction, body).run(&runtime, requests, &replies)
         }
-        Tls::Disabled => Server::new(socket, direction, body).run(&runtime, requests, replies),
+        Tls::Disabled => Server::new(socket, direction, body).run(&runtime, requests, &replies),
     }
 }
 

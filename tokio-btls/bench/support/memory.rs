@@ -195,32 +195,46 @@ impl MemoryPeer {
     }
 
     /// Seals `copies` of `part` into the transport.
-    pub(super) async fn send(&mut self, part: &[u8], copies: usize) -> io::Result<()> {
-        for _ in 0..copies {
-            self.stream.write_all(part).await?;
+    pub(super) fn send<'a>(
+        &'a mut self,
+        part: &'a [u8],
+        copies: usize,
+    ) -> impl std::future::Future<Output = io::Result<()>> + 'a {
+        async move {
+            for _ in 0..copies {
+                self.stream.write_all(part).await?;
+            }
+            self.stream.flush().await
         }
-        self.stream.flush().await
     }
 
     /// Opens `copies` of `part` and compares each with it.
     ///
     /// The client's ciphertext must cover them, and nothing may follow. Only a lower bound holds
     /// for its length, since rustls adds a KeyUpdate record every 2^24 records.
-    pub(super) async fn receive(&mut self, part: &[u8], copies: usize) -> Result<(), BoxError> {
-        let sealed = Tls::Enabled.wire_len(part.len()) * copies;
-        if self.unread() < sealed {
-            return Err(format!("client wrote {} bytes, expected {sealed}", self.unread()).into());
-        }
-        let buf = &mut self.buf[..part.len()];
-        for _ in 0..copies {
-            self.stream.read_exact(buf).await?;
-            if *buf != *part {
-                return Err("server received a different body".into());
+    pub(super) fn receive<'a>(
+        &'a mut self,
+        part: &'a [u8],
+        copies: usize,
+    ) -> impl std::future::Future<Output = Result<(), BoxError>> + 'a {
+        async move {
+            let sealed = Tls::Enabled.wire_len(part.len()) * copies;
+            if self.unread() < sealed {
+                return Err(
+                    format!("client wrote {} bytes, expected {sealed}", self.unread()).into(),
+                );
             }
-        }
-        match self.unread() {
-            0 => Ok(()),
-            left => Err(format!("client wrote {left} bytes beyond its bodies").into()),
+            let buf = &mut self.buf[..part.len()];
+            for _ in 0..copies {
+                self.stream.read_exact(buf).await?;
+                if *buf != *part {
+                    return Err("server received a different body".into());
+                }
+            }
+            match self.unread() {
+                0 => Ok(()),
+                left => Err(format!("client wrote {left} bytes beyond its bodies").into()),
+            }
         }
     }
 }

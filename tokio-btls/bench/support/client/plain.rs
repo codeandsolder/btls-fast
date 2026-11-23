@@ -22,10 +22,13 @@ impl ClientAdapter for Adapter {
         Ok(())
     }
 
-    async fn connect<S>(_: &Self::Connector, transport: S) -> Result<Self::Stream<S>, BoxError>
+    fn connect<S>(
+        (): &Self::Connector,
+        transport: S,
+    ) -> impl std::future::Future<Output = Result<Self::Stream<S>, BoxError>>
     where
         S: AsyncRead + AsyncWrite + Unpin,
     {
-        Ok(transport)
+        std::future::ready(Ok(transport))
     }
 }

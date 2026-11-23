@@ -1,4 +1,4 @@
-//! tokio-btls adapter: BoringSSL through the crate under test.
+//! tokio-btls adapter: `BoringSSL` through the crate under test.
 
 use std::pin::Pin;
 

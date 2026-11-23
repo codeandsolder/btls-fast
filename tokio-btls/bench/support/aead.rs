@@ -4,6 +4,8 @@
 //! result. The stacks use TLS-specific contexts and different buffers and sealing paths, so
 //! subtracting these times from a stack's time does not measure its protocol overhead.
 
+use std::cell::Cell;
+
 use ::aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
 use ::btls::aead::{AeadCtx, Algorithm};
 use criterion::{measurement::WallTime, BenchmarkGroup};
@@ -33,16 +35,16 @@ trait AeadAdapter: Sized {
 
     /// Encrypts the payload and writes its tag into the last [`TAG_LEN`] bytes.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if sealing fails.
-    fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]);
+    /// The AEAD implementation rejects the record.
+    fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> Result<(), BoxError>;
 
     /// Decrypts the payload in place; returns whether the tag matched.
     fn open(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> bool;
 }
 
-/// BoringSSL's AEAD through btls.
+/// `BoringSSL`'s AEAD through btls.
 struct Btls(AeadCtx);
 
 /// AWS-LC's AEAD through aws-lc-rs, which rustls uses.
@@ -60,11 +62,10 @@ impl AeadAdapter for Btls {
         )?))
     }
 
-    fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) {
+    fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> Result<(), BoxError> {
         let (payload, tag) = record.split_at_mut(record.len() - TAG_LEN);
-        self.0
-            .seal_in_place(&nonce, payload, tag, aad)
-            .expect("btls failed to seal a record");
+        self.0.seal_in_place(&nonce, payload, tag, aad)?;
+        Ok(())
     }
 
     fn open(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> bool {
@@ -83,7 +84,7 @@ impl AeadAdapter for AwsLc {
         Ok(Self(LessSafeKey::new(key)))
     }
 
-    fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) {
+    fn seal(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> Result<(), BoxError> {
         let (payload, tag) = record.split_at_mut(record.len() - TAG_LEN);
         let sealed = self
             .0
@@ -92,8 +93,9 @@ impl AeadAdapter for AwsLc {
                 Aad::from(aad),
                 payload,
             )
-            .expect("aws-lc-rs failed to seal a record");
+            .map_err(|_| "aws-lc-rs failed to seal a record")?;
         tag.copy_from_slice(sealed.as_ref());
+        Ok(())
     }
 
     fn open(&mut self, nonce: [u8; 12], aad: &[u8], record: &mut [u8]) -> bool {
@@ -140,7 +142,7 @@ where
     // Checked round, outside measurement: the sealed body opens to the same bytes.
     let mut sealed = Vec::new();
     for (seq, chunk) in (0..).zip(body.chunks(MAX_RECORD)) {
-        sealed.extend_from_slice(seal_record(&mut aead, seq, chunk, &mut scratch));
+        sealed.extend_from_slice(seal_record(&mut aead, seq, chunk, &mut scratch)?);
     }
     let opened = (0..)
         .zip(sealed.chunks(MAX_SEALED))
@@ -153,6 +155,9 @@ where
     }
 
     let label = format!("aead/{}", A::NAME);
+    // Criterion's timing API returns Duration, not Result. Preserve any
+    // failed seal/open for reporting once the current benchmark call ends.
+    let failure = Cell::new(None::<BoxError>);
     match target.direction {
         Direction::Write => {
             // Continue after the checked round's records, so no nonce repeats.
@@ -160,9 +165,12 @@ where
             group.bench_function(label, |bencher| {
                 bencher.iter_custom(|iters| {
                     let stopwatch = clock.start();
-                    for _ in 0..iters {
+                    'work: for _ in 0..iters {
                         for chunk in body.chunks(MAX_RECORD) {
-                            seal_record(&mut aead, seq, chunk, &mut scratch);
+                            if let Err(error) = seal_record(&mut aead, seq, chunk, &mut scratch) {
+                                failure.set(Some(error));
+                                break 'work;
+                            }
                             seq = seq.wrapping_add(1);
                         }
                     }
@@ -174,10 +182,12 @@ where
             group.bench_function(label, |bencher| {
                 bencher.iter_custom(|iters| {
                     let stopwatch = clock.start();
-                    for _ in 0..iters {
+                    'work: for _ in 0..iters {
                         for (seq, record) in (0..).zip(sealed.chunks(MAX_SEALED)) {
-                            open_record(&mut aead, seq, record, &mut scratch)
-                                .expect("record failed to open");
+                            if open_record(&mut aead, seq, record, &mut scratch).is_none() {
+                                failure.set(Some("record failed to open".into()));
+                                break 'work;
+                            }
                         }
                     }
                     stopwatch.elapsed()
@@ -185,19 +195,33 @@ where
             });
         }
     }
+    if let Some(error) = failure.take() {
+        return Err(error);
+    }
     Ok(())
 }
 
 /// Copies `chunk` into `scratch` as a record payload, seals it there, and returns the record.
-fn seal_record<'s, A>(aead: &mut A, seq: u64, chunk: &[u8], scratch: &'s mut [u8]) -> &'s [u8]
+fn seal_record<'s, A>(
+    aead: &mut A,
+    seq: u64,
+    chunk: &[u8],
+    scratch: &'s mut [u8],
+) -> Result<&'s [u8], BoxError>
 where
     A: AeadAdapter,
 {
-    let record = &mut scratch[..chunk.len() + 1 + TAG_LEN];
+    let len = chunk
+        .len()
+        .checked_add(1 + TAG_LEN)
+        .ok_or("record length overflow")?;
+    let record = scratch
+        .get_mut(..len)
+        .ok_or("record exceeds scratch capacity")?;
     record[..chunk.len()].copy_from_slice(chunk);
     record[chunk.len()] = APPLICATION_DATA;
-    aead.seal(nonce(seq), &header(record.len()), record);
-    record
+    aead.seal(nonce(seq), &header(record.len())?, record)?;
+    Ok(record)
 }
 
 /// Copies a sealed record into `scratch`, opens it there, and returns its payload without the
@@ -211,9 +235,12 @@ fn open_record<'s, A>(
 where
     A: AeadAdapter,
 {
-    let record = &mut scratch[..sealed.len()];
+    if sealed.len() < 1 + TAG_LEN {
+        return None;
+    }
+    let record = scratch.get_mut(..sealed.len())?;
     record.copy_from_slice(sealed);
-    if !aead.open(nonce(seq), &header(record.len()), record) {
+    if !aead.open(nonce(seq), &header(record.len()).ok()?, record) {
         return None;
     }
     let record: &[u8] = record;
@@ -229,9 +256,39 @@ fn nonce(seq: u64) -> [u8; 12] {
 }
 
 /// Record header used as additional data: application data, TLS 1.2 legacy version, length.
-fn header(len: usize) -> [u8; 5] {
-    let [hi, lo] = u16::try_from(len)
-        .expect("record length fits in u16")
-        .to_be_bytes();
-    [APPLICATION_DATA, 3, 3, hi, lo]
+fn header(len: usize) -> Result<[u8; 5], BoxError> {
+    let [hi, lo] = u16::try_from(len)?.to_be_bytes();
+    Ok([APPLICATION_DATA, 3, 3, hi, lo])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn checked_tls_aead_record_roundtrip_and_tamper_detection() {
+        let mut aead = Btls::new(&KEY).unwrap();
+        let plaintext = b"ciphertext needs authenticated framing";
+        let mut scratch = vec![0; MAX_SEALED];
+        let sealed = seal_record(&mut aead, 0, plaintext, &mut scratch)
+            .unwrap()
+            .to_vec();
+        assert_eq!(
+            open_record(&mut aead, 0, &sealed, &mut scratch),
+            Some(plaintext.as_slice())
+        );
+        let mut tampered = sealed;
+        tampered[0] ^= 1;
+        assert_eq!(open_record(&mut aead, 0, &tampered, &mut scratch), None);
+        assert_eq!(open_record(&mut aead, 0, &[], &mut scratch), None);
+    }
+
+    #[test]
+    fn checked_tls_aead_framing_rejects_oversized_lengths() {
+        let mut aead = Btls::new(&KEY).unwrap();
+        let mut scratch = [0; 3];
+        assert!(seal_record(&mut aead, 0, b"payload", &mut scratch).is_err());
+        assert!(header(usize::from(u16::MAX) + 1).is_err());
+        assert_eq!(header(0).unwrap(), [APPLICATION_DATA, 3, 3, 0, 0]);
+    }
 }
