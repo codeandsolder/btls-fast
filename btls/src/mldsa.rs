@@ -14,6 +14,7 @@
 //! assert!(public_key.verify(message, &signature).is_ok());
 //! ```
 
+use std::ffi::c_int;
 use std::fmt;
 use std::mem::{self, MaybeUninit};
 use std::sync::Arc;
@@ -124,6 +125,40 @@ impl<T: Copy> SecretBuilder<T> {
         }
     }
 
+    fn generate<const PUBLIC_BYTES: usize>(
+        native: unsafe extern "C" fn(*mut u8, *mut u8, *mut T) -> c_int,
+    ) -> Result<([u8; PUBLIC_BYTES], Arc<SecretMaterial<T>>), ErrorStack> {
+        let mut public = [0; PUBLIC_BYTES];
+        let mut secret = Self::new([0; PRIVATE_KEY_SEED_BYTES]);
+        // SAFETY: the public buffer and seed have their native fixed widths;
+        // the expanded out-parameter is zeroed and uniquely writable.
+        cvt(unsafe {
+            native(
+                public.as_mut_ptr(),
+                secret.seed.as_mut_ptr(),
+                secret.expanded.as_mut_ptr(),
+            )
+        })?;
+        Ok((public, secret.into_shared()))
+    }
+
+    fn from_seed(
+        seed: &MlDsaPrivateKeySeed,
+        native: unsafe extern "C" fn(*mut T, *const u8, usize) -> c_int,
+    ) -> Result<Arc<SecretMaterial<T>>, ErrorStack> {
+        let mut secret = Self::new(*seed);
+        // SAFETY: the native input is exactly MLDSA_SEED_BYTES, and the
+        // zeroed expanded output is exclusively writable.
+        cvt(unsafe {
+            native(
+                secret.expanded.as_mut_ptr(),
+                secret.seed.as_ptr(),
+                secret.seed.len(),
+            )
+        })?;
+        Ok(secret.into_shared())
+    }
+
     fn into_shared(self) -> Arc<SecretMaterial<T>> {
         // SAFETY: the only instantiations are native opaque byte-array unions.
         // They are fully valid when zeroed, and native success filled the key.
@@ -156,63 +191,46 @@ impl MlDsaPrivateKey {
     ///
     /// Native key generation or public-key reconstruction fails.
     pub fn generate(algorithm: Algorithm) -> Result<(MlDsaPublicKey, Self), ErrorStack> {
-        unsafe {
-            ffi::init();
-            match algorithm {
-                Algorithm::MlDsa44 => {
-                    let mut pub_bytes = [0u8; ffi::MLDSA44_PUBLIC_KEY_BYTES as usize];
-                    let mut secret =
-                        SecretBuilder::<ffi::MLDSA44_private_key>::new([0; PRIVATE_KEY_SEED_BYTES]);
-                    cvt(ffi::MLDSA44_generate_key(
-                        pub_bytes.as_mut_ptr(),
-                        secret.seed.as_mut_ptr(),
-                        secret.expanded.as_mut_ptr(),
-                    ))?;
-                    let public_key = MlDsaPublicKey::from_slice(algorithm, &pub_bytes)?;
-                    Ok((
-                        public_key,
-                        Self {
-                            algorithm,
-                            inner: PrivateKeyInner::MlDsa44(secret.into_shared()),
-                        },
-                    ))
-                }
-                Algorithm::MlDsa65 => {
-                    let mut pub_bytes = [0u8; ffi::MLDSA65_PUBLIC_KEY_BYTES as usize];
-                    let mut secret =
-                        SecretBuilder::<ffi::MLDSA65_private_key>::new([0; PRIVATE_KEY_SEED_BYTES]);
-                    cvt(ffi::MLDSA65_generate_key(
-                        pub_bytes.as_mut_ptr(),
-                        secret.seed.as_mut_ptr(),
-                        secret.expanded.as_mut_ptr(),
-                    ))?;
-                    let public_key = MlDsaPublicKey::from_slice(algorithm, &pub_bytes)?;
-                    Ok((
-                        public_key,
-                        Self {
-                            algorithm,
-                            inner: PrivateKeyInner::MlDsa65(secret.into_shared()),
-                        },
-                    ))
-                }
-                Algorithm::MlDsa87 => {
-                    let mut pub_bytes = [0u8; ffi::MLDSA87_PUBLIC_KEY_BYTES as usize];
-                    let mut secret =
-                        SecretBuilder::<ffi::MLDSA87_private_key>::new([0; PRIVATE_KEY_SEED_BYTES]);
-                    cvt(ffi::MLDSA87_generate_key(
-                        pub_bytes.as_mut_ptr(),
-                        secret.seed.as_mut_ptr(),
-                        secret.expanded.as_mut_ptr(),
-                    ))?;
-                    let public_key = MlDsaPublicKey::from_slice(algorithm, &pub_bytes)?;
-                    Ok((
-                        public_key,
-                        Self {
-                            algorithm,
-                            inner: PrivateKeyInner::MlDsa87(secret.into_shared()),
-                        },
-                    ))
-                }
+        ffi::init();
+        match algorithm {
+            Algorithm::MlDsa44 => {
+                let (bytes, key) = SecretBuilder::<ffi::MLDSA44_private_key>::generate::<
+                    { ffi::MLDSA44_PUBLIC_KEY_BYTES as usize },
+                >(ffi::MLDSA44_generate_key)?;
+                let public = MlDsaPublicKey::from_slice(algorithm, &bytes)?;
+                Ok((
+                    public,
+                    Self {
+                        algorithm,
+                        inner: PrivateKeyInner::MlDsa44(key),
+                    },
+                ))
+            }
+            Algorithm::MlDsa65 => {
+                let (bytes, key) = SecretBuilder::<ffi::MLDSA65_private_key>::generate::<
+                    { ffi::MLDSA65_PUBLIC_KEY_BYTES as usize },
+                >(ffi::MLDSA65_generate_key)?;
+                let public = MlDsaPublicKey::from_slice(algorithm, &bytes)?;
+                Ok((
+                    public,
+                    Self {
+                        algorithm,
+                        inner: PrivateKeyInner::MlDsa65(key),
+                    },
+                ))
+            }
+            Algorithm::MlDsa87 => {
+                let (bytes, key) = SecretBuilder::<ffi::MLDSA87_private_key>::generate::<
+                    { ffi::MLDSA87_PUBLIC_KEY_BYTES as usize },
+                >(ffi::MLDSA87_generate_key)?;
+                let public = MlDsaPublicKey::from_slice(algorithm, &bytes)?;
+                Ok((
+                    public,
+                    Self {
+                        algorithm,
+                        inner: PrivateKeyInner::MlDsa87(key),
+                    },
+                ))
             }
         }
     }
@@ -223,47 +241,28 @@ impl MlDsaPrivateKey {
     ///
     /// The seed cannot be expanded or native allocation fails.
     pub fn from_seed(algorithm: Algorithm, seed: &MlDsaPrivateKeySeed) -> Result<Self, ErrorStack> {
-        unsafe {
-            ffi::init();
-            match algorithm {
-                Algorithm::MlDsa44 => {
-                    let mut secret = SecretBuilder::<ffi::MLDSA44_private_key>::new(*seed);
-                    cvt(ffi::MLDSA44_private_key_from_seed(
-                        secret.expanded.as_mut_ptr(),
-                        secret.seed.as_ptr(),
-                        secret.seed.len(),
-                    ))?;
-                    Ok(Self {
-                        algorithm,
-                        inner: PrivateKeyInner::MlDsa44(secret.into_shared()),
-                    })
-                }
-                Algorithm::MlDsa65 => {
-                    let mut secret = SecretBuilder::<ffi::MLDSA65_private_key>::new(*seed);
-                    cvt(ffi::MLDSA65_private_key_from_seed(
-                        secret.expanded.as_mut_ptr(),
-                        secret.seed.as_ptr(),
-                        secret.seed.len(),
-                    ))?;
-                    Ok(Self {
-                        algorithm,
-                        inner: PrivateKeyInner::MlDsa65(secret.into_shared()),
-                    })
-                }
-                Algorithm::MlDsa87 => {
-                    let mut secret = SecretBuilder::<ffi::MLDSA87_private_key>::new(*seed);
-                    cvt(ffi::MLDSA87_private_key_from_seed(
-                        secret.expanded.as_mut_ptr(),
-                        secret.seed.as_ptr(),
-                        secret.seed.len(),
-                    ))?;
-                    Ok(Self {
-                        algorithm,
-                        inner: PrivateKeyInner::MlDsa87(secret.into_shared()),
-                    })
-                }
+        ffi::init();
+        let inner = match algorithm {
+            Algorithm::MlDsa44 => {
+                PrivateKeyInner::MlDsa44(SecretBuilder::<ffi::MLDSA44_private_key>::from_seed(
+                    seed,
+                    ffi::MLDSA44_private_key_from_seed,
+                )?)
             }
-        }
+            Algorithm::MlDsa65 => {
+                PrivateKeyInner::MlDsa65(SecretBuilder::<ffi::MLDSA65_private_key>::from_seed(
+                    seed,
+                    ffi::MLDSA65_private_key_from_seed,
+                )?)
+            }
+            Algorithm::MlDsa87 => {
+                PrivateKeyInner::MlDsa87(SecretBuilder::<ffi::MLDSA87_private_key>::from_seed(
+                    seed,
+                    ffi::MLDSA87_private_key_from_seed,
+                )?)
+            }
+        };
+        Ok(Self { algorithm, inner })
     }
 
     /// Returns the algorithm for this key.
