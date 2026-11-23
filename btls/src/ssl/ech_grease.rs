@@ -28,12 +28,13 @@ impl EchGreaseAead {
     }
 
     /// Returns the HPKE AEAD identifier encoded in the extension.
+    #[must_use = "Use the HPKE AEAD identifier when constructing or inspecting the extension."]
     pub const fn id(self) -> u16 {
         self.0
     }
 }
 
-/// Rounding used by NSS when padding an ECH GREASE inner ClientHello.
+/// Rounding used by NSS when padding an ECH GREASE inner `ClientHello`.
 /// This does not change other TLS settings.
 /// Custom callbacks can return [`EchGreaseParameters`] without using these rules.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -67,7 +68,8 @@ pub struct EchGreaseParameters {
 }
 
 impl EchGreaseParameters {
-    /// Parameters with an X25519 `enc`, as BoringSSL sends by default.
+    /// Parameters with an X25519 `enc`, as `BoringSSL` sends by default.
+    #[must_use = "Use the constructed ECH GREASE parameters when configuring the extension."]
     pub const fn new(aead: EchGreaseAead, payload_length: NonZeroU16) -> Self {
         Self {
             aead,
@@ -77,19 +79,21 @@ impl EchGreaseParameters {
     }
 }
 
-/// A read-only view of the first ClientHello, valid only during the callback.
+/// A read-only view of the first `ClientHello`, valid only during the callback.
 ///
 /// Extension sizes exclude their headers; PSK is reported separately.
 #[derive(Clone, Copy)]
 pub struct EchGreaseSizeInfo<'a>(pub(crate) &'a ffi::SSL_ECH_GREASE_SIZE_INFO);
 
-impl EchGreaseSizeInfo<'_> {
+impl<'a> EchGreaseSizeInfo<'a> {
     /// Cipher suite IDs in wire order, each encoded as two big-endian bytes.
-    pub const fn cipher_suites(&self) -> &[u8] {
+    #[must_use = "Use the borrowed wire representation while the callback is active."]
+    pub const fn cipher_suites(self) -> &'a [u8] {
         if self.0.cipher_suites_length == 0 {
             return &[];
         }
-        // BoringSSL owns the serialized preamble until the callback returns.
+        // SAFETY: the native callback supplies a readable cipher suite vector
+        // and retains its allocation for the view's complete callback lifetime.
         unsafe { slice::from_raw_parts(self.0.cipher_suites, self.0.cipher_suites_length) }
     }
 
@@ -98,11 +102,12 @@ impl EchGreaseSizeInfo<'_> {
     /// Size policies must account for these GREASE entries too.
     ///
     /// [RFC 8701]: https://www.rfc-editor.org/rfc/rfc8701.html
-    pub fn extensions(&self) -> impl ExactSizeIterator<Item = (ExtensionType, usize)> + '_ {
+    pub fn extensions(self) -> impl ExactSizeIterator<Item = (ExtensionType, usize)> + 'a {
         let extensions = if self.0.num_extensions == 0 {
             &[]
         } else {
-            // Metadata is owned by the synchronous native callback invocation.
+            // SAFETY: the native callback retains this extension metadata
+            // and its reported element count for the view's lifetime.
             unsafe { slice::from_raw_parts(self.0.extensions, self.0.num_extensions) }
         };
         extensions
@@ -112,61 +117,70 @@ impl EchGreaseSizeInfo<'_> {
 
     /// Wire preamble length, including the session ID and DTLS cookie, excluding
     /// handshake and extensions headers. This is not an encoded ECH Inner size.
-    pub const fn preamble_length(&self) -> usize {
+    #[must_use = "Use the wire length when computing ECH GREASE padding."]
+    pub const fn preamble_length(self) -> usize {
         self.0.preamble_length
     }
 
     /// Pending PSK extension body length; zero if absent.
-    pub const fn psk_extension_length(&self) -> usize {
+    #[must_use = "Use the PSK extension length when computing ECH GREASE padding."]
+    pub const fn psk_extension_length(self) -> usize {
         self.0.psk_extension_length
     }
 
     /// Host name length read from the serialized SNI extension, or `None` when
     /// no hostname was set; the connector sets none for IP literals.
-    pub fn server_name_length(&self) -> Option<usize> {
+    #[must_use = "Use the optional host-name length when calculating padding."]
+    pub fn server_name_length(self) -> Option<usize> {
         (self.0.has_server_name != 0).then_some(self.0.server_name_length)
     }
 
-    /// AEAD BoringSSL would advertise without this callback.
-    pub const fn default_aead(&self) -> EchGreaseAead {
+    /// AEAD `BoringSSL` would advertise without this callback.
+    #[must_use = "Use the native default AEAD selection when configuring ECH GREASE."]
+    pub const fn default_aead(self) -> EchGreaseAead {
         EchGreaseAead(self.0.default_aead_id)
     }
 
     /// Ciphertext expansion, shared by both supported GREASE AEADs.
-    pub const fn aead_overhead(&self) -> usize {
+    #[must_use = "Account for the AEAD overhead in ECH GREASE payload sizes."]
+    pub const fn aead_overhead(self) -> usize {
         self.0.aead_overhead
     }
 
     /// CH1's remaining extensions-vector frame budget, not a peer acceptance limit.
-    /// See [`message_length`](Self::message_length) for the 16 KiB BoringSSL limit.
+    /// See [`message_length`](Self::message_length) for the 16 KiB `BoringSSL` limit.
     /// HRR may need more room for a cookie or a larger key share in CH2;
     /// dropping CH1's padding can also make CH2 shorter.
-    pub const fn max_payload_length(&self) -> usize {
+    #[must_use = "Check the available extension budget before returning a payload."]
+    pub const fn max_payload_length(self) -> usize {
         self.0.max_payload_length
     }
 
-    /// ClientHello body length before the payload, including ECH framing, PSK
+    /// `ClientHello` body length before the payload, including ECH framing, PSK
     /// and reserved padding. CH1's body is this plus the payload length, except
     /// that TLS over TCP pads a message of 256 to 511 bytes, header included,
-    /// to at least 512 ([RFC 7685]). A BoringSSL server rejects a ClientHello
+    /// to at least 512 ([RFC 7685]). A `BoringSSL` server rejects a `ClientHello`
     /// above 16 KiB unless it requests client certificates.
     ///
     /// [RFC 7685]: https://www.rfc-editor.org/rfc/rfc7685.html
-    pub const fn message_length(&self) -> usize {
+    #[must_use = "Account for the existing message size when computing GREASE padding."]
+    pub const fn message_length(self) -> usize {
         self.0.message_length
     }
 
-    /// Whether this is a DTLS ClientHello.
-    pub const fn is_dtls(&self) -> bool {
+    /// Whether this is a DTLS `ClientHello`.
+    #[must_use = "Check the transport type before selecting ECH GREASE behavior."]
+    pub const fn is_dtls(self) -> bool {
         self.0.is_dtls != 0
     }
 
     /// Whether this connection uses QUIC.
-    pub const fn is_quic(&self) -> bool {
+    #[must_use = "Check the transport type before selecting ECH GREASE behavior."]
+    pub const fn is_quic(self) -> bool {
         self.0.is_quic != 0
     }
 
-    /// Parameters drawn as BoringSSL does without a callback, advertising `aead`.
+    /// Parameters drawn as `BoringSSL` does without a callback, advertising `aead`.
     ///
     /// The payload is 128, 160, 192 or 224 bytes plus the AEAD tag, chosen
     /// uniformly, and `enc` is an X25519 public key. Pass
@@ -185,8 +199,12 @@ impl EchGreaseSizeInfo<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if random generation fails or the payload exceeds the extension budget.
     pub fn boringssl_parameters(
-        &self,
+        self,
         aead: EchGreaseAead,
     ) -> Result<EchGreaseParameters, ErrorStack> {
         let mut draw = [0];
@@ -211,7 +229,7 @@ impl EchGreaseSizeInfo<'_> {
     /// default. `host_len` is the URL host length; NSS passes it to a `uint8_t`
     /// and applies it even without SNI, as for IP literals. A GREASE version is
     /// assumed exactly when [RFC 8701] GREASE extensions are present, since
-    /// BoringSSL emits both under the same flag. NSS never GREASEs DTLS; the
+    /// `BoringSSL` emits both under the same flag. NSS never GREASEs DTLS; the
     /// rule is still evaluated there. Wire order follows the configured
     /// extension order, so list ECH last to match NSS; with GREASE enabled the
     /// trailing [RFC 8701] extension still follows ECH, unlike NSS.
@@ -219,8 +237,9 @@ impl EchGreaseSizeInfo<'_> {
     /// [NSS 3.127]: https://firefox-source-docs.mozilla.org/security/nss/releases/nss_3_127.html
     /// [`tls13_MaybeGreaseEch`]: https://github.com/nss-dev/nss/blob/42dc6cfddbcee57f391dd1b4550604e68437986d/lib/ssl/tls13ech.c#L2143
     /// [RFC 8701]: https://www.rfc-editor.org/rfc/rfc8701.html
+    #[must_use = "Use the computed NSS-shaped length or validate it against the payload limit."]
     pub fn nss_payload_length(
-        &self,
+        self,
         max_name_len: u8,
         host_len: usize,
         rounding: EchGreaseRounding,
@@ -260,7 +279,7 @@ impl EchGreaseSizeInfo<'_> {
             len += TLS_EXTENSION_HEADER_LEN + 1 + 2 * compressed;
         }
         // NSS passes strlen(url) to a uint8_t parameter, so long hosts wrap.
-        len += usize::from(max_name_len.saturating_sub(host_len as u8));
+        len += usize::from(max_name_len.saturating_sub(host_len.to_le_bytes()[0]));
         let remainder = match rounding {
             EchGreaseRounding::NssPre3127 => len % 32,
             EchGreaseRounding::Nss3127 => (len - 1) % 32,
@@ -295,8 +314,12 @@ impl EchGreaseSizeInfo<'_> {
     /// # Ok(())
     /// # }
     /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the NSS-shaped payload exceeds the budget or entropy generation fails.
     pub fn nss_parameters(
-        &self,
+        self,
         max_name_len: u8,
         host_len: usize,
         rounding: EchGreaseRounding,
@@ -316,7 +339,7 @@ impl EchGreaseSizeInfo<'_> {
         })
     }
 
-    fn checked_payload_length(&self, len: usize) -> Result<NonZeroU16, ErrorStack> {
+    fn checked_payload_length(self, len: usize) -> Result<NonZeroU16, ErrorStack> {
         u16::try_from(len)
             .ok()
             .filter(|len| usize::from(*len) <= self.max_payload_length())
@@ -338,10 +361,11 @@ where
         + Sync
         + 'static,
 {
-    // Both views borrow the synchronous invocation. BoringSSL locks the policy
-    // while it runs, so the closure cannot be replaced from inside, and the
-    // shared SSL setters still callable do not affect the extension being built.
+    // SAFETY: BoringSSL passes a live non-null size-info object for the
+    // synchronous callback. It remains valid until this callback returns.
     let info = unsafe { &*info };
+    // SAFETY: info.ssl points to the live connection that owns this callback,
+    // so the borrowed reference cannot outlive this native invocation.
     let ssl = unsafe { SslRef::from_ptr(info.ssl.cast_mut()) };
     let callback = if CONTEXT {
         ssl.ssl_context()
@@ -354,6 +378,8 @@ where
     };
     match crate::util::catch_native(|| (callback.0)(ssl, EchGreaseSizeInfo(info))) {
         Some(Ok(parameters)) => {
+            // SAFETY: the callback's native contract supplies non-null,
+            // exclusively writable output for a complete parameter struct.
             unsafe {
                 *out = ffi::SSL_ECH_GREASE_PARAMETERS {
                     aead_id: parameters.aead.0,
@@ -377,8 +403,8 @@ impl SslContextBuilder {
     /// Called once when CH1 needs GREASE; HRR and DTLS HelloVerifyRequest reuse
     /// its bytes. Servers accept the policy but never call it.
     /// Does not enable [`GREASE`](SslRef::set_enable_ech_grease) or change real
-    /// ECH or TLS cipher preferences. An installed policy decides every GREASE ClientHello: it
-    /// can neither skip one nor defer to BoringSSL's random draw. Errors or
+    /// ECH or TLS cipher preferences. An installed policy decides every GREASE `ClientHello`: it
+    /// can neither skip one nor defer to `BoringSSL`'s random draw. Errors or
     /// oversized output or a callback panic fail the handshake.
     /// See [`EchGreaseSizeInfo::max_payload_length`] for sizing limits. Arbitrary
     /// lengths need not follow [RFC 9849]'s recommended distribution;
@@ -405,6 +431,8 @@ impl SslContextBuilder {
             SslContext::register_callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)?,
             Some(Callback(callback)),
         )?;
+        // SAFETY: the exclusively borrowed SSL context owns the installed
+        // ex-data slot; native stores only the static callback function pointer.
         unsafe {
             ffi::SSL_CTX_set_ech_grease_callback(
                 self.as_ptr(),
@@ -415,11 +443,13 @@ impl SslContextBuilder {
         Ok(())
     }
 
-    /// Removes the context policy, restoring BoringSSL's default parameters.
+    /// Removes the context policy, restoring `BoringSSL`'s default parameters.
     /// Per-connection overrides and the GREASE enable flag are unchanged.
     /// Stored closures remain owned by the context until replaced or freed.
     #[corresponds(SSL_CTX_set_ech_grease_callback)]
     pub fn clear_ech_grease_callback(&mut self) {
+        // SAFETY: the builder exclusively owns its native context; clearing
+        // the callback does not retain the argument or any temporary data.
         unsafe {
             ffi::SSL_CTX_set_ech_grease_callback(self.as_ptr(), None, ptr::null_mut());
         }
@@ -453,6 +483,8 @@ impl SslRef {
         let slot = self
             .ex_data_mut(index)
             .ok_or_else(|| ErrorStack::internal_error_str("missing ECH GREASE callback slot"))?;
+        // SAFETY: ssl is the exclusively borrowed connection. The registered
+        // ex-data slot outlives this native callback registration.
         unsafe {
             cvt_0i(ffi::SSL_set_ech_grease_callback(
                 ssl,
@@ -465,12 +497,14 @@ impl SslRef {
     }
 
     /// Removes the connection override, falling back to the current context's
-    /// policy or BoringSSL's default parameters. Does not disable GREASE.
+    /// policy or `BoringSSL`'s default parameters. Does not disable GREASE.
     /// Fails without changing the policy if CH1 has started, the handshake has
     /// finished, or the handshake configuration has been discarded.
     /// Stored closures remain owned by the connection until replaced or freed.
     #[corresponds(SSL_set_ech_grease_callback)]
     pub fn clear_ech_grease_callback(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: this connection is exclusively borrowed, and native
+        // validates the handshake state before clearing its callback.
         unsafe {
             cvt_0i(ffi::SSL_set_ech_grease_callback(
                 self.as_ptr(),

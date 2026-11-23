@@ -11,107 +11,81 @@
 // limitations under the License.
 //
 
-use std::ffi::CStr;
+//! Version and build metadata from the pinned native BoringSSL library.
+//!
+//! BoringSSL deliberately reports stable compatibility strings rather than
+//! an OpenSSL release date or configure-time provenance.
+
+use std::ffi::{c_int, CStr};
 
 use crate::ffi::{
     OpenSSL_version, OpenSSL_version_num, OPENSSL_BUILT_ON, OPENSSL_CFLAGS, OPENSSL_DIR,
     OPENSSL_PLATFORM, OPENSSL_VERSION,
 };
 
-/// OPENSSL_VERSION_NUMBER is a numeric release version identifier:
-///
-/// `MNNFFPPS: major minor fix patch status`
-///
-/// The status nibble has one of the values 0 for development, 1 to e for betas 1 to 14, and f for release.
-///
-/// for example
-///
-/// `0x000906000 == 0.9.6 dev`
-/// `0x000906023 == 0.9.6b beta 3`
-/// `0x00090605f == 0.9.6e release`
-///
-/// Versions prior to 0.9.3 have identifiers < 0x0930. Versions between 0.9.3 and 0.9.5 had a version identifier with this interpretation:
-///
-/// `MMNNFFRBB major minor fix final beta/patch`
-///
-/// for example
-///
-/// `0x000904100 == 0.9.4 release`
-/// `0x000905000 == 0.9.5 dev`
-///
-/// Version 0.9.5a had an interim interpretation that is like the current one, except the patch level got the highest bit set, to keep continuity. The number was therefore 0x0090581f
-///
-/// The return value of this function can be compared to the macro to make sure that the correct version of the library has been loaded, especially when using DLLs on Windows systems.
-#[must_use = "Use the returned native build information for inspection or diagnostics."]
-pub fn number() -> i64 {
-    unsafe { OpenSSL_version_num() as i64 }
+/// Returns the native compatibility version identifier without signed truncation.
+#[must_use = "Use the returned native compatibility version for inspection or diagnostics."]
+pub fn number() -> u64 {
+    // SAFETY: this native constant-returning function has no inputs.
+    u64::from(unsafe { OpenSSL_version_num() })
 }
 
-/// The text variant of the version number and the release date. For example, "OpenSSL 0.9.5a 1 Apr 2000".
-#[must_use = "Use the returned native library version for inspection or diagnostics."]
-pub fn version() -> &'static str {
-    unsafe {
-        CStr::from_ptr(OpenSSL_version(OPENSSL_VERSION))
-            .to_str()
-            .unwrap()
+// The pinned native implementation returns static NUL-terminated UTF-8
+// string literals for every selector, including unknown selectors.
+fn native_version_info(selector: c_int) -> &'static str {
+    // SAFETY: OpenSSL_version returns a static string (see native crypto.cc).
+    let data = unsafe { OpenSSL_version(selector) };
+    if data.is_null() {
+        return "not available";
     }
+    // SAFETY: data points to a static NUL-terminated string returned by the
+    // pinned native implementation, so it remains valid for program lifetime.
+    unsafe { CStr::from_ptr(data) }
+        .to_str()
+        .unwrap_or("invalid native version metadata")
 }
 
-/// The compiler flags set for the compilation process in the form "compiler: ..." if available or
-/// "compiler: information not available" otherwise.
+/// Returns the native library name (BoringSSL in the pinned implementation).
+#[must_use = "Use the returned library name for inspection or diagnostics."]
+pub fn version() -> &'static str {
+    native_version_info(OPENSSL_VERSION)
+}
+
+/// Returns the native compiler metadata placeholder.
 #[must_use = "Use the returned native build information for inspection or diagnostics."]
 pub fn c_flags() -> &'static str {
-    unsafe {
-        CStr::from_ptr(OpenSSL_version(OPENSSL_CFLAGS))
-            .to_str()
-            .unwrap()
-    }
+    native_version_info(OPENSSL_CFLAGS)
 }
 
-/// The date of the build process in the form "built on: ..." if available or "built on: date not available" otherwise.
+/// Returns the native build-date placeholder.
 #[must_use = "Use the returned native build information for inspection or diagnostics."]
 pub fn built_on() -> &'static str {
-    unsafe {
-        CStr::from_ptr(OpenSSL_version(OPENSSL_BUILT_ON))
-            .to_str()
-            .unwrap()
-    }
+    native_version_info(OPENSSL_BUILT_ON)
 }
 
-/// The "Configure" target of the library build in the form "platform: ..." if available or "platform: information not available" otherwise.
+/// Returns the native build-platform placeholder.
 #[must_use = "Use the returned native build information for inspection or diagnostics."]
 pub fn platform() -> &'static str {
-    unsafe {
-        CStr::from_ptr(OpenSSL_version(OPENSSL_PLATFORM))
-            .to_str()
-            .unwrap()
-    }
+    native_version_info(OPENSSL_PLATFORM)
 }
 
-/// The "OPENSSLDIR" setting of the library build in the form "OPENSSLDIR: "..."" if available or "OPENSSLDIR: N/A" otherwise.
+/// Returns the native OpenSSL directory placeholder.
 #[must_use = "Use the returned native build information for inspection or diagnostics."]
 pub fn dir() -> &'static str {
-    unsafe {
-        CStr::from_ptr(OpenSSL_version(OPENSSL_DIR))
-            .to_str()
-            .unwrap()
-    }
+    native_version_info(OPENSSL_DIR)
 }
 
-/// This test ensures that we do not segfault when calling the functions of this module
-/// and that the strings respect a reasonable format.
-#[test]
-fn test_versions() {
-    println!("Number: '{}'", number());
-    println!("Version: '{}'", version());
-    println!("C flags: '{}'", c_flags());
-    println!("Built on: '{}'", built_on());
-    println!("Platform: '{}'", platform());
-    println!("Dir: '{}'", dir());
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    assert!(number() > 0);
-    assert!(version().starts_with("BoringSSL"));
-    assert!(c_flags().starts_with("compiler:"));
-    assert!(built_on().starts_with("built on:"));
-    assert!(dir().starts_with("OPENSSLDIR:"));
+    #[test]
+    fn native_compatibility_version_and_metadata() {
+        assert!(number() > 0);
+        assert_eq!(version(), "BoringSSL");
+        assert!(c_flags().starts_with("compiler:"));
+        assert!(built_on().starts_with("built on:"));
+        assert!(platform().starts_with("platform:"));
+        assert!(dir().starts_with("OPENSSLDIR:"));
+    }
 }
