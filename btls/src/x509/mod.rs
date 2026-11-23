@@ -493,7 +493,7 @@ impl X509Builder {
     /// x509_name.append_entry_by_text("ST", "CA").unwrap();
     /// x509_name.append_entry_by_text("O", "Some organization").unwrap();
     /// x509_name.append_entry_by_text("CN", "www.example.com").unwrap();
-    /// let x509_name = x509_name.build();
+    /// let x509_name = x509_name.build().unwrap();
     ///
     /// let mut x509 = btls::x509::X509::builder().unwrap();
     /// x509.set_subject_name(&x509_name).unwrap();
