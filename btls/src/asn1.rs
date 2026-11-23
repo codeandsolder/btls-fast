@@ -88,20 +88,31 @@ impl str::FromStr for Asn1GeneralizedTime {
     }
 }
 
+// All ASN.1 time formatting uses an owned native memory BIO. The native
+// printer is the only part that varies between time representations.
+fn display_asn1_time(
+    formatter: &mut fmt::Formatter<'_>,
+    print: impl FnOnce(&MemBio) -> c_int,
+) -> fmt::Result {
+    let Ok(bio) = MemBio::new() else {
+        return formatter.write_str("error");
+    };
+    if print(&bio) != 1 {
+        return formatter.write_str("error");
+    }
+    let Ok(bytes) = bio.get_buf() else {
+        return formatter.write_str("error");
+    };
+    formatter.write_str(str::from_utf8(bytes).unwrap_or("error"))
+}
+
 impl fmt::Display for Asn1GeneralizedTimeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Ok(bio) = MemBio::new() else {
-            return f.write_str("error");
-        };
-        // SAFETY: both native handles remain live for the synchronous
-        // conversion; the BIO owns the output memory.
-        if unsafe { ffi::ASN1_GENERALIZEDTIME_print(bio.as_ptr(), self.as_ptr()) } != 1 {
-            return f.write_str("error");
-        }
-        let Ok(text) = bio.get_buf() else {
-            return f.write_str("error");
-        };
-        f.write_str(str::from_utf8(text).unwrap_or("error"))
+        display_asn1_time(f, |bio| {
+            // SAFETY: the live generalized time remains borrowed while the
+            // output BIO owns its memory for the duration of native printing.
+            unsafe { ffi::ASN1_GENERALIZEDTIME_print(bio.as_ptr(), self.as_ptr()) }
+        })
     }
 }
 
@@ -305,18 +316,11 @@ impl PartialOrd<Asn1Time> for &Asn1TimeRef {
 
 impl fmt::Display for Asn1TimeRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Ok(bio) = MemBio::new() else {
-            return f.write_str("error");
-        };
-        // SAFETY: the native time is live and shared-borrowed; the output
-        // BIO is owned and remains valid for the duration of this call.
-        if unsafe { ffi::ASN1_TIME_print(bio.as_ptr(), self.as_ptr()) } != 1 {
-            return f.write_str("error");
-        }
-        let Ok(text) = bio.get_buf() else {
-            return f.write_str("error");
-        };
-        f.write_str(str::from_utf8(text).unwrap_or("error"))
+        display_asn1_time(f, |bio| {
+            // SAFETY: the live ASN.1 time is shared-borrowed, and the memory
+            // BIO owns its writable output allocation throughout the call.
+            unsafe { ffi::ASN1_TIME_print(bio.as_ptr(), self.as_ptr()) }
+        })
     }
 }
 
@@ -766,7 +770,7 @@ impl fmt::Display for Asn1ObjectRef {
         let Ok(native_capacity) = c_int::try_from(capacity) else {
             return fmt.write_str("error");
         };
-        let mut buf = Vec::new();
+        let mut buf = Vec::<u8>::new();
         if buf.try_reserve_exact(capacity).is_err() {
             return fmt.write_str("error");
         }

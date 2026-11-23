@@ -34,7 +34,6 @@ use crate::bn::{BigNum, BigNumRef};
 use crate::error::ErrorStack;
 use crate::ffi;
 use crate::pkey::{HasPrivate, HasPublic, Private, Public};
-use crate::try_int;
 use crate::{cvt, cvt_n, cvt_p};
 
 pub const EVP_PKEY_OP_SIGN: c_int = 1 << 3;

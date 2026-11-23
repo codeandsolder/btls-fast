@@ -94,28 +94,21 @@ fn signature_algorithm_ids(extension: &[u8]) -> Vec<u16> {
 
 // A fully local TLS 1.2 handshake tests the patch-owned legacy suites,
 // rather than depending on remote endpoints with changing availability.
+// Both handshake peers must pin the same protocol version; this also
+// makes local cipher and FFDHE regressions independent of native defaults.
+fn set_fixed_tls_version(context: &mut SslContextBuilder, version: SslVersion) {
+    context.set_min_proto_version(Some(version)).unwrap();
+    context.set_max_proto_version(Some(version)).unwrap();
+}
+
 fn negotiate_legacy_cipher(cipher: &str) {
     let mut server = Server::builder();
-    server
-        .ctx()
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .unwrap();
-    server
-        .ctx()
-        .set_max_proto_version(Some(SslVersion::TLS1_2))
-        .unwrap();
+    set_fixed_tls_version(server.ctx(), SslVersion::TLS1_2);
     server.ctx().set_cipher_list(cipher).unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
-    client
-        .ctx()
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .unwrap();
-    client
-        .ctx()
-        .set_max_proto_version(Some(SslVersion::TLS1_2))
-        .unwrap();
+    set_fixed_tls_version(client.ctx(), SslVersion::TLS1_2);
     client.ctx().set_cipher_list(cipher).unwrap();
     let stream = client.connect();
 
@@ -239,26 +232,12 @@ fn boringssl_patch_ffdhe_named_groups_negotiate_tls13() {
         ("ffdhe3072", "dhe3072", ffi::SSL_GROUP_FFDHE3072 as u16),
     ] {
         let mut server = Server::builder();
-        server
-            .ctx()
-            .set_min_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
-        server
-            .ctx()
-            .set_max_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
+        set_fixed_tls_version(server.ctx(), SslVersion::TLS1_3);
         server.ctx().set_curves_list(configured_name).unwrap();
         let server = server.build();
 
         let mut client = server.client_with_root_ca();
-        client
-            .ctx()
-            .set_min_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
-        client
-            .ctx()
-            .set_max_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
+        set_fixed_tls_version(client.ctx(), SslVersion::TLS1_3);
         client.ctx().set_curves_list(configured_name).unwrap();
 
         let stream = client.connect();
