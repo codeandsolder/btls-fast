@@ -2122,6 +2122,8 @@ impl SslContextBuilder {
     pub fn cert_store(&self) -> &X509StoreBuilderRef {
         self.ctx.check_x509();
 
+        // SAFETY: The builder exclusively owns a live X.509 context with an initialized
+        // certificate store; the getter returns only a borrowed store pointer.
         unsafe { X509StoreBuilderRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
@@ -2145,6 +2147,8 @@ impl SslContextBuilder {
         );
         // OTOH, it's not safe to return a shared &X509Store when the builder owns it exclusively
 
+        // SAFETY: The builder owns the only mutable certificate store, checked above
+        // against an installed shared store; the native pointer stays live.
         unsafe { X509StoreBuilderRef::from_ptr_mut(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
@@ -2526,7 +2530,6 @@ impl SslContextBuilder {
                 self.as_ptr(),
                 sigalgs.as_ptr(),
             ))
-            .map(|()| ())
         }
     }
 
@@ -2567,7 +2570,6 @@ impl SslContextBuilder {
                 indices.as_ptr().cast::<u16>(),
                 try_int(indices.len())?,
             ))
-            .map(|()| ())
         }
     }
 
@@ -2780,6 +2782,9 @@ impl ToOwned for SslContextRef {
     type Owned = SslContext;
 
     fn to_owned(&self) -> Self::Owned {
+        // SAFETY: A valid borrowed context has a nonnull native pointer. BoringSSL
+        // increments its native reference count unconditionally before
+        // the second Rust owner takes responsibility for releasing it.
         unsafe {
             SSL_CTX_up_ref(self.as_ptr());
             SslContext::from_ptr(self.as_ptr())
@@ -2895,6 +2900,8 @@ impl SslContextRef {
     pub fn cert_store(&self) -> &X509StoreRef {
         self.check_x509();
 
+        // SAFETY: The live X.509 context holds its initialized certificate store,
+        // and this native getter returns only a borrowed reference.
         unsafe { X509StoreRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
@@ -3026,9 +3033,7 @@ impl SslContextRef {
     ///
     /// Registration or replacement of the native X.509 marker fails.
     pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
-        unsafe {
-            self.replace_ex_data(X509_FLAG_INDEX.register()?, true)?;
-        }
+        self.replace_ex_data(X509_FLAG_INDEX.register()?, true)?;
         Ok(())
     }
 
@@ -3134,11 +3139,15 @@ impl ClientHello<'_> {
     }
 
     pub fn ssl_mut(&mut self) -> &mut SslRef {
+        // SAFETY: The ClientHello is live for the certificate-selection callback;
+        // the exclusive Rust borrow allows a mutable reference to its SSL.
         unsafe { SslRef::from_ptr_mut(self.0.ssl) }
     }
 
     #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
+        // SAFETY: The ClientHello is live for the certificate-selection callback;
+        // the native SSL pointer remains valid for the shared borrow.
         unsafe { SslRef::from_ptr(self.0.ssl) }
     }
 
@@ -3218,12 +3227,16 @@ unsafe impl Stackable for SslCipher {
     type StackType = ffi::stack_st_SSL_CIPHER;
 }
 
+// SAFETY: SSL_CIPHER descriptors are immutable process-lifetime native objects;
+// the wrapper retains a shared reference and does not own or free the pointer.
 unsafe impl ForeignType for SslCipher {
     type CType = ffi::SSL_CIPHER;
     type Ref = SslCipherRef;
 
     #[inline]
     unsafe fn from_ptr(ptr: *mut ffi::SSL_CIPHER) -> Self {
+        // SAFETY: The unsafe ForeignType caller supplies a valid static cipher
+        // descriptor; converting it to a shared native reference cannot free it.
         Self(unsafe { SslCipherRef::from_ptr(ptr) })
     }
 
@@ -3252,6 +3265,8 @@ pub struct SslCipherRef(Opaque);
     clippy::non_send_fields_in_send_ty,
     reason = "SSL_CIPHER descriptors are immutable and global; Opaque deliberately blocks auto-Send"
 )]
+// SAFETY: native cipher descriptors are immutable static storage shared by
+// all TLS connections; moving a borrowed descriptor does not permit mutation.
 unsafe impl Send for SslCipherRef {}
 // SAFETY: all public accessors query immutable native cipher metadata.
 unsafe impl Sync for SslCipherRef {}
@@ -3438,6 +3453,9 @@ impl ToOwned for SslSessionRef {
     type Owned = SslSession;
 
     fn to_owned(&self) -> SslSession {
+        // SAFETY: The borrowed session has a valid nonnull native pointer. BoringSSL
+        // always increments its reference count; Rust then owns the extra
+        // session reference until it is dropped.
         unsafe {
             SSL_SESSION_up_ref(self.as_ptr());
             SslSession(NonNull::new_unchecked(self.as_ptr()))
@@ -3450,6 +3468,8 @@ impl SslSessionRef {
     #[corresponds(SSL_SESSION_get_id)]
     #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> &[u8] {
+        // SAFETY: The live session owns the ID bytes; the out-length is writable,
+        // and the validated native slice handles an empty/null ID safely.
         unsafe {
             let mut len = 0;
             let p = ffi::SSL_SESSION_get_id(self.as_ptr(), &raw mut len);
@@ -3463,6 +3483,8 @@ impl SslSessionRef {
     #[corresponds(SSL_SESSION_get_master_key)]
     #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn master_key_len(&self) -> usize {
+        // SAFETY: The live session may be queried for the key size using a null
+        // output buffer and zero capacity, as required by this native API.
         unsafe { SSL_SESSION_get_master_key(self.as_ptr(), ptr::null_mut(), 0) }
     }
 
@@ -3471,6 +3493,8 @@ impl SslSessionRef {
     /// Returns the number of bytes written, or the size of the master key if the buffer is empty.
     #[corresponds(SSL_SESSION_get_master_key)]
     pub fn master_key(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: The output buffer is writable for its full native length and the
+        // live session borrows it synchronously without retaining it.
         unsafe { SSL_SESSION_get_master_key(self.as_ptr(), buf.as_mut_ptr(), buf.len()) }
     }
 
@@ -3576,6 +3600,8 @@ impl SslSessionRef {
     /// Returns the session ID context recorded when the session was created.
     #[corresponds(SSL_SESSION_get0_id_context)]
     fn id_context(&self) -> &[u8] {
+        // SAFETY: The live session owns its optional ID-context bytes and the local
+        // output-length slot is writable; native_input validates the pair.
         unsafe {
             let mut len = 0;
             let p = ffi::SSL_SESSION_get0_id_context(self.as_ptr(), &raw mut len);
@@ -3842,6 +3868,8 @@ impl SslRef {
     pub fn set_verify(&mut self, mode: SslVerifyMode) {
         self.ssl_context().check_x509();
 
+        // SAFETY: The uniquely borrowed connection accepts the scalar verify mode
+        // and null callback; no borrowed application state is retained.
         unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) }
     }
 
@@ -3906,6 +3934,8 @@ impl SslRef {
     {
         self.ssl_context().check_x509();
 
+        // SAFETY: The closure is installed in typed native extra-data as an Arc
+        // before the live SSL connection receives its static trampoline.
         unsafe {
             // this needs to be in an Arc since the callback can register a new callback!
             self.replace_ex_data(
@@ -3957,6 +3987,8 @@ impl SslRef {
     where
         F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
+        // SAFETY: The typed extra-data slot holds an Arc of the callback before
+        // BoringSSL retains the static custom-verification trampoline.
         unsafe {
             // this needs to be in an Arc since the callback can register a new callback!
             self.replace_ex_data(
@@ -4536,6 +4568,8 @@ impl SslRef {
     pub fn verify_param_mut(&mut self) -> &mut X509VerifyParamRef {
         self.ssl_context().check_x509();
 
+        // SAFETY: The X.509-enabled SSL object owns this native verification
+        // parameter; the exclusive Rust borrow permits mutable access.
         unsafe { X509VerifyParamRef::from_ptr_mut(ffi::SSL_get0_param(self.as_ptr())) }
     }
 
@@ -4581,6 +4615,8 @@ impl SslRef {
         if chain.is_null() {
             return Err(X509VerifyError::INVALID_CALL);
         }
+        // SAFETY: The peer certificate-chain pointer was checked nonnull above;
+        // the live SSL connection owns the borrowed native X.509 stack.
         let chain = unsafe { StackRef::<X509>::from_ptr(chain) };
         let Some(leaf) = chain.get(0) else {
             return Err(X509VerifyError::INVALID_CALL);
@@ -4641,6 +4677,8 @@ impl SslRef {
 
                 // A verify callback may accept a chain with a recorded error; the return decides.
                 Ok(if ret > 0 {
+                    // SAFETY: Clearing the current thread native error queue only affects
+                    // errors from this verification operation, after its result is saved.
                     unsafe { ffi::ERR_clear_error() };
                     Ok(())
                 } else {
@@ -4827,6 +4865,8 @@ impl SslRef {
     #[corresponds(SSL_is_server)]
     #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_server(&self) -> bool {
+        // SAFETY: The live connection exposes its client/server role as a native
+        // scalar and no memory is borrowed beyond this synchronous call.
         unsafe { SSL_is_server(self.as_ptr()) != 0 }
     }
 
@@ -5331,13 +5371,14 @@ impl SslRef {
     /// Sets the client key shares to be used in the TLS 1.3 handshake.
     #[corresponds(SSL_set1_client_key_shares)]
     pub fn set_client_key_shares(&mut self, key_shares: &[KeyShare]) -> Result<(), ErrorStack> {
+        // SAFETY: KeyShare is a transparent native u16; BoringSSL validates and
+        // copies the borrowed slice while the SSL connection is live.
         unsafe {
             cvt(ffi::SSL_set1_client_key_shares(
                 self.as_ptr(),
                 key_shares.as_ptr().cast::<u16>(),
                 key_shares.len(),
             ))
-            .map(|()| ())
         }
     }
 
@@ -5428,7 +5469,6 @@ impl SslRef {
                 settings.as_ptr(),
                 settings.len(),
             ))
-            .map(|()| ())
         }
     }
 
@@ -5655,6 +5695,8 @@ impl<S> MidHandshakeSslStream<S> {
     /// Restarts the handshake process.
     #[corresponds(SSL_do_handshake)]
     pub fn handshake(mut self) -> Result<SslStream<S>, HandshakeError<S>> {
+        // SAFETY: The owned live SSL connection retains its BIO and callbacks
+        // throughout this handshake continuation, which may return an error.
         let ret = unsafe { ffi::SSL_do_handshake(self.stream.ssl.as_ptr()) };
         if ret > 0 {
             Ok(self.stream)
@@ -5706,7 +5748,7 @@ where
     }
 }
 
-/// Clamps an I/O slice length to BoringSSL's signed `int` API limit.
+/// Clamps an I/O slice length to `BoringSSL`'s signed `int` API limit.
 /// The Rust slice can be larger than a single native `SSL_read` or `SSL_write` call.
 fn ssl_io_len(len: usize) -> c_int {
     c_int::try_from(len).unwrap_or(c_int::MAX)
@@ -5937,6 +5979,8 @@ impl<S: Read + Write> SslStream<S> {
     /// Initiates the handshake.
     #[corresponds(SSL_do_handshake)]
     pub fn do_handshake(&mut self) -> Result<(), Error> {
+        // SAFETY: The stream exclusively holds the live SSL connection, its BIO
+        // and the native callback state throughout this handshake operation.
         let ret = unsafe { ffi::SSL_do_handshake(self.ssl.as_ptr()) };
         if ret > 0 {
             Ok(())
@@ -5972,24 +6016,32 @@ impl<S> SslStream<S> {
     }
 
     fn check_panic(&mut self) {
+        // SAFETY: The owned BIO holds a panic slot for the current transport type;
+        // the native state remains live until stream teardown.
         if let Some(err) = unsafe { bio::take_panic::<S>(self.ssl.get_raw_rbio()) } {
             resume_unwind(err)
         }
     }
 
     fn get_bio_error(&mut self) -> Option<io::Error> {
+        // SAFETY: The owned BIO holds the transport error slot for the current
+        // stream type, which is read before native teardown.
         unsafe { bio::take_error::<S>(self.ssl.get_raw_rbio()) }
     }
 
     /// Converts the `SslStream` to the underlying data stream.
     #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_inner(self) -> S {
+        // SAFETY: Consuming this stream transfers its transport out of the owned
+        // native BIO exactly once; teardown observes the detached state.
         unsafe { bio::take_stream::<S>(self.ssl.get_raw_rbio()) }
     }
 
     /// Returns a shared reference to the underlying stream.
     #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
+        // SAFETY: The live owned BIO contains the stream state and the returned
+        // shared reference cannot outlive this SslStream borrow.
         unsafe {
             let bio = self.ssl.get_raw_rbio();
             bio::get_ref(bio)
@@ -6003,6 +6055,8 @@ impl<S> SslStream<S> {
     /// It is inadvisable to read from or write to the underlying stream as it
     /// will most likely corrupt the SSL session.
     pub fn get_mut(&mut self) -> &mut S {
+        // SAFETY: The live owned BIO contains the stream state; the exclusive
+        // Rust borrow prevents mutable aliasing of its transport.
         unsafe {
             let bio = self.ssl.get_raw_rbio();
             bio::get_mut(bio)
@@ -6155,6 +6209,8 @@ where
     #[corresponds(SSL_do_handshake)]
     pub fn handshake(self) -> Result<SslStream<S>, HandshakeError<S>> {
         let mut stream = self.inner;
+        // SAFETY: The builder owns the live SSL handle and BIO while BoringSSL
+        // advances this handshake and uses its installed callbacks.
         let ret = unsafe { ffi::SSL_do_handshake(stream.ssl.as_ptr()) };
         if ret > 0 {
             Ok(stream)
@@ -6355,10 +6411,14 @@ pub trait CertificateCompressor: Send + Sync + 'static {
 use crate::ffi::{SSL_CTX_up_ref, SSL_SESSION_get_master_key, SSL_SESSION_up_ref, SSL_is_server};
 
 unsafe fn get_new_idx(f: ffi::CRYPTO_EX_free) -> c_int {
+    // SAFETY: The native callback is a static function pointer and the
+    // register call retains no temporary Rust storage; other args are null.
     unsafe { ffi::SSL_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 
 unsafe fn get_new_ssl_idx(f: ffi::CRYPTO_EX_free) -> c_int {
+    // SAFETY: The native callback is a static function pointer and the
+    // register call retains no temporary Rust storage; other args are null.
     unsafe { ffi::SSL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 

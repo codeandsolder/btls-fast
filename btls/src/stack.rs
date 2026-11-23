@@ -205,6 +205,8 @@ pub struct StackRef<T: Stackable>(Opaque, PhantomData<fn() -> T>);
     clippy::non_send_fields_in_send_ty,
     reason = "Opaque deliberately blocks auto-Send; native stack access remains shared and requires Sync elements"
 )]
+// SAFETY: Native stack handles are only shared via `StackRef`, whose accessors
+// require the element reference to be `Sync` before sending across threads.
 unsafe impl<T: Stackable> Send for StackRef<T> where T::Ref: Sync {}
 // SAFETY: all safe access to a borrowed native stack is read-only.
 unsafe impl<T: Stackable> Sync for StackRef<T> where T::Ref: Sync {}
