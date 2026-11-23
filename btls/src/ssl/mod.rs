@@ -284,6 +284,7 @@ impl SslMethod {
     #[corresponds(TLS_method)]
     #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub fn tls() -> Self {
+        // SAFETY: The TLS method is a process-lifetime immutable native descriptor returned by BoringSSL.
         unsafe {
             Self {
                 ptr: ffi::TLS_method(),
@@ -300,6 +301,7 @@ impl SslMethod {
     /// No other reference may access its extra-data slots during this operation.
     #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub unsafe fn tls_with_buffer() -> Self {
+        // SAFETY: The explicitly requested no-X509 TLS method is a process-lifetime immutable native descriptor.
         unsafe {
             Self {
                 ptr: ffi::TLS_with_buffers_method(),
@@ -312,6 +314,7 @@ impl SslMethod {
     #[corresponds(DTLS_method)]
     #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub fn dtls() -> Self {
+        // SAFETY: The DTLS method is a process-lifetime immutable native descriptor returned by BoringSSL.
         unsafe {
             Self {
                 ptr: ffi::DTLS_method(),
@@ -355,7 +358,10 @@ impl SslMethod {
     }
 }
 
+// SAFETY: native TLS method pointers are immutable process-lifetime descriptors;
+// the Rust wrapper owns no mutable state behind the pointer.
 unsafe impl Sync for SslMethod {}
+// SAFETY: transferring this descriptor cannot invalidate its static storage.
 unsafe impl Send for SslMethod {}
 
 bitflags! {
@@ -609,6 +615,7 @@ impl SslAlert {
     #[corresponds(SSL_alert_desc_string_long)]
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(&self) -> &'static str {
+        // SAFETY: The alert description lookup returns a static NUL-terminated native string.
         unsafe {
             CStr::from_ptr(ffi::SSL_alert_desc_string_long(self.0))
                 .to_str()
@@ -853,6 +860,7 @@ impl SslSignatureAlgorithm {
     #[corresponds(SSL_get_signature_algorithm_name)]
     #[must_use = "Use the returned name for reporting or selecting the native identifier."]
     pub fn name(&self) -> Option<&'static str> {
+        // SAFETY: The signature-algorithm name is either null or a static NUL-terminated native string.
         unsafe {
             // Pass `include_curve = 1` to get the TLS 1.3 form for ECDSA algorithms
             // (e.g. `ecdsa_secp256r1_sha256` rather than the TLS 1.2 `ecdsa_sha256`).
@@ -980,6 +988,7 @@ pub fn select_next_proto<'a>(server: &'a [u8], client: &'a [u8]) -> Option<&'a [
         return None;
     }
 
+    // SAFETY: The input protocol lists remain live; output pointer/length slots are writable and point into the inputs.
     unsafe {
         let mut out = ptr::null_mut();
         let mut outlen = 0;
@@ -1143,6 +1152,7 @@ impl SslContextBuilder {
     /// Creates a new `SslContextBuilder`.
     #[corresponds(SSL_CTX_new)]
     pub fn new(method: SslMethod) -> Result<Self, ErrorStack> {
+        // SAFETY: The returned context pointer is checked for null and then transferred to its exclusive builder.
         unsafe {
             init();
             let ctx = cvt_p(ffi::SSL_CTX_new(method.as_ptr()))?;
@@ -1169,6 +1179,7 @@ impl SslContextBuilder {
     /// The context must own its cert store exclusively.
     pub unsafe fn from_ptr(ctx: *mut ffi::SSL_CTX) -> Self {
         Self {
+            // SAFETY: The caller provides an owned, initialized native SSL context and transfers ownership once.
             ctx: unsafe { SslContext::from_ptr(ctx) },
             has_shared_cert_store: false,
         }
@@ -1181,6 +1192,7 @@ impl SslContextBuilder {
     /// The native context must use the X.509 certificate method and be exclusively owned.
     /// No other reference may access its extra-data slots during this operation.
     pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: The caller established that this uniquely owned context really uses the X509 method.
         unsafe { self.ctx.assume_x509() }
     }
 
@@ -1242,6 +1254,7 @@ impl SslContextBuilder {
     pub fn set_verify(&mut self, mode: SslVerifyMode) {
         self.ctx.check_x509();
 
+        // SAFETY: The builder exclusively owns a live native context and the verification mode is a scalar bitset.
         unsafe {
             ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), None);
         }
@@ -1288,6 +1301,7 @@ impl SslContextBuilder {
     {
         self.ctx.check_x509();
 
+        // SAFETY: The builder exclusively owns its context; the registered typed callback slot remains live until context teardown.
         unsafe {
             self.replace_ex_data(
                 SslContext::register_callback::<F>(CallbackRole::Verify)?,
@@ -1329,6 +1343,7 @@ impl SslContextBuilder {
     where
         F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
+        // SAFETY: The registered custom verifier is owned by context extra data before the native callback pointer is installed.
         unsafe {
             self.replace_ex_data(
                 SslContext::register_callback::<F>(CallbackRole::CustomVerify)?,
@@ -1350,6 +1365,7 @@ impl SslContextBuilder {
     /// with [`SslVerifyMode::NONE`], including a mode set on one connection.
     #[corresponds(SSL_CTX_set_reverify_on_resume)]
     pub fn set_reverify_on_resume(&mut self, enabled: bool) {
+        // SAFETY: The context is live and exclusively borrowed; the reverify flag is a native scalar setting.
         unsafe { ffi::SSL_CTX_set_reverify_on_resume(self.as_ptr(), enabled as _) }
     }
 
@@ -1371,6 +1387,7 @@ impl SslContextBuilder {
     where
         F: Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + 'static + Sync + Send,
     {
+        // SAFETY: The callback pointer refers to an allocation owned by the context extra-data registry, which outlives native callbacks.
         unsafe {
             // The SNI callback is somewhat unique in that the callback associated with the original
             // context associated with an SSL can be used even if the SSL's context has been swapped
@@ -1437,6 +1454,7 @@ impl SslContextBuilder {
     {
         self.ctx.check_x509();
 
+        // SAFETY: The registered ticket callback is owned in context extra data before the native callback hooks are installed.
         unsafe {
             self.replace_ex_data(
                 SslContext::register_callback::<F>(CallbackRole::TicketKey)?,
@@ -1453,13 +1471,19 @@ impl SslContextBuilder {
     /// Sets the certificate verification depth.
     ///
     /// If the peer's certificate chain is longer than this value, verification will fail.
+    ///
+    /// # Errors
+    ///
+    /// The depth exceeds the signed native integer range.
     #[corresponds(SSL_CTX_set_verify_depth)]
-    pub fn set_verify_depth(&mut self, depth: u32) {
+    pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
+        let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ctx.check_x509();
 
-        unsafe {
-            ffi::SSL_CTX_set_verify_depth(self.as_ptr(), depth as c_int);
-        }
+        // SAFETY: the live context is exclusively borrowed, and the depth is
+        // checked against the full native signed integer range.
+        unsafe { ffi::SSL_CTX_set_verify_depth(self.as_ptr(), depth) };
+        Ok(())
     }
 
     /// Sets a custom certificate store for verifying peer certificates.
@@ -1488,6 +1512,7 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         self.has_shared_cert_store = true;
+        // SAFETY: The builder transfers ownership of this certificate store to its live native context exactly once.
         unsafe {
             ffi::SSL_CTX_set_cert_store(self.as_ptr(), cert_store.into_ptr());
         }
@@ -1499,6 +1524,7 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         self.has_shared_cert_store = false;
+        // SAFETY: The builder transfers ownership of the replacement store to its native context exactly once.
         unsafe {
             ffi::SSL_CTX_set_cert_store(self.as_ptr(), cert_store.into_ptr());
         }
@@ -1520,6 +1546,7 @@ impl SslContextBuilder {
     /// It has no effect when used with DTLS.
     #[corresponds(SSL_CTX_set_read_ahead)]
     pub fn set_read_ahead(&mut self, read_ahead: bool) {
+        // SAFETY: The exclusively borrowed context receives a scalar native read-ahead flag.
         unsafe {
             ffi::SSL_CTX_set_read_ahead(self.as_ptr(), c_int::from(read_ahead));
         }
@@ -1528,6 +1555,7 @@ impl SslContextBuilder {
     /// Sets the mode used by the context, returning the new bit-mask after adding mode.
     #[corresponds(SSL_CTX_set_mode)]
     pub fn set_mode(&mut self, mode: SslMode) -> SslMode {
+        // SAFETY: The mutable context is live while the native mode bitmask is updated and returned.
         let bits = unsafe { ffi::SSL_CTX_set_mode(self.as_ptr(), mode.bits()) };
         SslMode::from_bits_retain(bits)
     }
@@ -1535,12 +1563,14 @@ impl SslContextBuilder {
     /// Sets the parameters to be used during ephemeral Diffie-Hellman key exchange.
     #[corresponds(SSL_CTX_set_tmp_dh)]
     pub fn set_tmp_dh(&mut self, dh: &DhRef<Params>) -> Result<(), ErrorStack> {
+        // SAFETY: The DH parameters are borrowed for a synchronous native setter that retains its own reference.
         unsafe { cvt(ffi::SSL_CTX_set_tmp_dh(self.as_ptr(), dh.as_ptr())) }
     }
 
     /// Sets the parameters to be used during ephemeral elliptic curve Diffie-Hellman key exchange.
     #[corresponds(SSL_CTX_set_tmp_ecdh)]
     pub fn set_tmp_ecdh(&mut self, key: &EcKeyRef<Params>) -> Result<(), ErrorStack> {
+        // SAFETY: The ECDH key is borrowed for the native context setter while both handles remain live.
         unsafe { cvt(ffi::SSL_CTX_set_tmp_ecdh(self.as_ptr(), key.as_ptr())) }
     }
 
@@ -1552,6 +1582,7 @@ impl SslContextBuilder {
     pub fn set_default_verify_paths(&mut self) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
 
+        // SAFETY: The live X509-capable context is exclusively borrowed while native default verification paths are configured.
         unsafe { cvt(ffi::SSL_CTX_set_default_verify_paths(self.as_ptr())) }
     }
 
@@ -1575,6 +1606,7 @@ impl SslContextBuilder {
         let ca_file = ca_file.map(path_to_cstring).transpose()?;
         let ca_path = ca_path.map(path_to_cstring).transpose()?;
 
+        // SAFETY: Both optional C strings remain live through the native call and null pointers represent missing paths.
         unsafe {
             cvt(ffi::SSL_CTX_load_verify_locations(
                 self.as_ptr(),
@@ -1592,6 +1624,7 @@ impl SslContextBuilder {
     pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) {
         self.ctx.check_x509();
 
+        // SAFETY: The native context takes ownership of the client CA stack; `mem::forget` prevents double-free.
         unsafe {
             ffi::SSL_CTX_set_client_CA_list(self.as_ptr(), list.as_ptr());
             mem::forget(list);
@@ -1604,6 +1637,7 @@ impl SslContextBuilder {
     pub fn add_client_ca(&mut self, cacert: &X509Ref) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
 
+        // SAFETY: The CA certificate is borrowed while the live context adds its own retained reference.
         unsafe { cvt(ffi::SSL_CTX_add_client_CA(self.as_ptr(), cacert.as_ptr())) }
     }
 
@@ -1614,10 +1648,16 @@ impl SslContextBuilder {
     /// verification is enabled. A [`ClientSession`] is offered to any context sharing a non-empty
     /// identifier, so share one only between contexts with the same trust, verification, client
     /// identity, protocol, and cipher configuration.
+    ///
+    /// # Errors
+    ///
+    /// The session context is too large, or the native setter rejects it.
     #[corresponds(SSL_CTX_set_session_id_context)]
     pub fn set_session_id_context(&mut self, sid_ctx: &[u8]) -> Result<(), ErrorStack> {
+        c_uint::try_from(sid_ctx.len()).map_err(ErrorStack::internal_error)?;
+        // SAFETY: the session ID bytes are borrowed for synchronous copying;
+        // its length fits the native unsigned integer parameter.
         unsafe {
-            assert!(sid_ctx.len() <= c_uint::MAX as usize);
             cvt(ffi::SSL_CTX_set_session_id_context(
                 self.as_ptr(),
                 sid_ctx.as_ptr(),
@@ -1640,6 +1680,7 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         let file = path_to_cstring(file.as_ref())?;
+        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
         unsafe {
             cvt(ffi::SSL_CTX_use_certificate_file(
                 self.as_ptr(),
@@ -1660,6 +1701,7 @@ impl SslContextBuilder {
         file: P,
     ) -> Result<(), ErrorStack> {
         let file = path_to_cstring(file.as_ref())?;
+        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
         unsafe {
             cvt(ffi::SSL_CTX_use_certificate_chain_file(
                 self.as_ptr(),
@@ -1673,6 +1715,7 @@ impl SslContextBuilder {
     /// Use `add_extra_chain_cert` to add the remainder of the certificate chain.
     #[corresponds(SSL_CTX_use_certificate)]
     pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
+        // SAFETY: The borrowed certificate remains live while the context installs its own reference.
         unsafe { cvt(ffi::SSL_CTX_use_certificate(self.as_ptr(), cert.as_ptr())) }
     }
 
@@ -1684,6 +1727,7 @@ impl SslContextBuilder {
     pub fn add_extra_chain_cert(&mut self, cert: X509) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
 
+        // SAFETY: The owned certificate pointer is consumed by the native context, with no second Rust owner.
         unsafe {
             cvt(ffi::SSL_CTX_add_extra_chain_cert(
                 self.as_ptr(),
@@ -3598,13 +3642,19 @@ impl SslRef {
     /// Sets the certificate verification depth.
     ///
     /// If the peer's certificate chain is longer than this value, verification will fail.
+    ///
+    /// # Errors
+    ///
+    /// The depth exceeds the signed native integer range.
     #[corresponds(SSL_set_verify_depth)]
-    pub fn set_verify_depth(&mut self, depth: u32) {
+    pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
+        let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ssl_context().check_x509();
 
-        unsafe {
-            ffi::SSL_set_verify_depth(self.as_ptr(), depth as c_int);
-        }
+        // SAFETY: the live SSL connection is exclusively borrowed and depth
+        // has been checked against the native signed integer range.
+        unsafe { ffi::SSL_set_verify_depth(self.as_ptr(), depth) };
+        Ok(())
     }
 
     /// Returns the verify mode that was set using `set_verify`.
