@@ -7,7 +7,7 @@ use std::slice;
 
 // Native callbacks cannot unwind into C. Arbitrary panic payloads may have
 // panicking destructors, so they must not be dropped on the native stack.
-pub(crate) fn catch_native<T>(callback: impl FnOnce() -> T) -> Option<T> {
+pub fn catch_native<T>(callback: impl FnOnce() -> T) -> Option<T> {
     match panic::catch_unwind(AssertUnwindSafe(callback)) {
         Ok(value) => Some(value),
         Err(payload) => {
@@ -104,7 +104,7 @@ where
 }
 
 /// Owns an allocation transferred by a native OpenSSL output-pointer API.
-pub(crate) struct NativeBuffer(*mut u8);
+pub struct NativeBuffer(*mut u8);
 
 impl NativeBuffer {
     pub const fn new() -> Self {

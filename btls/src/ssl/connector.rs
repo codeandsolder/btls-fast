@@ -268,7 +268,7 @@ impl ClientSession {
 
     /// Checks the session against the connection `ssl` will make to `domain`.
     ///
-    /// BoringSSL rejects another session ID context only after the server resumes, and skips
+    /// `BoringSSL` rejects another session ID context only after the server resumes, and skips
     /// certificate checks on resumption unless reverify-on-resume runs a custom verifier.
     fn resumes(&self, ssl: &SslRef, domain: &str, sni: bool, verify_hostname: bool) -> bool {
         let scope = self.session.id_context();

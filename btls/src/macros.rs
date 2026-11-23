@@ -292,6 +292,7 @@ macro_rules! generic_foreign_type_and_impl_send_sync {
         unsafe impl<T> Send for $owned<T> {}
         // SAFETY: the borrowed marker exposes no mutable native-key API;
         // the referenced key may be accessed on another thread.
+        #[expect(clippy::non_send_fields_in_send_ty, reason = "Opaque intentionally lacks auto-Send; the native key type has an explicitly audited thread-safe contract")]
         unsafe impl<T> Send for $borrowed<T> {}
         // SAFETY: safe access after key construction is read-only, and
         // BoringSSL synchronizes native reference counts and internal caches.

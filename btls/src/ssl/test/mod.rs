@@ -173,7 +173,7 @@ fn test_connect_with_srtp_ctx() {
     let mut buf = [1; 60];
     {
         let srtp_profile = stream.ssl().selected_srtp_profile().unwrap();
-        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name());
+        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name().unwrap());
         assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, srtp_profile.id());
     }
     stream
@@ -211,7 +211,7 @@ fn test_connect_with_srtp_ssl() {
             if !profilenames.is_empty() {
                 profilenames.push(':');
             }
-            profilenames += profile.name();
+            profilenames += profile.name().unwrap();
         }
         assert_eq!(
             "SRTP_AES128_CM_SHA1_80:SRTP_AES128_CM_SHA1_32",
@@ -242,7 +242,7 @@ fn test_connect_with_srtp_ssl() {
     let mut buf = [1; 60];
     {
         let srtp_profile = stream.ssl().selected_srtp_profile().unwrap();
-        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name());
+        assert_eq!("SRTP_AES128_CM_SHA1_80", srtp_profile.name().unwrap());
         assert_eq!(SrtpProfileId::SRTP_AES128_CM_SHA1_80, srtp_profile.id());
     }
     stream

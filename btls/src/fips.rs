@@ -10,6 +10,7 @@ use openssl_macros::corresponds;
 #[corresponds(FIPS_mode)]
 #[must_use = "Use this predicate to decide how to handle the current value or connection."]
 pub fn enabled() -> bool {
+    // SAFETY: this global BoringSSL query takes no pointers or caller-owned state.
     unsafe { ffi::FIPS_mode() != 0 }
 }
 

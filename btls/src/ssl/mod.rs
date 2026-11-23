@@ -184,10 +184,10 @@ bitflags! {
         /// Disables version rollback attach detection.
         const TLS_ROLLBACK_BUG = ffi::SSL_OP_TLS_ROLLBACK_BUG as _;
 
-        /// Disables the use of SSLv2.
+        /// Disables the use of `SSLv2`.
         const NO_SSLV2 = ffi::SSL_OP_NO_SSLv2 as _;
 
-        /// Disables the use of SSLv3.
+        /// Disables the use of `SSLv3`.
         const NO_SSLV3 = ffi::SSL_OP_NO_SSLv3 as _;
 
         /// Disables the use of TLSv1.0.
@@ -214,7 +214,7 @@ bitflags! {
 
         /// Disables TLS 1.3 PSK resumption and 0-RTT by omitting PSK-DHE-KE.
         ///
-        /// BoringSSL does not implement PSK-KE, so disabling PSK-DHE-KE also prevents the client
+        /// `BoringSSL` does not implement PSK-KE, so disabling PSK-DHE-KE also prevents the client
         /// from offering a pre-shared key. See [RFC 8446 section 4.2.9].
         ///
         /// [RFC 8446 section 4.2.9]: https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
@@ -261,7 +261,7 @@ bitflags! {
         /// This saves ~34 KiB of memory for idle streams.
         const RELEASE_BUFFERS = ffi::SSL_MODE_RELEASE_BUFFERS as _;
 
-        /// Sends the fake `TLS_FALLBACK_SCSV` cipher suite in the ClientHello message of a
+        /// Sends the fake `TLS_FALLBACK_SCSV` cipher suite in the `ClientHello` message of a
         /// handshake.
         ///
         /// This should only be enabled if a client has failed to connect to a server which
@@ -647,13 +647,13 @@ impl SelectCertError {
 pub enum SelectCertAction {
     /// Complete certificate selection normally.
     Success,
-    /// Discard ClientHelloInner and continue with ClientHelloOuter.
+    /// Discard `ClientHelloInner` and continue with `ClientHelloOuter`.
     ///
-    /// BoringSSL calls the callback again with ClientHelloOuter and continues the handshake
+    /// `BoringSSL` calls the callback again with `ClientHelloOuter` and continues the handshake
     /// without retry configs. This action is only valid when [`SslRef::ech_accepted`] is true;
     /// otherwise the handshake fails.
-    /// Changes made to the connection while processing ClientHelloInner carry over to the outer
-    /// ClientHello.
+    /// Changes made to the connection while processing `ClientHelloInner` carry over to the outer
+    /// `ClientHello`.
     DisableEch,
 }
 
@@ -728,7 +728,7 @@ pub struct SslVersion(u16);
 
 impl SslVersion {
     native_constants! {
-        /// SSLv3
+        /// `SSLv3`
         SSL3 = crate::native_u16(ffi::SSL3_VERSION);
 
         /// TLSv1.0
@@ -1034,7 +1034,7 @@ impl SslInfoCallbackMode {
 /// the least significant byte is the alert itself.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
 pub enum SslInfoCallbackValue {
-    /// The unit value (1). Some BoringSSL info callback modes, like ACCEPT_LOOP, always call the
+    /// The unit value (1). Some `BoringSSL` info callback modes, like `ACCEPT_LOOP`, always call the
     /// callback with `value` set to the unit value. If the [`SslInfoCallbackValue`] is a
     /// `Unit`, it can safely be disregarded.
     Unit,
@@ -1071,7 +1071,7 @@ pub enum TicketKeyCallbackResult {
     ///
     /// # Note
     ///
-    /// This is a decryption specific status code when using the submoduled BoringSSL.
+    /// This is a decryption specific status code when using the submoduled `BoringSSL`.
     Noop,
 
     /// Resumption callback was successful.
@@ -3426,7 +3426,7 @@ impl Ssl {
     ///
     /// # Warning
     ///
-    /// BoringSSL's default configuration is insecure. It is highly recommended to use
+    /// `BoringSSL`'s default configuration is insecure. It is highly recommended to use
     /// [`SslConnector`] rather than [`Ssl`] directly, as it manages that configuration.
     pub fn setup_connect<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
@@ -3460,7 +3460,7 @@ impl Ssl {
     ///
     /// # Warning
     ///
-    /// BoringSSL's default configuration is insecure. It is highly recommended to use
+    /// `BoringSSL`'s default configuration is insecure. It is highly recommended to use
     /// [`SslAcceptor`] rather than [`Ssl`] directly, as it manages that configuration.
     pub fn setup_accept<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
@@ -3576,7 +3576,7 @@ impl SslRef {
         }
     }
 
-    /// Returns whether the TLS 1.3 HelloRetryRequest was used
+    /// Returns whether the TLS 1.3 `HelloRetryRequest` was used
     #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn used_hello_retry_request(&self) -> bool {
         unsafe { ffi::SSL_used_hello_retry_request(self.as_ptr()) == 1 }
@@ -5500,7 +5500,7 @@ impl<S> SslStream<S> {
         unsafe { bio::take_error::<S>(self.ssl.get_raw_rbio()) }
     }
 
-    /// Converts the SslStream to the underlying data stream.
+    /// Converts the `SslStream` to the underlying data stream.
     #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_inner(self) -> S {
         unsafe { bio::take_stream::<S>(self.ssl.get_raw_rbio()) }

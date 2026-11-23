@@ -5,7 +5,9 @@ use libc::c_ulong;
 use std::ffi::CStr;
 use std::str;
 
-/// fake free method, since SRTP_PROTECTION_PROFILE is static
+use crate::error::ErrorStack;
+
+/// fake free method, since `SRTP_PROTECTION_PROFILE` is static
 const unsafe fn free(_profile: *mut ffi::SRTP_PROTECTION_PROFILE) {}
 
 foreign_type_and_impl_send_sync! {
@@ -23,14 +25,25 @@ unsafe impl Stackable for SrtpProtectionProfile {
 impl SrtpProtectionProfileRef {
     #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> SrtpProfileId {
+        // SAFETY: a foreign-type reference points to a live native profile.
         SrtpProfileId::from_raw(unsafe { (*self.as_ptr()).id })
     }
 
     #[must_use = "Use the returned name for reporting or selecting the native identifier."]
-    pub fn name(&self) -> &'static str {
-        unsafe { CStr::from_ptr((*self.as_ptr()).name.cast()) }
+    ///
+    /// # Errors
+    ///
+    /// The native profile has no name or its name is not valid UTF-8.
+    pub fn name(&self) -> Result<&'static str, ErrorStack> {
+        // SAFETY: the live native profile exposes a static name pointer.
+        let name = unsafe { (*self.as_ptr()).name };
+        if name.is_null() {
+            return Err(ErrorStack::internal_error_str("missing SRTP profile name"));
+        }
+        // SAFETY: a non-null native profile name is a static NUL-terminated string.
+        unsafe { CStr::from_ptr(name.cast()) }
             .to_str()
-            .expect("should be UTF-8")
+            .map_err(ErrorStack::internal_error)
     }
 }
 

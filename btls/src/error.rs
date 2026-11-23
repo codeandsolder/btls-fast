@@ -74,6 +74,7 @@ impl ErrorStack {
     /// Empties the current thread's error queue.
     #[corresponds(ERR_clear_error)]
     pub(crate) fn clear() {
+        // SAFETY: clears only the calling thread's BoringSSL error queue.
         unsafe {
             ffi::ERR_clear_error();
         }
@@ -143,7 +144,10 @@ enum Data {
     Static(&'static str),
 }
 
+// SAFETY: `file` points to a static native source filename, and the other
+// fields contain owned values, integer codes, or static strings.
 unsafe impl Sync for Error {}
+// SAFETY: moving the descriptor does not affect native error-queue ownership.
 unsafe impl Send for Error {}
 
 static BORING_INTERNAL: &CStr = c"btls-rust";
@@ -153,6 +157,9 @@ impl Error {
     #[must_use = "Use ErrorStack::clear() to drop the error stack"]
     #[corresponds(ERR_get_error_line_data)]
     pub fn get() -> Option<Self> {
+        // SAFETY: the output pointers are writable local slots; BoringSSL
+        // provides stable source filenames and copies of dynamic error data
+        // are taken before the thread-local error slot can be overwritten.
         unsafe {
             ffi::init();
 
@@ -189,6 +196,8 @@ impl Error {
     /// Pushes the error back onto the OpenSSL error stack.
     #[corresponds(ERR_put_error)]
     pub fn put(&self) {
+        // SAFETY: BoringSSL accepts these decoded error fields; the borrowed
+        // C-string, when present, is valid for the duration of the call.
         unsafe {
             ffi::ERR_put_error(
                 ffi::ERR_GET_LIB(self.code),
@@ -205,7 +214,7 @@ impl Error {
 
     /// Get `{lib}_R_{reason}` reason code for the given library, or `None` if the error is from a different library.
     ///
-    /// Libraries are identified by [`ERR_LIB_{name}`(ffi::ERR_LIB_SSL) constants.
+    /// Libraries are identified by `ERR_LIB_*` constants (for example `ffi::ERR_LIB_SSL`).
     #[inline]
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     #[track_caller]
@@ -220,6 +229,8 @@ impl Error {
         if self.is_internal() {
             return None;
         }
+        // SAFETY: the native lookup returns a null or static NUL-terminated
+        // error-string pointer, which is checked before creating a `CStr`.
         unsafe {
             let cstr = ffi::ERR_lib_error_string(self.code);
             if cstr.is_null() {
@@ -251,6 +262,8 @@ impl Error {
         if self.is_internal() {
             return self.data();
         }
+        // SAFETY: native error-reason strings are static and NUL-terminated;
+        // a null result is checked before building the borrowed `CStr`.
         unsafe {
             let cstr = ffi::ERR_reason_error_string(self.code);
             if cstr.is_null() {
@@ -275,6 +288,8 @@ impl Error {
     /// Returns the name of the source file which encountered the error.
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn file(&self) -> &'static str {
+        // SAFETY: `file` is a static native source filename supplied by the
+        // error queue, or null, which we check before reading the string.
         unsafe {
             if self.file.is_null() {
                 return "";

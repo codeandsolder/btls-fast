@@ -65,6 +65,7 @@ impl Nid {
     #[corresponds(OBJ_find_sigid_algs)]
     #[must_use = "The returned algorithm identifiers describe the signature."]
     pub fn signature_algorithms(self) -> Option<SignatureAlgorithms> {
+        // SAFETY: both output arguments are live, exclusively writable integers.
         unsafe {
             let mut digest = 0;
             let mut pkey = 0;
@@ -82,6 +83,8 @@ impl Nid {
     /// Return the string representation of a `Nid` (long)
     #[corresponds(OBJ_nid2ln)]
     pub fn long_name(self) -> Result<&'static str, ErrorStack> {
+        // SAFETY: OpenSSL returns a static NUL-terminated name or null, which
+        // `cvt_p` rejects before the pointer is read.
         unsafe {
             let nameptr = cvt_p(ffi::OBJ_nid2ln(self.0).cast_mut())?;
             CStr::from_ptr(nameptr)
@@ -93,6 +96,8 @@ impl Nid {
     /// Return the string representation of a `Nid` (short)
     #[corresponds(OBJ_nid2sn)]
     pub fn short_name(self) -> Result<&'static str, ErrorStack> {
+        // SAFETY: OpenSSL returns a static NUL-terminated name or null, which
+        // `cvt_p` rejects before the pointer is read.
         unsafe {
             let nameptr = cvt_p(ffi::OBJ_nid2sn(self.0).cast_mut())?;
             CStr::from_ptr(nameptr)

@@ -46,7 +46,7 @@ foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_GENERALIZEDTIME;
     fn drop = ffi::ASN1_GENERALIZEDTIME_free;
 
-    /// GeneralizedTime encoding of an ASN.1 timestamp, supporting years outside 1950–2049.
+    /// `GeneralizedTime` encoding of an ASN.1 timestamp, supporting years outside 1950–2049.
     pub struct Asn1GeneralizedTime;
 }
 
@@ -240,7 +240,7 @@ pub struct TimeDiff {
 foreign_type_and_impl_send_sync! {
     type CType = ffi::ASN1_TIME;
     fn drop = ffi::ASN1_TIME_free;
-    /// ASN.1 certificate time in UTC or GeneralizedTime representation.
+    /// ASN.1 certificate time in UTC or `GeneralizedTime` representation.
     pub struct Asn1Time;
 }
 

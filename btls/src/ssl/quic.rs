@@ -1,6 +1,6 @@
 //! QUIC support for TLS 1.3 connections ([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)).
 //!
-//! A QUIC connection has no BIO. BoringSSL hands its secrets and handshake messages to the
+//! A QUIC connection has no BIO. `BoringSSL` hands its secrets and handshake messages to the
 //! [`QuicMethod`] of the context instead of writing records, and takes the peer's handshake
 //! messages through [`Ssl::provide_quic_data`].
 //!
@@ -21,7 +21,7 @@ use std::{ptr, slice};
 pub struct QuicEncryptionLevel(ffi::ssl_encryption_level_t);
 
 impl QuicEncryptionLevel {
-    /// Protects the ClientHello and ServerHello.
+    /// Protects the `ClientHello` and `ServerHello`.
     pub const INITIAL: Self = Self(ffi::ssl_encryption_level_t::ssl_encryption_initial);
     /// Protects client 0-RTT data. The handshake itself never writes at this level.
     pub const EARLY_DATA: Self = Self(ffi::ssl_encryption_level_t::ssl_encryption_early_data);
@@ -37,13 +37,13 @@ pub struct QuicMethodError;
 
 /// The QUIC hooks of a context (`SSL_QUIC_METHOD`), see [`SslContextBuilder::set_quic_method`].
 ///
-/// BoringSSL calls them from inside [`Ssl::do_handshake`] and
+/// `BoringSSL` calls them from inside [`Ssl::do_handshake`] and
 /// [`Ssl::process_quic_post_handshake`], and from calls that send an alert, never from
 /// [`Ssl::provide_quic_data`]. Callbacks receive an [`SslRef`] for configuration and queries;
 /// handshake input and driving require the [`Ssl`] owner after the callback returns.
 /// Per-connection state belongs in the connection's ex data. An error terminates the handshake.
 pub trait QuicMethod: Send + Sync + 'static {
-    /// Installs the read secret and cipher suite of `level`. BoringSSL calls it at most once per
+    /// Installs the read secret and cipher suite of `level`. `BoringSSL` calls it at most once per
     /// level, and only after the write secret that ACKs the packets it protects.
     fn set_read_secret(
         &self,
@@ -88,7 +88,7 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 }
 
-/// The `SSL_QUIC_METHOD` of `M`, which BoringSSL keeps a pointer to.
+/// The `SSL_QUIC_METHOD` of `M`, which `BoringSSL` keeps a pointer to.
 struct QuicMethodTable<M>(PhantomData<M>);
 
 impl<M: QuicMethod> QuicMethodTable<M> {
@@ -368,7 +368,7 @@ unsafe fn with_method<M: QuicMethod>(
         .into()
 }
 
-/// Pushes `SSL_R_QUIC_INTERNAL_ERROR` for a failed secret callback. BoringSSL does so for the
+/// Pushes `SSL_R_QUIC_INTERNAL_ERROR` for a failed secret callback. `BoringSSL` does so for the
 /// other callbacks, but not these, which would leave the error queue empty.
 fn secret_result(ret: c_int) -> c_int {
     if ret == 0 {

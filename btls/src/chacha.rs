@@ -1,4 +1,4 @@
-//! The ChaCha20 stream cipher ([RFC 8439](https://www.rfc-editor.org/rfc/rfc8439)).
+//! The `ChaCha20` stream cipher ([RFC 8439](https://www.rfc-editor.org/rfc/rfc8439)).
 //!
 //! ChaCha20-Poly1305 encryption is found in [`aead`](crate::aead). The raw keystream here is for
 //! protocols that build on it directly, such as QUIC header protection.

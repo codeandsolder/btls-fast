@@ -125,10 +125,10 @@ impl SslContextBuilder {
     ///
     /// A task waker must be set on `Ssl` values associated with the resulting `SslContext` with
     /// [`SslRef::set_task_waker`]. Returning [`SelectCertAction::DisableEch`] discards an inner
-    /// ClientHello, invokes the callback again with the outer ClientHello, and continues without
+    /// `ClientHello`, invokes the callback again with the outer `ClientHello`, and continues without
     /// retry configs. It is only valid when ECH has been accepted; returning it otherwise fails
     /// the handshake.
-    /// The future-producing callback runs again for the outer ClientHello, so per-connection
+    /// The future-producing callback runs again for the outer `ClientHello`, so per-connection
     /// state must handle both calls.
     ///
     /// A context has a single certificate selection callback. Calling this method replaces the

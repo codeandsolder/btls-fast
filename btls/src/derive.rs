@@ -39,7 +39,7 @@ impl<'a> Deriver<'a> {
         unsafe {
             cvt_p(ffi::EVP_PKEY_CTX_new(key.as_ptr(), ptr::null_mut()))
                 .map(|p| Self(p, PhantomData))
-                .and_then(|ctx| cvt(ffi::EVP_PKEY_derive_init(ctx.0)).map(|_| ctx))
+                .and_then(|ctx| cvt(ffi::EVP_PKEY_derive_init(ctx.0)).map(|()| ctx))
         }
     }
 
@@ -69,7 +69,7 @@ impl<'a> Deriver<'a> {
         // SAFETY: null output requests only the length from the live context.
         unsafe {
             let mut len = 0;
-            cvt(ffi::EVP_PKEY_derive(self.0, ptr::null_mut(), &raw mut len)).map(|_| len)
+            cvt(ffi::EVP_PKEY_derive(self.0, ptr::null_mut(), &raw mut len)).map(|()| len)
         }
     }
 
