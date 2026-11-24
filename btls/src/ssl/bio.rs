@@ -6,12 +6,49 @@ use libc::{c_char, c_int, c_long, c_void, strlen};
 use std::any::Any;
 use std::io;
 use std::io::prelude::*;
+use std::mem::MaybeUninit;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr;
 use std::slice;
 
 use crate::error::ErrorStack;
 use crate::{cvt, cvt_p};
+
+/// A bounded, potentially uninitialized BIO read destination.
+///
+/// Only initialized bytes can be appended; the unfilled suffix is untouched.
+#[derive(Debug)]
+pub struct BioReadBuf<'a> {
+    bytes: &'a mut [MaybeUninit<u8>],
+    filled: usize,
+}
+
+impl BioReadBuf<'_> {
+    /// Remaining capacity.
+    #[inline]
+    #[must_use = "The remaining capacity determines how many bytes can be appended."]
+    pub const fn remaining(&self) -> usize {
+        self.bytes.len() - self.filled
+    }
+
+    /// Copies as much of the supplied prefix as fits into the destination.
+    #[inline]
+    pub fn put_slice(&mut self, bytes: &[u8]) {
+        let n = self.remaining().min(bytes.len());
+        let end = self.filled + n;
+        self.bytes[self.filled..end].write_copy_of_slice(&bytes[..n]);
+        self.filled = end;
+    }
+}
+
+/// A transport that can read without first initializing the destination.
+pub trait ReadUninit: Read {
+    /// Append initialized bytes to the destination; zero bytes indicates EOF.
+    ///
+    /// # Errors
+    /// Reading fails or requires additional transport readiness.
+    fn read_uninit(&mut self, buf: &mut BioReadBuf<'_>) -> io::Result<()>;
+}
 
 pub struct StreamState<S> {
     pub stream: S,
@@ -29,14 +66,16 @@ unsafe impl Sync for BioMethod {}
 unsafe impl Send for BioMethod {}
 
 impl BioMethod {
-    fn new<S: Read + Write>() -> Result<Self, ErrorStack> {
+    fn new<S: Write>(
+        read: unsafe extern "C" fn(*mut BIO, *mut c_char, c_int) -> c_int,
+    ) -> Result<Self, ErrorStack> {
         // SAFETY: The returned method is uniquely owned, and each callback matches
         // the StreamState<S> attached to BIOs constructed with this method.
         unsafe {
             let ptr = cvt_p(ffi::BIO_meth_new(ffi::BIO_TYPE_NONE, c"rust".as_ptr()))?;
             let method = Self(ptr);
             cvt(ffi::BIO_meth_set_write(ptr, Some(bwrite::<S>)))?;
-            cvt(ffi::BIO_meth_set_read(ptr, Some(bread::<S>)))?;
+            cvt(ffi::BIO_meth_set_read(ptr, Some(read)))?;
             cvt(ffi::BIO_meth_set_puts(ptr, Some(bputs::<S>)))?;
             cvt(ffi::BIO_meth_set_ctrl(ptr, Some(ctrl::<S>)))?;
             cvt(ffi::BIO_meth_set_create(ptr, Some(create)))?;
@@ -55,7 +94,18 @@ impl Drop for BioMethod {
 }
 
 pub fn new<S: Read + Write>(stream: S) -> Result<(*mut BIO, BioMethod), ErrorStack> {
-    let method = BioMethod::new::<S>()?;
+    new_with_read::<S>(stream, bread::<S>)
+}
+
+pub fn new_uninit<S: ReadUninit + Write>(stream: S) -> Result<(*mut BIO, BioMethod), ErrorStack> {
+    new_with_read::<S>(stream, bread_uninit::<S>)
+}
+
+fn new_with_read<S: Write>(
+    stream: S,
+    read: unsafe extern "C" fn(*mut BIO, *mut c_char, c_int) -> c_int,
+) -> Result<(*mut BIO, BioMethod), ErrorStack> {
+    let method = BioMethod::new::<S>(read)?;
 
     let state = Box::new(StreamState {
         stream,
@@ -213,6 +263,38 @@ unsafe extern "C" fn bread<S: Read>(bio: *mut BIO, buf: *mut c_char, len: c_int)
     }
 }
 
+// Only the initialized prefix recorded by the bounded destination is returned.
+unsafe extern "C" fn bread_uninit<S: ReadUninit>(
+    bio: *mut BIO,
+    buf: *mut c_char,
+    len: c_int,
+) -> c_int {
+    let Ok(len) = usize::try_from(len) else {
+        return -1;
+    };
+    if len == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        return -1;
+    }
+    // SAFETY: BIO supplies writable storage of len bytes. No initialization is assumed.
+    unsafe {
+        let bytes = slice::from_raw_parts_mut(buf.cast::<MaybeUninit<u8>>(), len);
+        run_io::<S>(bio, RetryDirection::Read, len, |stream| {
+            let mut destination = BioReadBuf { bytes, filled: 0 };
+            stream.read_uninit(&mut destination)?;
+            if destination.bytes.as_mut_ptr() != buf.cast() || destination.bytes.len() != len {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "BIO read destination changed",
+                ));
+            }
+            Ok(destination.filled)
+        })
+    }
+}
+
 fn checked_count<S>(state: &mut StreamState<S>, count: usize, limit: usize) -> c_int {
     if let Some(count) = c_int::try_from(count).ok().filter(|_| count <= limit) {
         return count;
@@ -336,6 +418,53 @@ mod tests {
                 take_error::<InvalidCount>(bio).map(|error| error.kind()),
                 Some(io::ErrorKind::InvalidData)
             );
+            ffi::BIO_free(bio);
+        }
+        drop(method);
+        Ok(())
+    }
+
+    #[test]
+    fn uninit_read_initializes_only_reported_prefix() -> Result<(), ErrorStack> {
+        struct Prefix(bool);
+        impl Read for Prefix {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::ErrorKind::Unsupported.into())
+            }
+        }
+        impl ReadUninit for Prefix {
+            fn read_uninit(&mut self, buf: &mut BioReadBuf<'_>) -> io::Result<()> {
+                if self.0 {
+                    return Err(io::ErrorKind::WouldBlock.into());
+                }
+                self.0 = true;
+                buf.put_slice(b"abc");
+                Ok(())
+            }
+        }
+        impl Write for Prefix {
+            fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (bio, method) = new_uninit(Prefix(false))?;
+        let mut buf = [0x55_u8; 8];
+        // SAFETY: the BIO and destination are live, exclusively accessed,
+        // and the method outlives the BIO.
+        unsafe {
+            assert_eq!(ffi::BIO_read(bio, buf.as_mut_ptr().cast(), 8), 3);
+            assert_eq!(&buf[..3], b"abc");
+            assert_eq!(&buf[3..], &[0x55; 5]);
+            assert_eq!(ffi::BIO_read(bio, buf.as_mut_ptr().cast(), 8), -1);
+            assert_eq!(
+                take_error::<Prefix>(bio).map(|e| e.kind()),
+                Some(io::ErrorKind::WouldBlock)
+            );
+            assert_eq!(&buf[..3], b"abc");
+            assert_eq!(&buf[3..], &[0x55; 5]);
             ffi::BIO_free(bio);
         }
         drop(method);

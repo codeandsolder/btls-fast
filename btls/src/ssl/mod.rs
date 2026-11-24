@@ -130,6 +130,7 @@ use self::connector::earliest_not_after;
 
 mod async_callbacks;
 mod bio;
+pub use self::bio::{BioReadBuf, ReadUninit};
 mod callbacks;
 mod connector;
 #[cfg(feature = "credential")]
@@ -5802,18 +5803,32 @@ impl<S: Read + Write> SslStream<S> {
     /// The native BIO transport cannot be constructed.
     pub fn new(ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
         let (bio, method) = bio::new(stream)?;
+        Ok(Self::attach_bio(ssl, bio, method))
+    }
 
+    /// Constructs a TLS stream whose transport supports initialization-aware BIO reads.
+    /// # Errors
+    /// The native BIO transport cannot be constructed.
+    pub fn new_uninit(ssl: Ssl, stream: S) -> Result<Self, ErrorStack>
+    where
+        S: ReadUninit,
+    {
+        let (bio, method) = bio::new_uninit(stream)?;
+        Ok(Self::attach_bio(ssl, bio, method))
+    }
+
+    fn attach_bio(ssl: Ssl, bio: *mut ffi::BIO, method: BioMethod) -> Self {
         // SAFETY: the new BIO and its native reference are transferred to
         // this live SSL object. BoringSSL owns the BIO until stream teardown.
         unsafe {
             ffi::SSL_set_bio(ssl.as_ptr(), bio, bio);
         }
 
-        Ok(Self {
+        Self {
             ssl: ManuallyDrop::new(ssl),
             method: ManuallyDrop::new(method),
             _p: PhantomData,
-        })
+        }
     }
 
     /// Constructs an `SslStream` from a pointer to the underlying OpenSSL `SSL` struct.
@@ -6032,6 +6047,7 @@ impl<S> SslStream<S> {
     ///
     /// The waker is not retained by the stream after this call (including
     /// unwinding). Nested operations on another stream have independent scopes.
+    #[inline]
     pub fn with_task_waker<R>(
         &mut self,
         waker: &std::task::Waker,
