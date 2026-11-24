@@ -140,17 +140,26 @@ impl Config {
         }
 
         let is_precompiled_native_lib = self.env.path.is_some();
-        let is_external_native_lib_source =
-            !is_precompiled_native_lib && self.env.source_path.is_none();
+        let is_vendored_source = !is_precompiled_native_lib && self.env.source_path.is_none();
 
-        if self.env.assume_patched && is_external_native_lib_source {
+        if self.env.assume_patched && is_vendored_source {
             return Err(
                 "`BORING_BSSL_{{,_FIPS}}_ASSUME_PATCHED` env variable is supposed to be used with\
                 `BORING_BSSL{{,_FIPS}}_PATH` or `BORING_BSSL{{,_FIPS}}_SOURCE_PATH` env variables",
             );
         }
 
-        let features_with_patches_enabled = self.features.rpk
+        if self.env.source_path.is_some() && is_precompiled_native_lib {
+            return Err("choose either a precompiled BoringSSL library or a source tree, not both");
+        }
+        if self.env.source_path.is_some() && !self.env.assume_patched {
+            return Err(
+                "external BoringSSL source must be patched before building; set BORING_BSSL{,_FIPS}_ASSUME_PATCHED to confirm. The build does not modify caller-owned sources",
+            );
+        }
+
+        let features_with_patches_enabled = self.features.allow_crl_extensions_bad_version
+            || self.features.rpk
             || self.features.underscore_wildcards
             || self.features.relax_cert_validation;
 
@@ -163,7 +172,9 @@ impl Config {
         }
 
         if self.env.export_to_install_dir.is_some() && is_precompiled_native_lib {
-            return Err("`BORING_BSSL{{,_FIPS_}}INSTALL_DIR` cannot be used together with a precompiled library");
+            return Err(
+                "`BORING_BSSL{{,_FIPS_}}INSTALL_DIR` cannot be used together with a precompiled library",
+            );
         }
         Ok(())
     }
@@ -211,7 +222,9 @@ impl Env {
                 let fips_name = name.replace(BORING_BSSL_PREFIX, BORING_BSSL_FIPS_PREFIX);
                 let fips = target_var(&fips_name);
                 if fips.is_none() && non_fips.is_some() {
-                    println!("cargo:warning=env var {name} ignored, because FIPS is enabled. Set {fips_name} instead.");
+                    println!(
+                        "cargo:warning=env var {name} ignored, because FIPS is enabled. Set {fips_name} instead."
+                    );
                 }
                 fips
             } else {

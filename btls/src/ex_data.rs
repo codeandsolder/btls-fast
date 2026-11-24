@@ -155,8 +155,8 @@ where
 mod tests {
     use super::*;
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     struct Track(Arc<AtomicUsize>);

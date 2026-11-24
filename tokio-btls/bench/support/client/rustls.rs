@@ -1,12 +1,12 @@
 //! tokio-rustls adapter: rustls with the aws-lc-rs provider.
 
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio_rustls::{client::TlsStream, rustls::pki_types::ServerName, TlsConnector};
+use tokio_rustls::{TlsConnector, client::TlsStream, rustls::pki_types::ServerName};
 
 use super::ClientAdapter;
 use crate::{
     rustls_benchmark,
-    support::{case::Tls, BoxError},
+    support::{BoxError, case::Tls},
 };
 
 /// Stateless adapter for the tokio-rustls client stream.

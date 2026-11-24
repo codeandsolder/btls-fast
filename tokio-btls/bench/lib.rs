@@ -3,4 +3,4 @@
 mod rustls_benchmark;
 mod support;
 
-pub use support::{bench, criterion, BenchTarget, BoxError, Clock, Direction, Transport};
+pub use support::{BenchTarget, BoxError, Clock, Direction, Transport, bench, criterion};

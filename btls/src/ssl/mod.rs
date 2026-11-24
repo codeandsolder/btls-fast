@@ -60,8 +60,8 @@
 use foreign_types::{ForeignType, ForeignTypeRef, Opaque};
 use openssl_macros::corresponds;
 use std::convert::TryInto;
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 use std::ffi::{CStr, CString};
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 use std::fmt;
 use std::io::prelude::*;
 use std::io::{self, IoSlice};
@@ -78,7 +78,7 @@ use std::sync::{Arc, LazyLock};
 use crate::dh::DhRef;
 use crate::ec::EcKeyRef;
 use crate::error::ErrorStack;
-use crate::ex_data::{replace_boxed, Index, IndexRegistry, IndexSlot};
+use crate::ex_data::{Index, IndexRegistry, IndexSlot, replace_boxed};
 use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
@@ -99,8 +99,8 @@ use crate::util::native_input;
 use crate::x509::store::{X509Store, X509StoreBuilder, X509StoreBuilderRef, X509StoreRef};
 use crate::x509::verify::X509VerifyParamRef;
 use crate::x509::{
-    X509Name, X509Ref, X509StoreContext, X509StoreContextRef, X509VerifyError, X509VerifyResult,
-    X509,
+    X509, X509Name, X509Ref, X509StoreContext, X509StoreContextRef, X509VerifyError,
+    X509VerifyResult,
 };
 use crate::{cvt, cvt_0i, cvt_n, cvt_p, init};
 use crate::{ffi, free_data_box};
@@ -1886,11 +1886,7 @@ impl SslContextBuilder {
         // SAFETY: The getter reads a native scalar from the live context.
         unsafe {
             let r = ffi::SSL_CTX_get_min_proto_version(self.as_ptr());
-            if r == 0 {
-                None
-            } else {
-                Some(SslVersion(r))
-            }
+            if r == 0 { None } else { Some(SslVersion(r)) }
         }
     }
 
@@ -1900,11 +1896,7 @@ impl SslContextBuilder {
         // SAFETY: The getter reads a native scalar from the live context.
         unsafe {
             let r = ffi::SSL_CTX_get_max_proto_version(self.as_ptr());
-            if r == 0 {
-                None
-            } else {
-                Some(SslVersion(r))
-            }
+            if r == 0 { None } else { Some(SslVersion(r)) }
         }
     }
 
@@ -2065,7 +2057,10 @@ impl SslContextBuilder {
         C: CertificateCompressor,
     {
         const {
-            assert!(C::CAN_COMPRESS || C::CAN_DECOMPRESS, "Either compression or decompression must be supported for algorithm to be registered");
+            assert!(
+                C::CAN_COMPRESS || C::CAN_DECOMPRESS,
+                "Either compression or decompression must be supported for algorithm to be registered"
+            );
         };
         let index = SslContext::register_callback::<Option<C>>(CallbackRole::Compression)?;
         if self.ctx.ex_data(index).is_some_and(Option::is_some) {
@@ -3429,11 +3424,7 @@ impl SslCipherRef {
         // SAFETY: The borrowed cipher is an immutable native descriptor;
         // a zero native NID is represented as absence.
         let n = unsafe { ffi::SSL_CIPHER_get_kx_nid(self.as_ptr()) };
-        if n == 0 {
-            None
-        } else {
-            Some(Nid::from_raw(n))
-        }
+        if n == 0 { None } else { Some(Nid::from_raw(n)) }
     }
 
     /// Returns the NID corresponding to the cipher's authentication type.
@@ -3443,11 +3434,7 @@ impl SslCipherRef {
         // SAFETY: The borrowed cipher is an immutable native descriptor;
         // a zero native NID is represented as absence.
         let n = unsafe { ffi::SSL_CIPHER_get_auth_nid(self.as_ptr()) };
-        if n == 0 {
-            None
-        } else {
-            Some(Nid::from_raw(n))
-        }
+        if n == 0 { None } else { Some(Nid::from_raw(n)) }
     }
 
     /// Returns the NID corresponding to the cipher.
@@ -3457,11 +3444,7 @@ impl SslCipherRef {
         // SAFETY: The borrowed cipher is an immutable native descriptor;
         // a zero native NID is represented as absence.
         let n = unsafe { ffi::SSL_CIPHER_get_cipher_nid(self.as_ptr()) };
-        if n == 0 {
-            None
-        } else {
-            Some(Nid::from_raw(n))
-        }
+        if n == 0 { None } else { Some(Nid::from_raw(n)) }
     }
 }
 
@@ -4397,11 +4380,7 @@ impl SslRef {
         // from the live SSL connection; zero means native default.
         unsafe {
             let r = ffi::SSL_get_min_proto_version(self.as_ptr());
-            if r == 0 {
-                None
-            } else {
-                Some(SslVersion(r))
-            }
+            if r == 0 { None } else { Some(SslVersion(r)) }
         }
     }
 
@@ -4412,11 +4391,7 @@ impl SslRef {
         // SAFETY: The getter reads a scalar protocol version
         // from the live SSL connection; zero means native default.
         let r = unsafe { ffi::SSL_get_max_proto_version(self.as_ptr()) };
-        if r == 0 {
-            None
-        } else {
-            Some(SslVersion(r))
-        }
+        if r == 0 { None } else { Some(SslVersion(r)) }
     }
 
     /// Returns the protocol selected via Application Layer Protocol Negotiation (ALPN).
@@ -6437,7 +6412,7 @@ pub trait PrivateKeyMethod: Send + Sync + 'static {
     ///
     /// The operation fails or remains pending and needs a later retry.
     fn complete(&self, ssl: &mut SslRef, output: &mut [u8])
-        -> Result<usize, PrivateKeyMethodError>;
+    -> Result<usize, PrivateKeyMethodError>;
 }
 
 /// An error returned from a private key method.

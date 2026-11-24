@@ -1,6 +1,6 @@
 #![cfg(not(feature = "fips"))]
 
-use std::ffi::{c_int, c_void, CStr};
+use std::ffi::{CStr, c_int, c_void};
 use std::io::{IoSlice, Read, Write};
 use std::mem::MaybeUninit;
 use std::net::TcpStream;
@@ -12,8 +12,8 @@ use foreign_types::ForeignTypeRef;
 use super::server::Server;
 use crate::ffi;
 use crate::ssl::{
-    with_ivecs, ExtensionType, Sealed, SslContextBuilder, SslMethod, SslOptions, SslRef,
-    SslSession, SslSessionCacheMode, SslSignatureAlgorithm, SslStream, SslVersion, Tls13Cipher,
+    ExtensionType, Sealed, SslContextBuilder, SslMethod, SslOptions, SslRef, SslSession,
+    SslSessionCacheMode, SslSignatureAlgorithm, SslStream, SslVersion, Tls13Cipher, with_ivecs,
 };
 
 type RecordHeaders = Arc<Mutex<Vec<[u8; 5]>>>;
@@ -945,9 +945,11 @@ fn check_and_send(stream: &mut SslStream<TcpStream>, consumed: usize, out: &[u8]
         full.iter().all(|&len| len == records[0] && *last <= len),
         "{records:?}"
     );
-    assert!(records
-        .iter()
-        .all(|&len| len + 5 <= limits.max_fragment() + limits.record_overhead()));
+    assert!(
+        records
+            .iter()
+            .all(|&len| len + 5 <= limits.max_fragment() + limits.record_overhead())
+    );
     stream.get_mut().write_all(out).unwrap();
 }
 

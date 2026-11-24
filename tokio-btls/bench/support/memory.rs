@@ -10,7 +10,7 @@ use std::{
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio_btls::SslStream;
 
-use super::{case::Tls, BoxError, Direction};
+use super::{BoxError, Direction, case::Tls};
 
 /// Bytes written to one direction of the transport and not yet read.
 #[derive(Default)]
@@ -311,9 +311,11 @@ mod tests {
         let mut cx = Context::from_waker(&waker);
         let mut byte = [0];
         let mut buf = ReadBuf::new(&mut byte);
-        assert!(Pin::new(&mut reader)
-            .poll_read(&mut cx, &mut buf)
-            .is_pending());
+        assert!(
+            Pin::new(&mut reader)
+                .poll_read(&mut cx, &mut buf)
+                .is_pending()
+        );
         assert!(matches!(
             Pin::new(&mut writer).poll_write(&mut cx, &[]),
             Poll::Ready(Ok(0))

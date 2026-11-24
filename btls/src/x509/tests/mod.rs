@@ -13,7 +13,7 @@ use crate::x509::extension::{
 };
 use crate::x509::store::X509StoreBuilder;
 use crate::x509::verify::X509CheckFlags;
-use crate::x509::{X509Extension, X509Name, X509Req, X509StoreContext, X509};
+use crate::x509::{X509, X509Extension, X509Name, X509Req, X509StoreContext};
 const TEST_CERT_DIGEST: &str = "585e3a58acfd3b4e5e2825659407244ddd93539c";
 
 mod trusted_first;
@@ -206,12 +206,15 @@ fn check_host_uses_default_flags() {
 fn check_host_with_standard_flags() {
     let cert = cert_with_dns_name("*.example.com");
 
-    assert!(cert
-        .check_host_with_flags("www.example.com", X509CheckFlags::empty())
-        .unwrap());
-    assert!(!cert
-        .check_host_with_flags("www.example.com", X509CheckFlags::NO_WILDCARDS)
-        .unwrap());
+    assert!(
+        cert.check_host_with_flags("www.example.com", X509CheckFlags::empty())
+            .unwrap()
+    );
+    assert!(
+        !cert
+            .check_host_with_flags("www.example.com", X509CheckFlags::NO_WILDCARDS)
+            .unwrap()
+    );
 }
 
 #[cfg(feature = "underscore-wildcards")]
@@ -220,9 +223,10 @@ fn check_host_with_underscore_wildcards() {
     let cert = cert_with_dns_name("*.example.com");
 
     assert!(!cert.check_host("_service.example.com").unwrap());
-    assert!(cert
-        .check_host_with_flags("_service.example.com", X509CheckFlags::UNDERSCORE_WILDCARDS)
-        .unwrap());
+    assert!(
+        cert.check_host_with_flags("_service.example.com", X509CheckFlags::UNDERSCORE_WILDCARDS)
+            .unwrap()
+    );
 }
 
 #[test]
@@ -408,10 +412,12 @@ fn x509_extension_to_der() {
 
 #[test]
 fn eku_invalid_other() {
-    assert!(ExtendedKeyUsage::new()
-        .other("1.1.1.1.1,2.2.2.2.2")
-        .build()
-        .is_err());
+    assert!(
+        ExtendedKeyUsage::new()
+            .other("1.1.1.1.1,2.2.2.2.2")
+            .build()
+            .is_err()
+    );
 }
 
 #[test]
@@ -527,15 +533,21 @@ fn test_verify_cert() {
     let empty_store = X509StoreBuilder::new().unwrap().build();
 
     let mut context = X509StoreContext::new().unwrap();
-    assert!(context
-        .init(&store, &cert, &chain, |c| c.verify_cert())
-        .unwrap());
-    assert!(!context
-        .init(&empty_store, &cert, &chain, |c| c.verify_cert())
-        .unwrap());
-    assert!(context
-        .init(&store, &cert, &chain, |c| c.verify_cert())
-        .unwrap());
+    assert!(
+        context
+            .init(&store, &cert, &chain, |c| c.verify_cert())
+            .unwrap()
+    );
+    assert!(
+        !context
+            .init(&empty_store, &cert, &chain, |c| c.verify_cert())
+            .unwrap()
+    );
+    assert!(
+        context
+            .init(&store, &cert, &chain, |c| c.verify_cert())
+            .unwrap()
+    );
 
     context
         .reset_with_context_data(empty_store, cert.clone(), Stack::new().unwrap())
@@ -549,8 +561,8 @@ fn test_verify_cert() {
 #[test]
 fn uninitialized_context_and_panicking_ex_data_drop() {
     use std::sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     };
     struct PanicOnDrop(Arc<AtomicBool>);
     impl Drop for PanicOnDrop {
@@ -587,9 +599,11 @@ fn test_verify_fails() {
     let store = store_bldr.build();
 
     let mut context = X509StoreContext::new().unwrap();
-    assert!(!context
-        .init(&store, &cert, &chain, |c| c.verify_cert())
-        .unwrap());
+    assert!(
+        !context
+            .init(&store, &cert, &chain, |c| c.verify_cert())
+            .unwrap()
+    );
 }
 
 #[test]

@@ -2,6 +2,7 @@
 name = "tokio-btls-bench"
 version = { workspace = true }
 edition = { workspace = true }
+rust-version = { workspace = true }
 publish = false
 description = "Read and write benchmarks for tokio-btls and tokio-rustls"
 

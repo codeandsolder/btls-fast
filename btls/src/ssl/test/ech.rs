@@ -219,8 +219,8 @@ fn ech_grease() {
 #[cfg(not(feature = "fips"))]
 #[test]
 fn ech_grease_policy_accepts_retry_configs() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, None);
     client.ssl().set_enable_ech_grease(true);

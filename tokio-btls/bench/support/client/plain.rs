@@ -3,7 +3,7 @@
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::ClientAdapter;
-use crate::support::{case::Tls, BoxError};
+use crate::support::{BoxError, case::Tls};
 
 /// Stateless adapter that hands the transport back unchanged.
 pub(super) struct Adapter;

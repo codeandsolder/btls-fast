@@ -20,7 +20,7 @@ use std::{
     future,
     io::{self, Write},
     pin::Pin,
-    task::{ready, Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use btls::{

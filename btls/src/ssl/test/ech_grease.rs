@@ -136,10 +136,12 @@ fn connect_and_capture(
         stream.ssl().used_hello_retry_request(),
         capture.messages.len() == 2
     );
-    assert!(stream
-        .ssl_mut()
-        .set_ech_grease_callback(|_, _| panic!("late callback called"))
-        .is_err());
+    assert!(
+        stream
+            .ssl_mut()
+            .set_ech_grease_callback(|_, _| panic!("late callback called"))
+            .is_err()
+    );
     assert!(stream.ssl_mut().clear_ech_grease_callback().is_err());
     capture.messages
 }
@@ -167,9 +169,11 @@ fn ech_callback_does_not_add_grease_after_hrr() {
             assert_eq!(ech(&messages[0]), ech(&messages[1]));
         } else {
             for message in messages {
-                assert!(!extensions(&message)
-                    .iter()
-                    .any(|(id, _)| { *id == ffi::TLSEXT_TYPE_encrypted_client_hello as u16 }));
+                assert!(
+                    !extensions(&message)
+                        .iter()
+                        .any(|(id, _)| { *id == ffi::TLSEXT_TYPE_encrypted_client_hello as u16 })
+                );
             }
         }
     }
@@ -247,19 +251,23 @@ fn ech_policy_callback_metadata_and_hrr_reuse() {
                 assert!(!info.is_quic());
                 assert_eq!(info.psk_extension_length(), 0);
                 assert_eq!(info.aead_overhead(), 16);
-                assert!(info
-                    .cipher_suites()
-                    .chunks_exact(2)
-                    .any(|id| id == [0x13, 0x01]));
-                assert!(info
-                    .extensions()
-                    .any(|(id, _)| id == ExtensionType::APPLICATION_LAYER_PROTOCOL_NEGOTIATION));
-                assert!(!info.extensions().any(|(id, _)| [
-                    ExtensionType::PADDING,
-                    ExtensionType::PRE_SHARED_KEY,
-                    ExtensionType::ENCRYPTED_CLIENT_HELLO,
-                ]
-                .contains(&id)));
+                assert!(
+                    info.cipher_suites()
+                        .chunks_exact(2)
+                        .any(|id| id == [0x13, 0x01])
+                );
+                assert!(
+                    info.extensions()
+                        .any(|(id, _)| id == ExtensionType::APPLICATION_LAYER_PROTOCOL_NEGOTIATION)
+                );
+                assert!(!info.extensions().any(|(id, _)| {
+                    [
+                        ExtensionType::PADDING,
+                        ExtensionType::PRE_SHARED_KEY,
+                        ExtensionType::ENCRYPTED_CLIENT_HELLO,
+                    ]
+                    .contains(&id)
+                }));
                 let others: usize = info
                     .extensions()
                     .map(|(_, len)| TLS_EXTENSION_HEADER_LEN + len)
@@ -363,9 +371,11 @@ fn ech_boringssl_parameters_match_default_draw() {
     }
     let mut raw = vector.info();
     raw.max_payload_length = 143;
-    assert!(EchGreaseSizeInfo(&raw)
-        .boringssl_parameters(EchGreaseAead::AES_128_GCM)
-        .is_err());
+    assert!(
+        EchGreaseSizeInfo(&raw)
+            .boringssl_parameters(EchGreaseAead::AES_128_GCM)
+            .is_err()
+    );
 
     // The helper also works inside a live callback.
     let messages = handshake(
@@ -442,9 +452,11 @@ fn ech_policy_callback_errors_fail_handshake() {
             ffi::SSL_R_BAD_LENGTH
         };
         let errors = stream.error().ssl_error().unwrap().errors();
-        assert!(errors
-            .iter()
-            .any(|error| error.library_reason(ffi::ERR_LIB_SSL) == Some(expected)));
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.library_reason(ffi::ERR_LIB_SSL) == Some(expected))
+        );
         // The policy's own error stays on the stack under BoringSSL's.
         assert_eq!(
             errors
@@ -683,8 +695,8 @@ fn ech_policy_accounts_for_record_size_limit() {
 fn ech_connector_policy_uses_per_connection_host_length() {
     use crate::hash::MessageDigest;
     use crate::pkey::PKey;
-    use crate::x509::extension::SubjectAlternativeName;
     use crate::x509::X509;
+    use crate::x509::extension::SubjectAlternativeName;
 
     // Trust a local identity valid for both names; keep certificate and host checks enabled.
     let key = PKey::private_key_from_pem(super::KEY).unwrap();
@@ -1058,9 +1070,11 @@ fn ech_firefox_policy_matches_live_client_hello() {
                         .iter()
                         .position(|(id, _)| *id == ffi::TLSEXT_TYPE_encrypted_client_hello as u16)
                         .unwrap();
-                    assert!(wire[position + 1..]
-                        .iter()
-                        .all(|(id, _)| *id == ffi::TLSEXT_TYPE_padding as u16));
+                    assert!(
+                        wire[position + 1..]
+                            .iter()
+                            .all(|(id, _)| *id == ffi::TLSEXT_TYPE_padding as u16)
+                    );
                 }
             }
         }

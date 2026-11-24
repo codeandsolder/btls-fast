@@ -22,7 +22,7 @@ use tokio::{
 };
 use tokio_btls::SslStream;
 
-use super::{case::Tls, runtime::tokio_runtime, BoxError, Direction};
+use super::{BoxError, Direction, case::Tls, runtime::tokio_runtime};
 
 /// Cipher suite every TLS connection must negotiate, with TLS 1.3.
 const SUITE: &str = "TLS_AES_128_GCM_SHA256";

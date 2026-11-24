@@ -5,10 +5,10 @@ use std::{
     time::Duration,
 };
 
-use tokio::io::{duplex, AsyncReadExt, AsyncWrite};
+use tokio::io::{AsyncReadExt, AsyncWrite, duplex};
 
-use super::{write_batch, write_part, Batches, BodyCase, BodyKind, ClientCase};
-use crate::support::{case::BODY_CASES, BenchTarget, BoxError, Clock, Direction, Transport};
+use super::{Batches, BodyCase, BodyKind, ClientCase, write_batch, write_part};
+use crate::support::{BenchTarget, BoxError, Clock, Direction, Transport, case::BODY_CASES};
 
 const PATIENCE: Duration = Duration::from_millis(10);
 const BODY: [u8; 1024] = [7; 1024];

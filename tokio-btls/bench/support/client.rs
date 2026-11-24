@@ -15,7 +15,7 @@ use std::{
     time::Duration,
 };
 
-use criterion::{measurement::WallTime, BenchmarkGroup};
+use criterion::{BenchmarkGroup, measurement::WallTime};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpStream,
@@ -23,11 +23,11 @@ use tokio::{
 };
 
 use super::{
-    case::{BodyCase, BodyKind, Tls, BATCH_LEN, MAX_SLICES},
+    BenchTarget, BoxError, Clock, Direction, Transport,
+    case::{BATCH_LEN, BodyCase, BodyKind, MAX_SLICES, Tls},
     memory::{self, MemoryPeer, MemoryStream},
     runtime::tokio_runtime,
     server::{self, Pace, TcpPeer},
-    BenchTarget, BoxError, Clock, Direction, Transport,
 };
 
 /// Carries one body row from the runner into client registration.

@@ -4,8 +4,8 @@ use std::{
     io, mem,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
 };
@@ -18,8 +18,8 @@ use foreign_types::ForeignTypeRef;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, DuplexStream, ReadBuf};
 
 use crate::{
-    write::{self, MAX_RECORD, RECORD_OVERHEAD, SEAL_STACK_LEN, WRITE_BUF_CAPACITY},
     SslStream,
+    write::{self, MAX_RECORD, RECORD_OVERHEAD, SEAL_STACK_LEN, WRITE_BUF_CAPACITY},
 };
 
 /// Duplex transport whose writes can stall, fail once, or keep returning `BrokenPipe`.
@@ -380,9 +380,11 @@ async fn short_fragments_preserve_vectored_prefix_after_retries() {
             boundary == accepted
         }));
         io::IoSlice::advance_slices(&mut bufs, accepted);
-        assert!(Pin::new(&mut client)
-            .poll_write_vectored(&mut cx, bufs)
-            .is_pending());
+        assert!(
+            Pin::new(&mut client)
+                .poll_write_vectored(&mut cx, bufs)
+                .is_pending()
+        );
 
         // Split ciphertext writes both inside record headers and inside record bodies.
         for budget in [37, 4093].into_iter().cycle().take(256) {
@@ -442,9 +444,11 @@ async fn buffer_cap_and_persistent_errors_preserve_consumed_prefix() {
         let buffered = client.0.get_ref().write_buf.len();
         assert!(buffered > WRITE_BUF_CAPACITY);
         assert!(buffered <= tail.len() + 5 * RECORD_OVERHEAD);
-        assert!(Pin::new(&mut client)
-            .poll_write(&mut cx, b"extra")
-            .is_pending());
+        assert!(
+            Pin::new(&mut client)
+                .poll_write(&mut cx, b"extra")
+                .is_pending()
+        );
         assert_eq!(client.0.get_ref().write_buf.len(), buffered);
 
         // A persistent error prevents every later write from accepting more input.

@@ -6,11 +6,11 @@
 
 use std::cell::Cell;
 
-use ::aws_lc_rs::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_128_GCM};
+use ::aws_lc_rs::aead::{AES_128_GCM, Aad, LessSafeKey, Nonce, UnboundKey};
 use ::btls::aead::{AeadCtx, Algorithm};
-use criterion::{measurement::WallTime, BenchmarkGroup};
+use criterion::{BenchmarkGroup, measurement::WallTime};
 
-use super::{case::MAX_RECORD, BenchTarget, BoxError, Direction};
+use super::{BenchTarget, BoxError, Direction, case::MAX_RECORD};
 
 /// AES-GCM tag length.
 const TAG_LEN: usize = 16;

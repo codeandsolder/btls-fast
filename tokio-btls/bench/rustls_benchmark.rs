@@ -4,13 +4,14 @@
 use std::sync::Arc;
 
 use tokio_rustls::{
-    rustls::{
-        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        crypto::{aws_lc_rs, WebPkiSupportedAlgorithms},
-        pki_types::{CertificateDer, ServerName, UnixTime},
-        version, ClientConfig, DigitallySignedStruct, Error, SignatureScheme,
-    },
     TlsConnector,
+    rustls::{
+        ClientConfig, DigitallySignedStruct, Error, SignatureScheme,
+        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        crypto::{WebPkiSupportedAlgorithms, aws_lc_rs},
+        pki_types::{CertificateDer, ServerName, UnixTime},
+        version,
+    },
 };
 
 /// Accepts any server certificate, like the tokio-btls client with `SslVerifyMode::NONE`.
