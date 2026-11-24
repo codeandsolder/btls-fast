@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::{error::ErrorStack, ffi};
 
 /// An immutable native key and its seed, erased on final release.
-pub(crate) struct SecretMaterial<T, const N: usize> {
+pub struct SecretMaterial<T, const N: usize> {
     pub(crate) seed: [u8; N],
     expanded: MaybeUninit<T>,
 }
