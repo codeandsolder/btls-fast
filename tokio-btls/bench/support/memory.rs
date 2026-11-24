@@ -115,6 +115,9 @@ impl AsyncRead for MemoryStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
+        if buf.remaining() == 0 {
+            return Poll::Ready(Ok(()));
+        }
         let mut shared = self.lock_shared();
         let handshake = shared.handshake;
         let pipe = &mut shared.pipes[self.rx];
@@ -253,6 +256,45 @@ mod tests {
         fn wake(self: Arc<Self>) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    #[test]
+    fn empty_reads_complete_without_registering_a_waker_or_requiring_ciphertext() {
+        let (mut writer, mut reader) = pair();
+        let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut empty = [];
+        let mut buf = ReadBuf::new(&mut empty);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, &[42]),
+            Poll::Ready(Ok(1))
+        ));
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+
+        // After the handshake, an empty buffer succeeds even when the pipe is empty,
+        // but a nonempty buffer must still report an incomplete batch.
+        writer.lock_shared().handshake = false;
+        let mut byte = [0];
+        let mut nonempty = ReadBuf::new(&mut byte);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut cx, &mut nonempty),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(nonempty.filled(), &[42]);
+        let mut nonempty = ReadBuf::new(&mut byte);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut cx, &mut nonempty),
+            Poll::Ready(Err(error)) if error.kind() == io::ErrorKind::UnexpectedEof
+        ));
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
     }
 
     #[test]
