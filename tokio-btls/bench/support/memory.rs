@@ -65,8 +65,8 @@ pub(super) fn pair() -> (MemoryStream, MemoryStream) {
 
 impl MemoryStream {
     // The shared in-memory pipes can also be moved to another executor thread.
-    // Recover a poisoned lock for diagnostic cleanup after a failed benchmark;
-    // the pipe's bytes and read offset are updated transactionally.
+    // Recover poisoning after a benchmark panic so a subsequent integrity
+    // check can report any incomplete record rather than panic again.
     fn lock_shared(&self) -> MutexGuard<'_, Shared> {
         self.shared.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -94,7 +94,13 @@ impl MemoryStream {
             for buf in bufs {
                 pipe.bytes.extend_from_slice(buf);
             }
-            (pipe.bytes.len() - start, pipe.reader.take())
+            let written = pipe.bytes.len() - start;
+            let reader = if written == 0 {
+                None
+            } else {
+                pipe.reader.take()
+            };
+            (written, reader)
         };
         if let Some(reader) = reader {
             reader.wake();
@@ -179,8 +185,12 @@ impl MemoryPeer {
         len: usize,
     ) -> Result<Self, BoxError> {
         let transport = stream.get_ref();
-        transport.lock_shared().handshake = false;
-        if transport.in_flight() != 0 || transport.unread() != 0 {
+        let queued = {
+            let mut shared = transport.lock_shared();
+            shared.handshake = false;
+            shared.pipes.iter().any(|pipe| pipe.pos != pipe.bytes.len())
+        };
+        if queued {
             return Err("memory transport holds data after the handshake".into());
         }
         let buf = match direction {
@@ -234,6 +244,45 @@ impl MemoryPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Wake;
+
+    struct WakeCount(AtomicUsize);
+
+    impl Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn zero_byte_write_does_not_wake_waiting_reader() {
+        let (mut writer, mut reader) = pair();
+        let counter = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let waker = Waker::from(counter.clone());
+        let mut cx = Context::from_waker(&waker);
+        let mut byte = [0];
+        let mut buf = ReadBuf::new(&mut byte);
+        assert!(Pin::new(&mut reader)
+            .poll_read(&mut cx, &mut buf)
+            .is_pending());
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, &[]),
+            Poll::Ready(Ok(0))
+        ));
+        assert_eq!(counter.0.load(Ordering::Relaxed), 0);
+
+        assert!(matches!(
+            Pin::new(&mut writer).poll_write(&mut cx, &[42]),
+            Poll::Ready(Ok(1))
+        ));
+        assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+        assert!(matches!(
+            Pin::new(&mut reader).poll_read(&mut cx, &mut buf),
+            Poll::Ready(Ok(()))
+        ));
+        assert_eq!(buf.filled(), &[42]);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn duplex_memory_transport_is_send_and_wakes_cross_thread_reader() -> Result<(), BoxError>
