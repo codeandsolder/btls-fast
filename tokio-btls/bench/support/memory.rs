@@ -75,14 +75,18 @@ impl MemoryStream {
     fn unread(&self) -> usize {
         let shared = self.lock_shared();
         let pipe = &shared.pipes[self.rx];
-        pipe.bytes.len() - pipe.pos
+        let unread = pipe.bytes.len() - pipe.pos;
+        drop(shared);
+        unread
     }
 
     /// Bytes this end wrote that the other end has not read.
     fn in_flight(&self) -> usize {
         let shared = self.lock_shared();
         let pipe = &shared.pipes[1 - self.rx];
-        pipe.bytes.len() - pipe.pos
+        let queued = pipe.bytes.len() - pipe.pos;
+        drop(shared);
+        queued
     }
 
     /// Appends `bufs` to the pipe the other end reads.
@@ -100,6 +104,7 @@ impl MemoryStream {
             } else {
                 pipe.reader.take()
             };
+            drop(shared);
             (written, reader)
         };
         if let Some(reader) = reader {
@@ -141,6 +146,7 @@ impl AsyncRead for MemoryStream {
             pipe.bytes.clear();
             pipe.pos = 0;
         }
+        drop(shared);
         Poll::Ready(Ok(()))
     }
 }
@@ -224,7 +230,7 @@ impl MemoryPeer {
     /// Opens `copies` of `part` and compares each with it.
     ///
     /// The client's ciphertext must cover them, and nothing may follow. Only a lower bound holds
-    /// for its length, since `rustls` adds a KeyUpdate record every 2^24 records.
+    /// for its length, since `rustls` adds a `KeyUpdate` record every 2^24 records.
     pub(super) async fn receive(&mut self, part: &[u8], copies: usize) -> Result<(), BoxError> {
         let sealed = Tls::Enabled.wire_len(part.len()) * copies;
         if self.unread() < sealed {

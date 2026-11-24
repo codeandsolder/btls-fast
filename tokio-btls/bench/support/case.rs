@@ -1,8 +1,9 @@
 //! Target dimensions, clocks and the body matrix shared by every benchmark.
 
 use std::{
-    fmt,
+    fmt, io,
     sync::LazyLock,
+    thread::{self, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -67,9 +68,13 @@ pub enum Clock {
 }
 
 /// A measurement started on one [`Clock`].
+///
+/// Keep only the sendable CPU-time count, plus the originating thread ID. Async
+/// benchmark futures may be moved, but thread-local measurements must not silently
+/// combine samples from different executor threads.
 pub enum Stopwatch {
     Wall(Instant),
-    Cpu(ThreadTime),
+    Cpu { start: Duration, thread: ThreadId },
 }
 
 // ===== impl Clock =====
@@ -79,7 +84,13 @@ impl Clock {
     pub(crate) fn start(self) -> Stopwatch {
         match self {
             Self::Wall => Stopwatch::Wall(Instant::now()),
-            Self::Cpu => Stopwatch::Cpu(ThreadTime::now()),
+            Self::Cpu => {
+                let thread = thread::current().id();
+                Stopwatch::Cpu {
+                    start: ThreadTime::now().as_duration(),
+                    thread,
+                }
+            }
         }
     }
 }
@@ -97,10 +108,25 @@ impl fmt::Display for Clock {
 
 impl Stopwatch {
     /// Time on the clock since the measurement started.
-    pub(crate) fn elapsed(&self) -> Duration {
+    ///
+    /// # Errors
+    ///
+    /// A CPU-time measurement moved to another thread, its clock could not
+    /// be read, or its reported counter went backwards.
+    pub(crate) fn elapsed(&self) -> io::Result<Duration> {
         match self {
-            Self::Wall(start) => start.elapsed(),
-            Self::Cpu(start) => start.elapsed(),
+            Self::Wall(start) => Ok(start.elapsed()),
+            Self::Cpu { start, thread } => {
+                // Read the end timestamp before doing any validation work.
+                let end = ThreadTime::try_now()?.as_duration();
+                if *thread != thread::current().id() {
+                    return Err(io::Error::other(
+                        "CPU-time benchmark switched executor threads",
+                    ));
+                }
+                end.checked_sub(*start)
+                    .ok_or_else(|| io::Error::other("thread CPU-time counter went backwards"))
+            }
         }
     }
 }
@@ -229,3 +255,30 @@ const _: () = {
         i += 1;
     }
 };
+
+#[cfg(test)]
+mod stopwatch_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_time_measurements_reject_executor_migration() -> io::Result<()> {
+        let stopwatch = Clock::Cpu.start();
+        let elapsed = stopwatch.elapsed()?;
+        assert!(elapsed <= ThreadTime::now().as_duration());
+        let result = std::thread::spawn(move || stopwatch.elapsed())
+            .join()
+            .map_err(|_| io::Error::other("clock test thread panicked"))?;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
+        Ok(())
+    }
+
+    #[test]
+    fn wall_clock_measurements_are_sendable() -> io::Result<()> {
+        let stopwatch = Clock::Wall.start();
+        let elapsed = std::thread::spawn(move || stopwatch.elapsed())
+            .join()
+            .map_err(|_| io::Error::other("clock test thread panicked"))??;
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+}

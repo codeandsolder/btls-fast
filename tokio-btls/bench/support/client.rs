@@ -545,7 +545,7 @@ where
     for _ in 0..iters {
         last = read_part(stream, buf, case, 0..body.len(), |_, _| true).await?;
     }
-    let elapsed = stopwatch.elapsed();
+    let elapsed = stopwatch.elapsed()?;
     check_tail(buf, last, body)?;
     Ok(elapsed)
 }
@@ -560,7 +560,7 @@ where
     for _ in 0..iters {
         write_part(stream, body, case).await?;
     }
-    Ok(stopwatch.elapsed())
+    Ok(stopwatch.elapsed()?)
 }
 
 /// Reads `iters` bodies in batches the server queues before the clock starts, passing each read
@@ -589,7 +589,7 @@ where
         for _ in 0..batch.copies {
             last = read_part(stream, buf, case, batch.part.clone(), &mut check).await?;
         }
-        elapsed += stopwatch.elapsed();
+        elapsed += stopwatch.elapsed()?;
 
         check_tail(buf, last, &body[..batch.part.end])?;
         match peer.queued()? {
@@ -621,7 +621,7 @@ where
             for _ in 0..batch.copies {
                 write_part(stream, part, case).await?;
             }
-            elapsed += stopwatch.elapsed();
+            elapsed += stopwatch.elapsed()?;
         }
         peer.receive(part, batch.copies).await?;
     }
@@ -647,7 +647,7 @@ where
         for _ in 0..copies {
             write_part(stream, part, case).await?;
         }
-        Ok::<_, io::Error>(stopwatch.elapsed())
+        stopwatch.elapsed()
     };
     tokio::time::timeout(patience, write)
         .await

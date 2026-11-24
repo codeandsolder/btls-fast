@@ -174,7 +174,13 @@ where
                             seq = seq.wrapping_add(1);
                         }
                     }
-                    stopwatch.elapsed()
+                    match stopwatch.elapsed() {
+                        Ok(elapsed) => elapsed,
+                        Err(error) => {
+                            failure.set(Some(error.into()));
+                            std::time::Duration::ZERO
+                        }
+                    }
                 });
             });
         }
@@ -190,7 +196,13 @@ where
                             }
                         }
                     }
-                    stopwatch.elapsed()
+                    match stopwatch.elapsed() {
+                        Ok(elapsed) => elapsed,
+                        Err(error) => {
+                            failure.set(Some(error.into()));
+                            std::time::Duration::ZERO
+                        }
+                    }
                 });
             });
         }
