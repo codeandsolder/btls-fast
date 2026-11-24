@@ -913,28 +913,29 @@ where
     if ssl.is_null() || out.is_null() {
         return 0;
     }
-    let Ok(mut decompression_buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
-        return 0;
-    };
-
-    // SAFETY: Native SSL and input remain live for the synchronous callback;
-    // the private output buffer does not escape until its length is verified.
+    // SAFETY: Native SSL and input remain live for the synchronous callback.
+    // Constructing the output only after validating the callback and input avoids
+    // allocating the advertised decompressed size for malformed native input.
     if !unsafe {
         with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
-            compressor
-                .decompress(data, &mut decompression_buffer)
-                .is_ok()
+            let Ok(mut buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
+                return false;
+            };
+            if compressor.decompress(data, &mut buffer).is_err() {
+                return false;
+            }
+            let Ok(crypto_buffer) = buffer.build() else {
+                return false;
+            };
+            // SAFETY: The native callback supplies a writable non-null output
+            // slot. Ownership transfers only after a fully initialized buffer.
+            unsafe { out.write(crypto_buffer) };
+            true
         })
     } {
         return 0;
     }
 
-    let Ok(crypto_buffer) = decompression_buffer.build() else {
-        return 0;
-    };
-
-    // SAFETY: The native decompression callback provides a uniquely writable pointer-to-buffer output slot.
-    unsafe { out.write(crypto_buffer) };
     1
 }
 
