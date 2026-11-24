@@ -36,10 +36,7 @@ use crate::ffi;
 /// This operation takes an amount of time dependent on the length of the two
 /// arrays given, but is independent of the contents of a and b.
 ///
-/// # Panics
-///
-/// This function will panic the current task if `a` and `b` do not have the same
-/// length.
+/// Unequal lengths return false immediately; lengths are not secret.
 ///
 /// # Examples
 ///
@@ -60,9 +57,12 @@ use crate::ffi;
 /// assert!(!eq(&a, &b));
 /// assert!(!eq(&a, &c));
 /// ```
-#[must_use]
+#[must_use = "Use this predicate to decide how to handle the current value or connection."]
 pub fn eq(a: &[u8], b: &[u8]) -> bool {
-    assert_eq!(a.len(), b.len());
+    if a.len() != b.len() {
+        return false;
+    }
+    // SAFETY: both immutable slices are readable for the same supplied length.
     let ret = unsafe { ffi::CRYPTO_memcmp(a.as_ptr().cast(), b.as_ptr().cast(), a.len()) };
     ret == 0
 }
@@ -79,8 +79,8 @@ mod tests {
     }
 
     #[test]
-    #[should_panic]
     fn test_diff_lens() {
-        let _ = eq(&[], &[1]);
+        assert!(!eq(&[], &[1]));
+        assert!(!eq(&[1], &[]));
     }
 }

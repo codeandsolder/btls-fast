@@ -73,21 +73,23 @@ async fn connect(
         .set_server_certificate_types(&[CertificateType::RAW_PUBLIC_KEY])
         .unwrap();
 
-    connector.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
-        let public_key = ssl
-            .peer_pubkey()
-            .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))?;
+    connector
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            let public_key = ssl
+                .peer_pubkey()
+                .ok_or(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))?;
 
-        let is_ok = public_key.public_eq(&spki);
+            let is_ok = public_key.public_eq(&spki);
 
-        is_ok_cell.set(is_ok).unwrap();
+            is_ok_cell.set(is_ok).unwrap();
 
-        if !is_ok {
-            return Err(SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE));
-        }
+            if !is_ok {
+                return Err(SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE));
+            }
 
-        Ok(())
-    });
+            Ok(())
+        })
+        .unwrap();
 
     let config = connector.build().configure().unwrap();
 

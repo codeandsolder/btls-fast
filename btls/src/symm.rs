@@ -53,9 +53,8 @@
 //! ```
 
 use crate::ffi;
-use foreign_types::ForeignTypeRef;
+use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
-use std::cmp;
 use std::ffi::c_int;
 use std::ptr;
 
@@ -77,56 +76,89 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl CipherCtxRef {
-    /// Configures CipherCtx for a fresh encryption operation using `cipher`.
+    /// Configures a fresh native cipher operation with the supplied key and
+    /// optional IV. Variable-length keys and IVs are accepted only when the
+    /// native cipher supports them.
     ///
-    #[corresponds(EVP_EncryptInit_ex)]
-    pub fn init_encrypt(
+    /// # Errors
+    ///
+    /// The key or IV is missing, invalid for the selected cipher, or native
+    /// initialization fails.
+    pub fn init(
         &mut self,
-        cipher: &Cipher,
+        cipher: Cipher,
+        mode: Mode,
         key: &[u8],
-        iv: &[u8; ffi::EVP_MAX_IV_LENGTH as usize],
+        iv: Option<&[u8]>,
     ) -> Result<(), ErrorStack> {
         ffi::init();
-
-        if key.len() != cipher.key_len() {
-            return Err(ErrorStack::internal_error_str("invalid key size"));
+        let enc = match mode {
+            Mode::Encrypt => 1,
+            Mode::Decrypt => 0,
+        };
+        let iv = match (iv, cipher.iv_len()) {
+            (Some(iv), Some(_)) if !iv.is_empty() => iv,
+            (None | Some(_), Some(_)) => {
+                return Err(ErrorStack::internal_error_str(
+                    "cipher requires a nonempty IV",
+                ));
+            }
+            (None | Some([]), None) => &[],
+            (Some(_), None) => {
+                return Err(ErrorStack::internal_error_str("cipher does not use an IV"))
+            }
+        };
+        if key.is_empty() {
+            return Err(ErrorStack::internal_error_str(
+                "cipher requires a nonempty key",
+            ));
         }
-
+        let iv_ptr = if iv.is_empty() {
+            ptr::null()
+        } else {
+            iv.as_ptr()
+        };
+        // SAFETY: self exclusively borrows a native initialized allocation,
+        // and the cipher descriptor has static lifetime. In the variable-size
+        // case, configure lengths before passing the actual key and IV bytes.
         unsafe {
-            cvt(ffi::EVP_EncryptInit_ex(
+            if key.len() == cipher.key_len() && iv.len() == cipher.iv_len().unwrap_or(0) {
+                return cvt(ffi::EVP_CipherInit_ex(
+                    self.as_ptr(),
+                    cipher.as_ptr(),
+                    ptr::null_mut(),
+                    key.as_ptr(),
+                    iv_ptr,
+                    enc,
+                ));
+            }
+            cvt(ffi::EVP_CipherInit_ex(
                 self.as_ptr(),
                 cipher.as_ptr(),
-                // ENGINE api is deprecated
                 ptr::null_mut(),
-                key.as_ptr(),
-                iv.as_ptr(),
-            ))
-        }
-    }
-
-    /// Configures CipherCtx for a fresh decryption operation using `cipher`.
-    ///
-    #[corresponds(EVP_DecryptInit_ex)]
-    pub fn init_decrypt(
-        &mut self,
-        cipher: &Cipher,
-        key: &[u8],
-        iv: &[u8; ffi::EVP_MAX_IV_LENGTH as usize],
-    ) -> Result<(), ErrorStack> {
-        ffi::init();
-
-        if key.len() != cipher.key_len() {
-            return Err(ErrorStack::internal_error_str("invalid key size"));
-        }
-
-        unsafe {
-            cvt(ffi::EVP_DecryptInit_ex(
+                ptr::null(),
+                ptr::null(),
+                enc,
+            ))?;
+            cvt(ffi::EVP_CIPHER_CTX_set_key_length(
                 self.as_ptr(),
-                cipher.as_ptr(),
-                // ENGINE api is deprecated
+                try_int(key.len())?,
+            ))?;
+            if iv.len() != cipher.iv_len().unwrap_or(0) {
+                cvt(ffi::EVP_CIPHER_CTX_ctrl(
+                    self.as_ptr(),
+                    ffi::EVP_CTRL_GCM_SET_IVLEN,
+                    try_int(iv.len())?,
+                    ptr::null_mut(),
+                ))?;
+            }
+            cvt(ffi::EVP_CipherInit_ex(
+                self.as_ptr(),
+                ptr::null(),
                 ptr::null_mut(),
                 key.as_ptr(),
-                iv.as_ptr(),
+                iv_ptr,
+                enc,
             ))
         }
     }
@@ -143,114 +175,135 @@ pub struct Cipher(*const ffi::EVP_CIPHER);
 impl Cipher {
     /// Looks up the cipher for a certain nid.
     #[corresponds(EVP_get_cipherbynid)]
-    #[must_use]
-    pub fn from_nid(nid: Nid) -> Option<Cipher> {
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn from_nid(nid: Nid) -> Option<Self> {
+        // SAFETY: native lookup returns an immutable static descriptor or null.
         let ptr = unsafe { ffi::EVP_get_cipherbynid(nid.as_raw()) };
         if ptr.is_null() {
             None
         } else {
-            Some(Cipher(ptr))
+            Some(Self(ptr))
         }
     }
 
-    #[must_use]
-    pub fn aes_128_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_ecb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_128_ecb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_128_ecb()) }
     }
 
-    #[must_use]
-    pub fn aes_128_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_cbc()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_128_cbc() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_128_cbc()) }
     }
 
-    #[must_use]
-    pub fn aes_128_ctr() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_ctr()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_128_ctr() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_128_ctr()) }
     }
 
-    #[must_use]
-    pub fn aes_128_gcm() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_gcm()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_128_gcm() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_128_gcm()) }
     }
 
-    #[must_use]
-    pub fn aes_128_ofb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_128_ofb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_128_ofb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_128_ofb()) }
     }
 
-    #[must_use]
-    pub fn aes_192_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_ecb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_192_ecb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_192_ecb()) }
     }
 
-    #[must_use]
-    pub fn aes_192_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_cbc()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_192_cbc() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_192_cbc()) }
     }
 
-    #[must_use]
-    pub fn aes_192_ctr() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_ctr()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_192_ctr() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_192_ctr()) }
     }
 
-    #[must_use]
-    pub fn aes_192_gcm() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_gcm()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_192_gcm() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_192_gcm()) }
     }
 
-    #[must_use]
-    pub fn aes_192_ofb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_192_ofb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_192_ofb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_192_ofb()) }
     }
 
-    #[must_use]
-    pub fn aes_256_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_ecb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_256_ecb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_256_ecb()) }
     }
 
-    #[must_use]
-    pub fn aes_256_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_cbc()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_256_cbc() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_256_cbc()) }
     }
 
-    #[must_use]
-    pub fn aes_256_ctr() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_ctr()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_256_ctr() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_256_ctr()) }
     }
 
-    #[must_use]
-    pub fn aes_256_gcm() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_gcm()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_256_gcm() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_256_gcm()) }
     }
 
-    #[must_use]
-    pub fn aes_256_ofb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_aes_256_ofb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn aes_256_ofb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_aes_256_ofb()) }
     }
 
-    #[must_use]
-    pub fn des_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_cbc()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn des_cbc() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_des_cbc()) }
     }
 
-    #[must_use]
-    pub fn des_ecb() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_ecb()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn des_ecb() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_des_ecb()) }
     }
 
-    #[must_use]
-    pub fn des_ede3() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_ede3()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn des_ede3() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_des_ede3()) }
     }
 
-    #[must_use]
-    pub fn des_ede3_cbc() -> Cipher {
-        unsafe { Cipher(ffi::EVP_des_ede3_cbc()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn des_ede3_cbc() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_des_ede3_cbc()) }
     }
 
-    #[must_use]
-    pub fn rc4() -> Cipher {
-        unsafe { Cipher(ffi::EVP_rc4()) }
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn rc4() -> Self {
+        // SAFETY: native getter returns an immutable process-lifetime descriptor.
+        unsafe { Self(ffi::EVP_rc4()) }
     }
 
     /// Creates a `Cipher` from a raw pointer to its OpenSSL type.
@@ -258,29 +311,28 @@ impl Cipher {
     /// # Safety
     ///
     /// The caller must ensure the pointer is valid for the `'static` lifetime.
-    #[must_use]
-    pub unsafe fn from_ptr(ptr: *const ffi::EVP_CIPHER) -> Cipher {
-        Cipher(ptr)
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
+    pub const unsafe fn from_ptr(ptr: *const ffi::EVP_CIPHER) -> Self {
+        Self(ptr)
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_ptr(&self) -> *const ffi::EVP_CIPHER {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_ptr(self) -> *const ffi::EVP_CIPHER {
         self.0
     }
 
     /// Returns the length of keys used with this cipher.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn key_len(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn key_len(self) -> usize {
+        // SAFETY: self holds a valid immutable cipher descriptor.
         unsafe { EVP_CIPHER_key_length(self.0) as usize }
     }
 
     /// Returns the length of the IV used with this cipher, or `None` if the
     /// cipher does not use an IV.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn iv_len(&self) -> Option<usize> {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn iv_len(self) -> Option<usize> {
+        // SAFETY: self holds a valid immutable cipher descriptor.
         unsafe {
             let len = EVP_CIPHER_iv_length(self.0) as usize;
             if len == 0 {
@@ -296,23 +348,26 @@ impl Cipher {
     /// # Note
     ///
     /// Stream ciphers such as RC4 have a block size of 1.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn block_size(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn block_size(self) -> usize {
+        // SAFETY: self holds a valid immutable cipher descriptor.
         unsafe { EVP_CIPHER_block_size(self.0) as usize }
     }
 
     /// Returns the cipher's NID.
     #[corresponds(EVP_CIPHER_nid)]
-    #[must_use]
-    pub fn nid(&self) -> Nid {
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
+    pub fn nid(self) -> Nid {
         ffi::init();
+        // SAFETY: self holds a valid immutable cipher descriptor.
         let nid = unsafe { ffi::EVP_CIPHER_nid(self.as_ptr()) };
         Nid::from_raw(nid)
     }
 }
 
+// SAFETY: descriptors are immutable process-lifetime native objects.
 unsafe impl Sync for Cipher {}
+// SAFETY: static cipher descriptors are not thread-affine.
 unsafe impl Send for Cipher {}
 
 /// Represents a symmetric cipher context.
@@ -376,101 +431,74 @@ unsafe impl Send for Cipher {}
 /// assert_eq!(b"Some Stream of Crypto Text", &plaintext[..]);
 /// ```
 pub struct Crypter {
-    ctx: *mut ffi::EVP_CIPHER_CTX,
-    block_size: usize,
+    ctx: CipherCtx,
+    state: CipherState,
 }
 
-unsafe impl Sync for Crypter {}
-unsafe impl Send for Crypter {}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CipherState {
+    Active,
+    Finalized,
+    Failed,
+}
 
 impl Crypter {
-    /// Creates a new `Crypter`.  The initialisation vector, `iv`, is not necesarry for certain
-    /// types of `Cipher`.
+    /// Creates a new cipher operation for the requested key and IV.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if an IV is required by the cipher but not provided.  Also make sure that the key
-    /// and IV size are appropriate for your cipher.
-    pub fn new(
-        t: Cipher,
-        mode: Mode,
-        key: &[u8],
-        iv: Option<&[u8]>,
-    ) -> Result<Crypter, ErrorStack> {
+    /// Allocation or initialization fails, including a missing or invalid IV
+    /// or an invalid key length.
+    pub fn new(t: Cipher, mode: Mode, key: &[u8], iv: Option<&[u8]>) -> Result<Self, ErrorStack> {
         ffi::init();
+        // SAFETY: the native allocator returns an owned context or null.
+        let mut ctx = unsafe { CipherCtx::from_ptr(cvt_p(ffi::EVP_CIPHER_CTX_new())?) };
+        ctx.init(t, mode, key, iv)?;
+        Ok(Self {
+            ctx,
+            state: CipherState::Active,
+        })
+    }
 
-        unsafe {
-            let ctx = cvt_p(ffi::EVP_CIPHER_CTX_new())?;
-            let crypter = Crypter {
-                ctx,
-                block_size: t.block_size(),
-            };
-
-            let mode = match mode {
-                Mode::Encrypt => 1,
-                Mode::Decrypt => 0,
-            };
-
-            cvt(ffi::EVP_CipherInit_ex(
-                crypter.ctx,
-                t.as_ptr(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                ptr::null_mut(),
-                mode,
-            ))?;
-
-            cvt(ffi::EVP_CIPHER_CTX_set_key_length(
-                crypter.ctx,
-                try_int(key.len())?,
-            ))?;
-
-            let iv = match (iv, t.iv_len()) {
-                (Some(iv), Some(len)) => {
-                    if iv.len() != len {
-                        cvt(ffi::EVP_CIPHER_CTX_ctrl(
-                            crypter.ctx,
-                            ffi::EVP_CTRL_GCM_SET_IVLEN,
-                            try_int(iv.len())?,
-                            ptr::null_mut(),
-                        ))?;
-                    }
-                    iv.as_ptr().cast_mut()
-                }
-                (Some(_) | None, None) => ptr::null_mut(),
-                (None, Some(_)) => panic!("an IV is required for this cipher"),
-            };
-            cvt(ffi::EVP_CipherInit_ex(
-                crypter.ctx,
-                ptr::null(),
-                ptr::null_mut(),
-                key.as_ptr().cast_mut(),
-                iv,
-                mode,
-            ))?;
-
-            Ok(crypter)
+    fn require_active(&self) -> Result<(), ErrorStack> {
+        if self.state == CipherState::Active {
+            Ok(())
+        } else {
+            Err(ErrorStack::internal_error_str(
+                "cipher operation is no longer active",
+            ))
         }
     }
 
-    /// Enables or disables padding.
+    /// Enables or disables padding. With padding disabled, block-cipher
+    /// input must be a multiple of the block size.
     ///
-    /// If padding is disabled, total amount of data encrypted/decrypted must
-    /// be a multiple of the cipher's block size.
-    pub fn pad(&mut self, padding: bool) {
+    /// # Errors
+    ///
+    /// The operation is no longer active or the native configuration fails.
+    pub fn pad(&mut self, padding: bool) -> Result<(), ErrorStack> {
+        self.require_active()?;
+        // SAFETY: self owns an initialized cipher context and uniquely borrows it.
         unsafe {
-            ffi::EVP_CIPHER_CTX_set_padding(self.ctx, c_int::from(padding));
+            cvt(ffi::EVP_CIPHER_CTX_set_padding(
+                self.ctx.as_ptr(),
+                c_int::from(padding),
+            ))
         }
     }
 
-    /// Sets the tag used to authenticate ciphertext in AEAD ciphers such as AES GCM.
+    /// Sets the authentication tag for AEAD decryption before finalization.
     ///
-    /// When decrypting cipher text using an AEAD cipher, this must be called before `finalize`.
+    /// # Errors
+    ///
+    /// The cipher mode or tag length is unsupported, or the operation is inactive.
     pub fn set_tag(&mut self, tag: &[u8]) -> Result<(), ErrorStack> {
+        self.require_active()?;
+        // SAFETY: the native SET_TAG command reads the supplied number of
+        // bytes from tag; it does not mutate the caller's slice.
         unsafe {
-            // NB: this constant is actually more general than just GCM.
             cvt(ffi::EVP_CIPHER_CTX_ctrl(
-                self.ctx,
+                self.ctx.as_ptr(),
                 ffi::EVP_CTRL_GCM_SET_TAG,
                 try_int(tag.len())?,
                 tag.as_ptr().cast_mut().cast(),
@@ -478,143 +506,133 @@ impl Crypter {
         }
     }
 
-    /// Sets the length of the authentication tag to generate in AES CCM.
+    /// Supplies associated data before any plaintext/ciphertext update.
     ///
-    /// When encrypting with AES CCM, the tag length needs to be explicitly set in order
-    /// to use a value different than the default 12 bytes.
-    pub fn set_tag_len(&mut self, tag_len: usize) -> Result<(), ErrorStack> {
-        unsafe {
-            // NB: this constant is actually more general than just GCM.
-            cvt(ffi::EVP_CIPHER_CTX_ctrl(
-                self.ctx,
-                ffi::EVP_CTRL_GCM_SET_TAG,
-                try_int(tag_len)?,
-                ptr::null_mut(),
-            ))
-        }
-    }
-
-    /// Feeds total plaintext length to the cipher.
+    /// # Errors
     ///
-    /// The total plaintext or ciphertext length MUST be passed to the cipher when it operates in
-    /// CCM mode.
-    pub fn set_data_len(&mut self, data_len: usize) -> Result<(), ErrorStack> {
-        unsafe {
-            let mut len = 0;
-            cvt(ffi::EVP_CipherUpdate(
-                self.ctx,
-                ptr::null_mut(),
-                &mut len,
-                ptr::null_mut(),
-                try_int(data_len)?,
-            ))
-        }
-    }
-
-    /// Feeds Additional Authenticated Data (AAD) through the cipher.
-    ///
-    /// This can only be used with AEAD ciphers such as AES GCM. Data fed in is not encrypted, but
-    /// is factored into the authentication tag. It must be called before the first call to
-    /// `update`.
+    /// The cipher does not support associated data, or the operation fails.
     pub fn aad_update(&mut self, input: &[u8]) -> Result<(), ErrorStack> {
-        unsafe {
-            let mut len = 0;
-            cvt(ffi::EVP_CipherUpdate(
-                self.ctx,
-                ptr::null_mut(),
-                &mut len,
+        self.require_active()?;
+        // SAFETY: self owns the initialized context; input is readable for
+        // the length explicitly supplied to the native AAD operation.
+        let result = unsafe {
+            cvt(ffi::EVP_CipherUpdateAAD(
+                self.ctx.as_ptr(),
                 input.as_ptr(),
-                try_int(input.len())?,
+                input.len(),
             ))
+        };
+        if result.is_err() {
+            self.state = CipherState::Failed;
         }
+        result
     }
 
-    /// Feeds data from `input` through the cipher, writing encrypted/decrypted
-    /// bytes into `output`.
+    /// Processes input and returns the number of output bytes.
     ///
-    /// The number of bytes written to `output` is returned. Note that this may
-    /// not be equal to the length of `input`.
+    /// For AEAD decryption, do not use plaintext until finalization succeeds.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics for stream ciphers if `output.len() < input.len()`.
-    ///
-    /// Panics for block ciphers if `output.len() < input.len() + block_size`,
-    /// where `block_size` is the block size of the cipher (see `Cipher::block_size`).
+    /// The output buffer is too small, the native operation fails, or the
+    /// cipher is already finalized or failed.
     pub fn update(&mut self, input: &[u8], output: &mut [u8]) -> Result<usize, ErrorStack> {
-        unsafe {
-            let block_size = if self.block_size > 1 {
-                self.block_size
-            } else {
-                0
-            };
-            assert!(output.len() >= input.len() + block_size);
-            let mut outl = try_int(output.len())?;
-
-            cvt(ffi::EVP_CipherUpdate(
-                self.ctx,
+        self.require_active()?;
+        // SAFETY: the native query reads the active context and input length.
+        let required =
+            unsafe { ffi::EVP_CIPHER_CTX_max_next_update(self.ctx.as_ptr(), input.len()) };
+        if output.len() < required {
+            return Err(ErrorStack::internal_error_str(
+                "cipher output buffer too small",
+            ));
+        }
+        let mut written = 0;
+        // SAFETY: the length-aware native API receives disjoint readable and
+        // writable slices and enforces the actual output capacity.
+        let result = unsafe {
+            cvt(ffi::EVP_CipherUpdate_ex(
+                self.ctx.as_ptr(),
                 output.as_mut_ptr(),
-                &mut outl,
+                &raw mut written,
+                output.len(),
                 input.as_ptr(),
-                try_int(input.len())?,
-            ))?;
-
-            Ok(outl as usize)
-        }
+                input.len(),
+            ))
+        };
+        self.check_output(result, written, output.len())
     }
 
-    /// Finishes the encryption/decryption process, writing any remaining data
-    /// to `output`.
+    fn check_output(
+        &mut self,
+        result: Result<(), ErrorStack>,
+        written: usize,
+        capacity: usize,
+    ) -> Result<usize, ErrorStack> {
+        if let Err(error) = result {
+            self.state = CipherState::Failed;
+            return Err(error);
+        }
+        if written > capacity {
+            self.state = CipherState::Failed;
+            return Err(ErrorStack::internal_error_str(
+                "invalid native cipher output length",
+            ));
+        }
+        Ok(written)
+    }
+
+    /// Finishes the cipher operation, returning the remaining output bytes.
     ///
-    /// The number of bytes written to `output` is returned.
+    /// # Errors
     ///
-    /// `update` should not be called after this method.
-    ///
-    /// # Panics
-    ///
-    /// Panics for block ciphers if `output.len() < block_size`,
-    /// where `block_size` is the block size of the cipher (see `Cipher::block_size`).
+    /// The output buffer is too small, authentication or padding verification
+    /// fails, or the operation is inactive.
     pub fn finalize(&mut self, output: &mut [u8]) -> Result<usize, ErrorStack> {
-        unsafe {
-            if self.block_size > 1 {
-                assert!(output.len() >= self.block_size);
-            }
-            let mut outl = cmp::min(output.len(), c_int::MAX as usize) as c_int;
-
-            cvt(ffi::EVP_CipherFinal_ex(
-                self.ctx,
-                output.as_mut_ptr(),
-                &mut outl,
-            ))?;
-
-            Ok(outl as usize)
+        self.require_active()?;
+        // SAFETY: the native query reads a live initialized cipher context.
+        let required = unsafe { ffi::EVP_CIPHER_CTX_max_final(self.ctx.as_ptr()) };
+        if output.len() < required {
+            return Err(ErrorStack::internal_error_str(
+                "cipher output buffer too small",
+            ));
         }
+        let mut written = 0;
+        // SAFETY: this length-aware finalization receives a writable output
+        // slice and its capacity and checks the native output before writing.
+        let result = unsafe {
+            cvt(ffi::EVP_CipherFinal_ex2(
+                self.ctx.as_ptr(),
+                output.as_mut_ptr(),
+                &raw mut written,
+                output.len(),
+            ))
+        };
+        let written = self.check_output(result, written, output.len())?;
+        self.state = CipherState::Finalized;
+        Ok(written)
     }
 
-    /// Retrieves the authentication tag used to authenticate ciphertext in AEAD ciphers such
-    /// as AES GCM.
+    /// Retrieves the authentication tag after successful AEAD encryption.
     ///
-    /// When encrypting data with an AEAD cipher, this must be called after `finalize`.
+    /// # Errors
     ///
-    /// The size of the buffer indicates the required size of the tag. While some ciphers support a
-    /// range of tag sizes, it is recommended to pick the maximum size. For AES GCM, this is 16
-    /// bytes, for example.
-    pub fn get_tag(&self, tag: &mut [u8]) -> Result<(), ErrorStack> {
+    /// Encryption has not successfully finalized, or the tag length or cipher
+    /// mode is unsupported.
+    pub fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), ErrorStack> {
+        if self.state != CipherState::Finalized {
+            return Err(ErrorStack::internal_error_str(
+                "cipher has not successfully finalized",
+            ));
+        }
+        // SAFETY: native GET_TAG writes at most the supplied tag.len() bytes
+        // into this exclusive buffer and checks the requested length.
         unsafe {
             cvt(ffi::EVP_CIPHER_CTX_ctrl(
-                self.ctx,
+                self.ctx.as_ptr(),
                 ffi::EVP_CTRL_GCM_GET_TAG,
                 try_int(tag.len())?,
                 tag.as_mut_ptr().cast(),
             ))
-        }
-    }
-}
-
-impl Drop for Crypter {
-    fn drop(&mut self) {
-        unsafe {
-            ffi::EVP_CIPHER_CTX_free(self.ctx);
         }
     }
 }
@@ -649,6 +667,10 @@ impl Drop for Crypter {
 ///       \xFB\x3C\x5E\xC4\x59\x72\x4A\xF4\x7C\xA1",
 ///     &ciphertext[..]);
 /// ```
+///
+/// # Errors
+///
+/// Cipher initialization, processing or finalization fails.
 pub fn encrypt(
     t: Cipher,
     key: &[u8],
@@ -688,6 +710,10 @@ pub fn encrypt(
 ///     b"Some Crypto Text",
 ///     &ciphertext[..]);
 /// ```
+///
+/// # Errors
+///
+/// Cipher initialization, processing or finalization fails.
 pub fn decrypt(
     t: Cipher,
     key: &[u8],
@@ -705,7 +731,12 @@ fn cipher(
     data: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
     let mut c = Crypter::new(t, mode, key, iv)?;
-    let mut out = vec![0; data.len() + t.block_size()];
+    let mut out = vec![
+        0;
+        data.len().checked_add(t.block_size()).ok_or_else(|| {
+            ErrorStack::internal_error_str("cipher output length overflow")
+        })?
+    ];
     let count = c.update(data, &mut out)?;
     let rest = c.finalize(&mut out[count..])?;
     out.truncate(count + rest);
@@ -720,6 +751,10 @@ fn cipher(
 /// The size of the `tag` buffer indicates the required size of the tag. While some ciphers support
 /// a range of tag sizes, it is recommended to pick the maximum size. For AES GCM, this is 16 bytes,
 /// for example.
+///
+/// # Errors
+///
+/// Cipher initialization, processing or finalization fails.
 pub fn encrypt_aead(
     t: Cipher,
     key: &[u8],
@@ -729,7 +764,12 @@ pub fn encrypt_aead(
     tag: &mut [u8],
 ) -> Result<Vec<u8>, ErrorStack> {
     let mut c = Crypter::new(t, Mode::Encrypt, key, iv)?;
-    let mut out = vec![0; data.len() + t.block_size()];
+    let mut out = vec![
+        0;
+        data.len().checked_add(t.block_size()).ok_or_else(|| {
+            ErrorStack::internal_error_str("cipher output length overflow")
+        })?
+    ];
 
     c.aad_update(aad)?;
     let count = c.update(data, &mut out)?;
@@ -743,6 +783,10 @@ pub fn encrypt_aead(
 ///
 /// Additional Authenticated Data can be provided in the `aad` field, and the authentication tag
 /// should be provided in the `tag` field.
+///
+/// # Errors
+///
+/// Cipher initialization, processing or finalization fails.
 pub fn decrypt_aead(
     t: Cipher,
     key: &[u8],
@@ -752,7 +796,12 @@ pub fn decrypt_aead(
     tag: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
     let mut c = Crypter::new(t, Mode::Decrypt, key, iv)?;
-    let mut out = vec![0; data.len() + t.block_size()];
+    let mut out = vec![
+        0;
+        data.len().checked_add(t.block_size()).ok_or_else(|| {
+            ErrorStack::internal_error_str("cipher output length overflow")
+        })?
+    ];
 
     c.aad_update(aad)?;
     let count = c.update(data, &mut out)?;
@@ -770,6 +819,28 @@ use crate::ffi::{EVP_CIPHER_block_size, EVP_CIPHER_iv_length, EVP_CIPHER_key_len
 mod tests {
     use super::*;
     use hex::{self, FromHex};
+
+    #[test]
+    fn checked_cipher_outputs_and_state() {
+        let key = [0; 16];
+        let iv = [0; 16];
+        assert!(Crypter::new(Cipher::aes_128_cbc(), Mode::Encrypt, &key, None).is_err());
+        assert!(Crypter::new(Cipher::aes_128_cbc(), Mode::Encrypt, &key, Some(&iv[..1])).is_err());
+        let mut cipher =
+            Crypter::new(Cipher::aes_128_ctr(), Mode::Encrypt, &key, Some(&iv)).unwrap();
+        assert!(cipher.update(b"hello", &mut [0; 4]).is_err());
+        let mut output = [0; 5];
+        assert_eq!(cipher.update(b"hello", &mut output).unwrap(), 5);
+        assert_eq!(cipher.finalize(&mut []).unwrap(), 0);
+        assert!(cipher.update(b"again", &mut output).is_err());
+        assert!(cipher.finalize(&mut []).is_err());
+
+        let mut cipher =
+            Crypter::new(Cipher::aes_128_cbc(), Mode::Encrypt, &key, Some(&iv)).unwrap();
+        assert_eq!(cipher.update(b"short", &mut []).unwrap(), 0);
+        assert!(cipher.finalize(&mut [0; 15]).is_err());
+        assert_eq!(cipher.finalize(&mut [0; 16]).unwrap(), 16);
+    }
 
     #[test]
     fn test_stream_cipher_output() {
@@ -800,7 +871,7 @@ mod tests {
             0x90u8, 0x4bu8, 0x49u8, 0x60u8, 0x89u8,
         ];
         let mut c = Crypter::new(Cipher::aes_256_ecb(), Mode::Encrypt, &k0, None).unwrap();
-        c.pad(false);
+        c.pad(false).unwrap();
         let mut r0 = vec![0; c0.len() + Cipher::aes_256_ecb().block_size()];
         let count = c.update(&p0, &mut r0).unwrap();
         let rest = c.finalize(&mut r0[count..]).unwrap();
@@ -808,7 +879,7 @@ mod tests {
         assert_eq!(hex::encode(&r0), hex::encode(c0));
 
         let mut c = Crypter::new(Cipher::aes_256_ecb(), Mode::Decrypt, &k0, None).unwrap();
-        c.pad(false);
+        c.pad(false).unwrap();
         let mut p1 = vec![0; r0.len() + Cipher::aes_256_ecb().block_size()];
         let count = c.update(&r0, &mut p1).unwrap();
         let rest = c.finalize(&mut p1[count..]).unwrap();
@@ -832,7 +903,7 @@ mod tests {
             0x2d_u8, 0xb1_u8, 0x85_u8, 0x6c_u8, 0x93_u8, 0x65_u8, 0x6f_u8,
         ];
         let mut cr = Crypter::new(Cipher::aes_256_cbc(), Mode::Decrypt, &data, Some(&iv)).unwrap();
-        cr.pad(false);
+        cr.pad(false).unwrap();
         let mut unciphered_data = vec![0; data.len() + Cipher::aes_256_cbc().block_size()];
         let count = cr.update(&ciphered_data, &mut unciphered_data).unwrap();
         let rest = cr.finalize(&mut unciphered_data[count..]).unwrap();
@@ -951,7 +1022,7 @@ mod tests {
         let pt = "54686973206973206120746573742e";
         let ct = "0050ab8aecec758843fe157b4dde938c";
         let key = "7cb66337f3d3c0fe";
-        let iv = "0001020304050607";
+        let iv = "";
 
         cipher_test(Cipher::des_ecb(), pt, ct, key, iv);
     }
@@ -961,7 +1032,7 @@ mod tests {
         let pt = "9994f4c69d40ae4f34ff403b5cf39d4c8207ea5d3e19a5fd";
         let ct = "9e5c4297d60582f81071ac8ab7d0698d4c79de8b94c519858207ea5d3e19a5fd";
         let key = "010203040506070801020304050607080102030405060708";
-        let iv = "5cc118306dc702e4";
+        let iv = "";
 
         cipher_test(Cipher::des_ede3(), pt, ct, key, iv);
     }

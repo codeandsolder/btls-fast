@@ -3,7 +3,6 @@
 
 use btls::asn1::Asn1Time;
 use btls::bn::{BigNum, MsbOption};
-use btls::error::ErrorStack;
 use btls::hash::MessageDigest;
 use btls::pkey::{PKey, PKeyRef, Private};
 use btls::rsa::Rsa;
@@ -14,7 +13,7 @@ use btls::x509::extension::{
 use btls::x509::{X509NameBuilder, X509Ref, X509Req, X509ReqBuilder, X509};
 
 /// Make a CA certificate and private key
-fn mk_ca_cert() -> Result<(X509, PKey<Private>), ErrorStack> {
+fn mk_ca_cert() -> Result<(X509, PKey<Private>), Box<dyn std::error::Error>> {
     let rsa = Rsa::generate(2048)?;
     let privkey = PKey::from_rsa(rsa)?;
 
@@ -23,7 +22,7 @@ fn mk_ca_cert() -> Result<(X509, PKey<Private>), ErrorStack> {
     x509_name.append_entry_by_text("ST", "TX")?;
     x509_name.append_entry_by_text("O", "Some CA organization")?;
     x509_name.append_entry_by_text("CN", "ca test")?;
-    let x509_name = x509_name.build();
+    let x509_name = x509_name.build()?;
 
     let mut cert_builder = X509::builder()?;
     cert_builder.set_version(2)?;
@@ -62,7 +61,7 @@ fn mk_ca_cert() -> Result<(X509, PKey<Private>), ErrorStack> {
 }
 
 /// Make a X509 request with the given private key
-fn mk_request(privkey: &PKey<Private>) -> Result<X509Req, ErrorStack> {
+fn mk_request(privkey: &PKey<Private>) -> Result<X509Req, Box<dyn std::error::Error>> {
     let mut req_builder = X509ReqBuilder::new()?;
     req_builder.set_pubkey(privkey)?;
 
@@ -71,7 +70,7 @@ fn mk_request(privkey: &PKey<Private>) -> Result<X509Req, ErrorStack> {
     x509_name.append_entry_by_text("ST", "TX")?;
     x509_name.append_entry_by_text("O", "Some organization")?;
     x509_name.append_entry_by_text("CN", "www.example.com")?;
-    let x509_name = x509_name.build();
+    let x509_name = x509_name.build()?;
     req_builder.set_subject_name(&x509_name)?;
 
     req_builder.sign(privkey, MessageDigest::sha256())?;
@@ -83,7 +82,7 @@ fn mk_request(privkey: &PKey<Private>) -> Result<X509Req, ErrorStack> {
 fn mk_ca_signed_cert(
     ca_cert: &X509Ref,
     ca_privkey: &PKeyRef<Private>,
-) -> Result<(X509, PKey<Private>), ErrorStack> {
+) -> Result<(X509, PKey<Private>), Box<dyn std::error::Error>> {
     let rsa = Rsa::generate(2048)?;
     let privkey = PKey::from_rsa(rsa)?;
 
@@ -98,7 +97,10 @@ fn mk_ca_signed_cert(
     };
     cert_builder.set_serial_number(&serial_number)?;
     cert_builder.set_subject_name(req.subject_name())?;
-    cert_builder.set_issuer_name(ca_cert.subject_name())?;
+    let issuer_name = ca_cert
+        .subject_name()
+        .ok_or_else(|| std::io::Error::other("CA certificate is missing a subject name"))?;
+    cert_builder.set_issuer_name(issuer_name)?;
     cert_builder.set_pubkey(&privkey)?;
     let not_before = Asn1Time::days_from_now(0)?;
     cert_builder.set_not_before(&not_before)?;
@@ -139,7 +141,7 @@ fn mk_ca_signed_cert(
     Ok((cert, privkey))
 }
 
-fn real_main() -> Result<(), ErrorStack> {
+fn real_main() -> Result<(), Box<dyn std::error::Error>> {
     let (ca_cert, ca_privkey) = mk_ca_cert()?;
     let (cert, _privkey) = mk_ca_signed_cert(&ca_cert, &ca_privkey)?;
 

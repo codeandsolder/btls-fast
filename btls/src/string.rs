@@ -15,7 +15,7 @@ foreign_type_and_impl_send_sync! {
 
     /// # Safety
     ///
-    /// MUST be UTF-8.
+    /// Native allocations must contain a valid NUL-terminated UTF-8 string.
     pub struct OpensslString;
 }
 
@@ -31,7 +31,8 @@ impl fmt::Debug for OpensslString {
     }
 }
 
-impl Stackable for OpensslString {
+// SAFETY: the native stack type matches owned native NUL-terminated string allocations.
+unsafe impl Stackable for OpensslString {
     type StackType = ffi::stack_st_OPENSSL_STRING;
 }
 
@@ -51,6 +52,9 @@ impl Deref for OpensslStringRef {
     type Target = str;
 
     fn deref(&self) -> &str {
+        // SAFETY: the owned or borrowed native string has a live NUL terminator
+        // and its construction contract requires valid UTF-8 (OCSP strings
+        // are checked before publication; BN formatting produces ASCII).
         unsafe {
             let slice = CStr::from_ptr(self.as_ptr()).to_bytes();
             str::from_utf8_unchecked(slice)
@@ -83,6 +87,8 @@ impl fmt::Debug for OpensslStringRef {
 }
 
 unsafe fn free(buf: *mut c_char) {
+    // SAFETY: the foreign-type destructor transfers one owned allocation
+    // made by the matching native allocator.
     unsafe {
         crate::ffi::OPENSSL_free(buf.cast());
     }

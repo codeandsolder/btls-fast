@@ -3,19 +3,17 @@
 use std::ffi::{c_int, c_void, CStr};
 use std::io::{IoSlice, Read, Write};
 use std::mem::MaybeUninit;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::TcpStream;
 use std::slice;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use foreign_types::ForeignTypeRef;
 
 use super::server::Server;
 use crate::ffi;
 use crate::ssl::{
-    with_ivecs, ExtensionType, Sealed, SslConnector, SslContextBuilder, SslMethod, SslOptions,
-    SslRef, SslSession, SslSessionCacheMode, SslSignatureAlgorithm, SslStream, SslVersion,
-    Tls13Cipher,
+    with_ivecs, ExtensionType, Sealed, SslContextBuilder, SslMethod, SslOptions, SslRef,
+    SslSession, SslSessionCacheMode, SslSignatureAlgorithm, SslStream, SslVersion, Tls13Cipher,
 };
 
 type RecordHeaders = Arc<Mutex<Vec<[u8; 5]>>>;
@@ -94,67 +92,30 @@ fn signature_algorithm_ids(extension: &[u8]) -> Vec<u16> {
     length_prefixed_u16_list(extension)
 }
 
-fn badssl_addr(host: &str) -> Option<TcpStream> {
-    let addrs = match (host, 443).to_socket_addrs() {
-        Ok(addrs) => addrs,
-        Err(_) => return None,
-    };
-
-    for addr in addrs {
-        if let Ok(stream) = TcpStream::connect_timeout(&addr, Duration::from_secs(10)) {
-            stream
-                .set_read_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(Duration::from_secs(10)))
-                .unwrap();
-            return Some(stream);
-        }
-    }
-
-    None
+// A fully local TLS 1.2 handshake tests the patch-owned legacy suites,
+// rather than depending on remote endpoints with changing availability.
+// Both handshake peers must pin the same protocol version; this also
+// makes local cipher and FFDHE regressions independent of native defaults.
+fn set_fixed_tls_version(context: &mut SslContextBuilder, version: SslVersion) {
+    context.set_min_proto_version(Some(version)).unwrap();
+    context.set_max_proto_version(Some(version)).unwrap();
 }
 
-fn connect_badssl_with_ciphers(host: &str, cipher_list: &str, expected_ciphers: &[&str]) {
-    let Some(stream) = badssl_addr(host) else {
-        return;
-    };
+fn negotiate_legacy_cipher(cipher: &str) {
+    let mut server = Server::builder();
+    set_fixed_tls_version(server.ctx(), SslVersion::TLS1_2);
+    server.ctx().set_cipher_list(cipher).unwrap();
+    let server = server.build();
 
-    // These public badssl endpoints intentionally require legacy ciphers that
-    // 0002-boringssl-legacy-ciphers.patch restores. Keep the cipher lists fixed so
-    // future patch migrations fail if any listed suite disappears.
-    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
-    connector
-        .set_min_proto_version(Some(SslVersion::TLS1_2))
-        .unwrap();
-    connector
-        .set_max_proto_version(Some(SslVersion::TLS1_2))
-        .unwrap();
-    connector.set_cipher_list(cipher_list).unwrap();
-    // Windows CI images can fail to load the system trust roots for these
-    // public endpoints. This test is about the legacy ciphers restored by our
-    // patch, so only Windows skips certificate verification.
-    #[cfg(windows)]
-    connector.set_verify(crate::ssl::SslVerifyMode::NONE);
-    let connector = connector.build();
+    let mut client = server.client_with_root_ca();
+    set_fixed_tls_version(client.ctx(), SslVersion::TLS1_2);
+    client.ctx().set_cipher_list(cipher).unwrap();
+    let stream = client.connect();
 
-    let mut stream = connector
-        .connect(host, stream)
-        .unwrap_or_else(|err| panic!("{host} TLS handshake failed: {err:?}"));
-    let cipher = stream.ssl().current_cipher().unwrap();
-    let standard_name = cipher.standard_name().unwrap();
-    assert!(
-        expected_ciphers.contains(&standard_name),
-        "{host} negotiated unexpected cipher {standard_name}",
-    );
-
-    let request = format!("GET / HTTP/1.0\r\nHost: {host}\r\nConnection: close\r\n\r\n");
-    stream.write_all(request.as_bytes()).unwrap();
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response).unwrap();
-    assert!(
-        response.starts_with(b"HTTP/1."),
-        "{host} did not return an HTTP response",
+    assert_eq!(stream.ssl().version2(), Some(SslVersion::TLS1_2));
+    assert_eq!(
+        stream.ssl().current_cipher().unwrap().standard_name(),
+        Some(cipher),
     );
 }
 
@@ -208,15 +169,18 @@ fn boringssl_patch_ffdhe_named_groups_are_advertised() {
         .set_max_proto_version(Some(SslVersion::TLS1_2))
         .unwrap();
     server.ctx().set_cipher_list("AES128-GCM-SHA256").unwrap();
-    server.ctx().set_select_certificate_callback({
-        let supported_groups = Arc::clone(&supported_groups);
-        move |client_hello| {
-            *supported_groups.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::SUPPORTED_GROUPS)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let supported_groups = Arc::clone(&supported_groups);
+            move |client_hello| {
+                *supported_groups.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::SUPPORTED_GROUPS)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -268,26 +232,12 @@ fn boringssl_patch_ffdhe_named_groups_negotiate_tls13() {
         ("ffdhe3072", "dhe3072", ffi::SSL_GROUP_FFDHE3072 as u16),
     ] {
         let mut server = Server::builder();
-        server
-            .ctx()
-            .set_min_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
-        server
-            .ctx()
-            .set_max_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
+        set_fixed_tls_version(server.ctx(), SslVersion::TLS1_3);
         server.ctx().set_curves_list(configured_name).unwrap();
         let server = server.build();
 
         let mut client = server.client_with_root_ca();
-        client
-            .ctx()
-            .set_min_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
-        client
-            .ctx()
-            .set_max_proto_version(Some(SslVersion::TLS1_3))
-            .unwrap();
+        set_fixed_tls_version(client.ctx(), SslVersion::TLS1_3);
         client.ctx().set_curves_list(configured_name).unwrap();
 
         let stream = client.connect();
@@ -313,23 +263,26 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
         .set_max_proto_version(Some(SslVersion::TLS1_3))
         .unwrap();
     unsafe { ffi::SSL_CTX_set_early_data_enabled(server.ctx().as_ptr(), 1) };
-    server.ctx().set_select_certificate_callback({
-        let extensions = Arc::clone(&extensions);
-        move |client_hello| {
-            extensions.lock().unwrap().push((
-                client_hello
-                    .get_extension(ExtensionType::PRE_SHARED_KEY)
-                    .is_some(),
-                client_hello
-                    .get_extension(ExtensionType::PSK_KEY_EXCHANGE_MODES)
-                    .is_some(),
-                client_hello
-                    .get_extension(ExtensionType::EARLY_DATA)
-                    .is_some(),
-            ));
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let extensions = Arc::clone(&extensions);
+            move |client_hello| {
+                extensions.lock().unwrap().push((
+                    client_hello
+                        .get_extension(ExtensionType::PRE_SHARED_KEY)
+                        .is_some(),
+                    client_hello
+                        .get_extension(ExtensionType::PSK_KEY_EXCHANGE_MODES)
+                        .is_some(),
+                    client_hello
+                        .get_extension(ExtensionType::EARLY_DATA)
+                        .is_some(),
+                ));
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut first_client = server.client_with_root_ca();
@@ -345,15 +298,18 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
     first_client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    first_client.ctx().set_new_session_callback({
-        let session = Arc::clone(&session);
-        move |_, new_session| {
-            let mut session = session.lock().unwrap();
-            if session.is_none() {
-                *session = Some(new_session.to_der().unwrap());
+    first_client
+        .ctx()
+        .set_new_session_callback({
+            let session = Arc::clone(&session);
+            move |_, new_session| {
+                let mut session = session.lock().unwrap();
+                if session.is_none() {
+                    *session = Some(new_session.to_der().unwrap());
+                }
             }
-        }
-    });
+        })
+        .unwrap();
     let first_stream = first_client.connect();
     assert!(!first_stream.ssl().session_reused());
 
@@ -399,28 +355,90 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
 }
 
 #[test]
-fn boringssl_patch_3des_badssl_ciphers_negotiate() {
-    connect_badssl_with_ciphers(
-        "3des.badssl.com",
-        "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA:TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
-        &[
-            "TLS_ECDHE_ECDSA_WITH_3DES_EDE_CBC_SHA",
-            "TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA",
-        ],
-    );
+fn boringssl_patch_3des_negotiates_with_local_rsa_server() {
+    negotiate_legacy_cipher("TLS_ECDHE_RSA_WITH_3DES_EDE_CBC_SHA");
 }
 
+// The legacy DHE cipher patch adds a TLS 1.2 CLIENT key-exchange path.
+// Native SSL_CTX_set_tmp_dh is intentionally a no-op on BoringSSL's server,
+// so exercise that client against an isolated local OpenSSL server instead.
+// This Linux CI regression needs the OpenSSL command-line test dependency.
+#[cfg(target_os = "linux")]
 #[test]
-fn boringssl_patch_dh2048_badssl_ciphers_negotiate() {
-    connect_badssl_with_ciphers(
-        "dh2048.badssl.com",
-        "TLS_DHE_RSA_WITH_AES_128_CBC_SHA:TLS_DHE_RSA_WITH_AES_256_CBC_SHA:TLS_DHE_RSA_WITH_AES_128_CBC_SHA256:TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
-        &[
-            "TLS_DHE_RSA_WITH_AES_128_CBC_SHA",
-            "TLS_DHE_RSA_WITH_AES_256_CBC_SHA",
-            "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256",
-            "TLS_DHE_RSA_WITH_AES_256_CBC_SHA256",
-        ],
+fn boringssl_patch_dh2048_negotiates_against_local_openssl() {
+    use std::net::TcpListener;
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    struct ServerProcess(Child);
+
+    impl Drop for ServerProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let address_string = address.to_string();
+
+    let child = Command::new("openssl")
+        .args([
+            "s_server",
+            "-accept",
+            &address_string,
+            "-cert",
+            "test/cert.pem",
+            "-key",
+            "test/key.pem",
+            "-dhparam",
+            "test/dhparams.pem",
+            "-cipher",
+            "DHE-RSA-AES128-SHA256",
+            "-tls1_2",
+            "-naccept",
+            "1",
+            "-quiet",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("OpenSSL s_server is a required Linux integration-test dependency");
+    let mut server = ServerProcess(child);
+
+    let started = Instant::now();
+    let socket = loop {
+        match TcpStream::connect_timeout(&address, Duration::from_millis(150)) {
+            Ok(socket) => break socket,
+            Err(error) if started.elapsed() >= Duration::from_secs(5) => {
+                panic!(
+                    "local DHE server failed to accept TLS clients: {error}; process status: {:?}",
+                    server.0.try_wait()
+                );
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(20)),
+        }
+    };
+
+    let cipher = "TLS_DHE_RSA_WITH_AES_128_CBC_SHA256";
+    let mut connector = crate::ssl::SslConnector::builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    connector
+        .set_min_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    connector
+        .set_max_proto_version(Some(SslVersion::TLS1_2))
+        .unwrap();
+    connector.set_cipher_list(cipher).unwrap();
+
+    let stream = connector.build().connect("foobar.com", socket).unwrap();
+    assert_eq!(stream.ssl().version2(), Some(SslVersion::TLS1_2));
+    assert_eq!(
+        stream.ssl().current_cipher().unwrap().standard_name(),
+        Some(cipher)
     );
 }
 
@@ -433,19 +451,22 @@ fn boringssl_patch_clienthello_extensions_are_sent() {
     // ClientHello knobs. The expected bytes document patch-owned extension
     // encoding, not upstream BoringSSL's native extension surface.
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let record_size_limit = Arc::clone(&record_size_limit);
-        let delegated_credential = Arc::clone(&delegated_credential);
-        move |client_hello| {
-            *record_size_limit.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::RECORD_SIZE_LIMIT)
-                .map(ToOwned::to_owned);
-            *delegated_credential.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::DELEGATED_CREDENTIAL)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let record_size_limit = Arc::clone(&record_size_limit);
+            let delegated_credential = Arc::clone(&delegated_credential);
+            move |client_hello| {
+                *record_size_limit.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::RECORD_SIZE_LIMIT)
+                    .map(ToOwned::to_owned);
+                *delegated_credential.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::DELEGATED_CREDENTIAL)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -660,13 +681,16 @@ fn record_size_limit_patch_keeps_configured_extension_position() {
     for limit in [16_385, 0] {
         let types = Arc::new(Mutex::new(Vec::new()));
         let mut server = Server::builder();
-        server.ctx().set_select_certificate_callback({
-            let types = Arc::clone(&types);
-            move |client_hello| {
-                *types.lock().unwrap() = client_hello_extension_types(client_hello.as_bytes());
-                Ok(())
-            }
-        });
+        server
+            .ctx()
+            .set_select_certificate_callback({
+                let types = Arc::clone(&types);
+                move |client_hello| {
+                    *types.lock().unwrap() = client_hello_extension_types(client_hello.as_bytes());
+                    Ok(())
+                }
+            })
+            .unwrap();
         let server = server.build();
         let mut client = server.client_with_root_ca();
         client
@@ -703,13 +727,16 @@ fn boringssl_patch_f5_padding_fills_clienthello() {
     // header included, is padded to 512.
     let hello = Arc::new(Mutex::new(Vec::new()));
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let hello = Arc::clone(&hello);
-        move |client_hello| {
-            *hello.lock().unwrap() = client_hello.as_bytes().to_vec();
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let hello = Arc::clone(&hello);
+            move |client_hello| {
+                *hello.lock().unwrap() = client_hello.as_bytes().to_vec();
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
     let mut client = server.client_with_root_ca();
     client.ctx().set_curves_list("X25519").unwrap();
@@ -767,15 +794,18 @@ fn boringssl_patch_allows_duplicate_signature_algorithms() {
         .expect("0008-boringssl-sigalgs.patch should allow duplicate signing algorithm prefs");
 
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let signature_algorithms = Arc::clone(&signature_algorithms);
-        move |client_hello| {
-            *signature_algorithms.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::SIGNATURE_ALGORITHMS)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let signature_algorithms = Arc::clone(&signature_algorithms);
+            move |client_hello| {
+                *signature_algorithms.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::SIGNATURE_ALGORITHMS)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca();
@@ -811,15 +841,18 @@ fn boring_pq_can_disable_second_keyshare() {
     // boring-pq.patch adds SSL_use_second_keyshare so our fork can suppress the
     // extra PQ keyshare; this is patch behavior, not upstream BoringSSL policy.
     let mut server = Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let client_key_share = Arc::clone(&client_key_share);
-        move |client_hello| {
-            *client_key_share.lock().unwrap() = client_hello
-                .get_extension(ExtensionType::KEY_SHARE)
-                .map(ToOwned::to_owned);
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let client_key_share = Arc::clone(&client_key_share);
+            move |client_hello| {
+                *client_key_share.lock().unwrap() = client_hello
+                    .get_extension(ExtensionType::KEY_SHARE)
+                    .map(ToOwned::to_owned);
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
 
     let mut client = server.client_with_root_ca().build().builder();

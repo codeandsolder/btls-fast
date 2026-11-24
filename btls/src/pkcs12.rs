@@ -32,6 +32,10 @@ impl Pkcs12Ref {
     }
 
     /// Extracts the contents of the `Pkcs12` with `pkey` and `cert` required.
+    ///
+    /// # Errors
+    ///
+    /// Parsing fails or the archive contains no private key or certificate.
     pub fn parse(&self, pass: &str) -> Result<ParsedPkcs12, ErrorStack> {
         let p2 = self.parse2(pass)?;
         Ok(ParsedPkcs12 {
@@ -46,8 +50,15 @@ impl Pkcs12Ref {
     }
 
     /// Extracts the contents of the `Pkcs12` with `pkey` and `cert` optional.
+    ///
+    /// # Errors
+    ///
+    /// The password contains a NUL byte or the native parser rejects the archive.
     #[corresponds(PKCS12_parse)]
     pub fn parse2(&self, pass: &str) -> Result<ParsedPkcs12_2, ErrorStack> {
+        // SAFETY: the parser receives a valid borrowed archive, a live C-string,
+        // and three writable output-pointer slots. Any returned non-null values
+        // transfer native ownership to the corresponding Rust wrappers.
         unsafe {
             let pass = CString::new(pass.as_bytes()).map_err(ErrorStack::internal_error)?;
 
@@ -58,9 +69,9 @@ impl Pkcs12Ref {
             cvt_0i(ffi::PKCS12_parse(
                 self.as_ptr(),
                 pass.as_ptr(),
-                &mut pkey,
-                &mut cert,
-                &mut ca,
+                &raw mut pkey,
+                &raw mut cert,
+                &raw mut ca,
             ))?;
 
             let pkey = (!pkey.is_null()).then(|| PKey::from_ptr(pkey));
@@ -90,7 +101,7 @@ impl Pkcs12 {
     /// * `nid_cert` - `nid::PBE_WITHSHA1AND40BITRC2_CBC`
     /// * `iter` - `2048`
     /// * `mac_iter` - `2048`
-    #[must_use]
+    #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub fn builder() -> Pkcs12Builder {
         ffi::init();
 
@@ -118,7 +129,7 @@ pub struct ParsedPkcs12_2 {
 }
 
 impl ParsedPkcs12_2 {
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn chain(&self) -> Option<&StackRef<X509>> {
         self.ca.as_deref()
     }
@@ -134,30 +145,38 @@ pub struct Pkcs12Builder {
 
 impl Pkcs12Builder {
     /// The encryption algorithm that should be used for the key
-    pub fn key_algorithm(&mut self, nid: Nid) -> &mut Self {
+    pub const fn key_algorithm(&mut self, nid: Nid) -> &mut Self {
         self.nid_key = nid;
         self
     }
 
     /// The encryption algorithm that should be used for the cert
-    pub fn cert_algorithm(&mut self, nid: Nid) -> &mut Self {
+    pub const fn cert_algorithm(&mut self, nid: Nid) -> &mut Self {
         self.nid_cert = nid;
         self
     }
 
-    /// Key iteration count, default is 2048 as of this writing
-    pub fn key_iter(&mut self, iter: u32) -> &mut Self {
-        self.iter = iter as c_int;
-        self
+    /// Sets the key-derivation iteration count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a count outside the native signed integer range.
+    pub fn key_iter(&mut self, iter: u32) -> Result<&mut Self, ErrorStack> {
+        self.iter = c_int::try_from(iter).map_err(ErrorStack::internal_error)?;
+        Ok(self)
     }
 
-    /// MAC iteration count, default is the same as key_iter.
+    /// MAC iteration count, default is the same as `key_iter`.
     ///
     /// Old implementations don't understand MAC iterations greater than 1, (pre 1.0.1?), if such
     /// compatibility is required this should be set to 1.
-    pub fn mac_iter(&mut self, mac_iter: u32) -> &mut Self {
-        self.mac_iter = mac_iter as c_int;
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a count outside the native signed integer range.
+    pub fn mac_iter(&mut self, mac_iter: u32) -> Result<&mut Self, ErrorStack> {
+        self.mac_iter = c_int::try_from(mac_iter).map_err(ErrorStack::internal_error)?;
+        Ok(self)
     }
 
     /// An additional set of certificates to include in the archive beyond the one provided to
@@ -175,6 +194,10 @@ impl Pkcs12Builder {
     /// * `friendly_name` - user defined name for the certificate
     /// * `pkey` - key to store
     /// * `cert` - certificate to store
+    ///
+    /// # Errors
+    ///
+    /// The password or name contains a NUL byte, or native archive creation fails.
     pub fn build<T>(
         self,
         password: &str,
@@ -185,16 +208,15 @@ impl Pkcs12Builder {
     where
         T: HasPrivate,
     {
+        // SAFETY: all borrowed strings, native key and certificate references,
+        // and optional CA stack remain live through the synchronous creation.
+        // A non-null result transfers ownership to the new `Pkcs12`.
         unsafe {
             let pass = CString::new(password).map_err(ErrorStack::internal_error)?;
             let friendly_name = CString::new(friendly_name).map_err(ErrorStack::internal_error)?;
             let pkey = pkey.as_ptr();
             let cert = cert.as_ptr();
-            let ca = self
-                .ca
-                .as_ref()
-                .map(|ca| ca.as_ptr())
-                .unwrap_or(ptr::null_mut());
+            let ca = self.ca.as_ref().map_or(ptr::null_mut(), Stack::as_ptr);
             let nid_key = self.nid_key.as_raw();
             let nid_cert = self.nid_cert.as_raw();
 
@@ -203,7 +225,7 @@ impl Pkcs12Builder {
             // https://www.openssl.org/docs/man1.0.2/crypto/PKCS12_create.html
             let keytype = 0;
 
-            cvt_p(ffi::PKCS12_create(
+            let archive = cvt_p(ffi::PKCS12_create(
                 pass.as_ptr(),
                 friendly_name.as_ptr(),
                 pkey,
@@ -214,8 +236,9 @@ impl Pkcs12Builder {
                 self.iter,
                 self.mac_iter,
                 keytype,
-            ))
-            .map(|p| Pkcs12::from_ptr(p))
+            ))?;
+            // The non-null result transfers ownership to the Rust wrapper.
+            Ok(Pkcs12::from_ptr(archive))
         }
     }
 }
@@ -233,6 +256,21 @@ mod test {
     use crate::x509::{X509Name, X509};
 
     use super::*;
+
+    #[test]
+    fn iteration_counts_are_checked_before_assignment() {
+        let mut builder = Pkcs12::builder();
+        let max_native = c_int::MAX.unsigned_abs();
+        assert!(builder.key_iter(max_native).is_ok());
+        assert_eq!(builder.iter, c_int::MAX);
+        assert!(builder.key_iter(max_native + 1).is_err());
+        assert_eq!(builder.iter, c_int::MAX);
+
+        assert!(builder.mac_iter(u32::MAX).is_err());
+        assert_eq!(builder.mac_iter, PKCS12_DEFAULT_ITER);
+        assert!(builder.mac_iter(1).is_ok());
+        assert_eq!(builder.mac_iter, 1);
+    }
 
     #[test]
     fn parse() {
@@ -270,7 +308,7 @@ mod test {
         let mut name = X509Name::builder().unwrap();
         name.append_entry_by_nid(Nid::COMMONNAME, subject_name)
             .unwrap();
-        let name = name.build();
+        let name = name.build().unwrap();
 
         let key_usage = KeyUsage::new().digital_signature().build().unwrap();
 

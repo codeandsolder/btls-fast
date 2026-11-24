@@ -215,6 +215,10 @@ impl ClientSslBuilder {
     pub fn connect_err(self) -> HandshakeError<TcpStream> {
         let socket = TcpStream::connect(self.addr).unwrap();
 
-        self.ssl.setup_connect(socket).handshake().unwrap_err()
+        self.ssl
+            .setup_connect(socket)
+            .unwrap()
+            .handshake()
+            .unwrap_err()
     }
 }

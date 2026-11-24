@@ -4,15 +4,13 @@ use super::{
     SelectCertError, Ssl, SslAlert, SslContextBuilder, SslRef, SslSession, SslSignatureAlgorithm,
     SslVerifyError, SslVerifyMode,
 };
-#[cfg(feature = "credential")]
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::{Index, IndexSlot};
 #[cfg(feature = "credential")]
 use crate::ssl::SslCredentialBuilder;
 use std::convert::identity;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::LazyLock;
 use std::task::{ready, Context, Poll, Waker};
 
 /// The type of futures to pass to [`SslContextBuilder::set_async_select_certificate_callback`].
@@ -61,22 +59,21 @@ type SelectCertFutureIndex<T> = Index<
     MutOnly<Option<ExDataFuture<Result<BoxSelectCertFinishFor<T>, AsyncSelectCertError>>>>,
 >;
 
-pub(crate) static TASK_WAKER_INDEX: LazyLock<Index<Ssl, Option<Waker>>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
-pub(crate) static SELECT_CERT_FUTURE_INDEX: LazyLock<SelectCertFutureIndex<()>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
-pub(crate) static SELECT_CERT_ACTION_FUTURE_INDEX: LazyLock<
-    SelectCertFutureIndex<SelectCertAction>,
-> = LazyLock::new(|| Ssl::new_ex_index().unwrap());
-pub(crate) static SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX: LazyLock<
-    Index<Ssl, MutOnly<Option<BoxPrivateKeyMethodFuture>>>,
-> = LazyLock::new(|| Ssl::new_ex_index().unwrap());
-pub(crate) static SELECT_GET_SESSION_FUTURE_INDEX: LazyLock<
-    Index<Ssl, MutOnly<Option<BoxGetSessionFuture>>>,
-> = LazyLock::new(|| Ssl::new_ex_index().unwrap());
-pub(crate) static SELECT_CUSTOM_VERIFY_FUTURE_INDEX: LazyLock<
-    Index<Ssl, MutOnly<Option<BoxCustomVerifyFuture>>>,
-> = LazyLock::new(|| Ssl::new_ex_index().unwrap());
+static TASK_WAKER_INDEX: IndexSlot<Ssl, Option<Waker>> = IndexSlot::new(Ssl::new_ex_index);
+type SelectCertFutureData<T> =
+    MutOnly<Option<ExDataFuture<Result<BoxSelectCertFinishFor<T>, AsyncSelectCertError>>>>;
+static SELECT_CERT_FUTURE_INDEX: IndexSlot<Ssl, SelectCertFutureData<()>> =
+    IndexSlot::new(Ssl::new_ex_index);
+static SELECT_CERT_ACTION_FUTURE_INDEX: IndexSlot<Ssl, SelectCertFutureData<SelectCertAction>> =
+    IndexSlot::new(Ssl::new_ex_index);
+static SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX: IndexSlot<
+    Ssl,
+    MutOnly<Option<BoxPrivateKeyMethodFuture>>,
+> = IndexSlot::new(Ssl::new_ex_index);
+static SELECT_GET_SESSION_FUTURE_INDEX: IndexSlot<Ssl, MutOnly<Option<BoxGetSessionFuture>>> =
+    IndexSlot::new(Ssl::new_ex_index);
+static SELECT_CUSTOM_VERIFY_FUTURE_INDEX: IndexSlot<Ssl, MutOnly<Option<BoxCustomVerifyFuture>>> =
+    IndexSlot::new(Ssl::new_ex_index);
 
 impl SslContextBuilder {
     /// Sets a callback that is called before most [`ClientHello`] processing
@@ -98,18 +95,26 @@ impl SslContextBuilder {
     /// [`SslContextBuilder::set_select_certificate_callback_with_action`],
     /// [`SslContextBuilder::set_async_select_certificate_callback`], or
     /// [`SslContextBuilder::set_async_select_certificate_callback_with_action`].
-    pub fn set_async_select_certificate_callback<F>(&mut self, callback: F)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub fn set_async_select_certificate_callback<F>(
+        &mut self,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut ClientHello<'_>) -> Result<BoxSelectCertFuture, AsyncSelectCertError>
             + Send
             + Sync
             + 'static,
     {
-        let callback =
-            async_select_certificate_callback(callback, *SELECT_CERT_FUTURE_INDEX, |()| {
-                SelectCertAction::Success
-            });
-        self.set_select_certificate_callback_with_action(callback);
+        let callback = async_select_certificate_callback(
+            callback,
+            SELECT_CERT_FUTURE_INDEX.register()?,
+            |()| SelectCertAction::Success,
+        );
+        self.set_select_certificate_callback_with_action(callback)
     }
 
     /// Sets an action-aware asynchronous certificate selection callback.
@@ -120,10 +125,10 @@ impl SslContextBuilder {
     ///
     /// A task waker must be set on `Ssl` values associated with the resulting `SslContext` with
     /// [`SslRef::set_task_waker`]. Returning [`SelectCertAction::DisableEch`] discards an inner
-    /// ClientHello, invokes the callback again with the outer ClientHello, and continues without
+    /// `ClientHello`, invokes the callback again with the outer `ClientHello`, and continues without
     /// retry configs. It is only valid when ECH has been accepted; returning it otherwise fails
     /// the handshake.
-    /// The future-producing callback runs again for the outer ClientHello, so per-connection
+    /// The future-producing callback runs again for the outer `ClientHello`, so per-connection
     /// state must handle both calls.
     ///
     /// A context has a single certificate selection callback. Calling this method replaces the
@@ -131,16 +136,26 @@ impl SslContextBuilder {
     /// [`SslContextBuilder::set_select_certificate_callback_with_action`],
     /// [`SslContextBuilder::set_async_select_certificate_callback`], or
     /// [`SslContextBuilder::set_async_select_certificate_callback_with_action`].
-    pub fn set_async_select_certificate_callback_with_action<F>(&mut self, callback: F)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub fn set_async_select_certificate_callback_with_action<F>(
+        &mut self,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut ClientHello<'_>) -> Result<BoxSelectCertActionFuture, AsyncSelectCertError>
             + Send
             + Sync
             + 'static,
     {
-        let callback =
-            async_select_certificate_callback(callback, *SELECT_CERT_ACTION_FUTURE_INDEX, identity);
-        self.set_select_certificate_callback_with_action(callback);
+        let callback = async_select_certificate_callback(
+            callback,
+            SELECT_CERT_ACTION_FUTURE_INDEX.register()?,
+            identity,
+        );
+        self.set_select_certificate_callback_with_action(callback)
     }
 
     /// Configures a custom private key method on the context.
@@ -149,8 +164,16 @@ impl SslContextBuilder {
     /// `SslContext` with [`SslRef::set_task_waker`].
     ///
     /// See [`AsyncPrivateKeyMethod`] for more details.
-    pub fn set_async_private_key_method(&mut self, method: impl AsyncPrivateKeyMethod) {
-        self.set_private_key_method(AsyncPrivateKeyMethodBridge(Box::new(method)));
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub fn set_async_private_key_method(
+        &mut self,
+        method: impl AsyncPrivateKeyMethod,
+    ) -> Result<(), ErrorStack> {
+        SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX.register()?;
+        self.set_private_key_method(AsyncPrivateKeyMethodBridge(Box::new(method)))
     }
 
     /// Sets a callback that is called when a client proposed to resume a session
@@ -169,17 +192,26 @@ impl SslContextBuilder {
     /// # Safety
     ///
     /// The returned [`SslSession`] must not be associated with a different [`SslContextBuilder`].
-    pub unsafe fn set_async_get_session_callback<F>(&mut self, callback: F)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub unsafe fn set_async_get_session_callback<F>(
+        &mut self,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, &[u8]) -> Option<BoxGetSessionFuture> + Send + Sync + 'static,
     {
+        let index = SELECT_GET_SESSION_FUTURE_INDEX.register()?;
         let async_callback = move |ssl: &mut SslRef, id: &[u8]| {
             let fut_poll_result = with_ex_data_future(
                 &mut *ssl,
-                *SELECT_GET_SESSION_FUTURE_INDEX,
+                index,
                 |ssl| ssl,
                 |ssl| callback(ssl, id).ok_or(()),
                 |option| option.ok_or(()),
+                (),
             );
 
             match fut_poll_result {
@@ -189,9 +221,10 @@ impl SslContextBuilder {
             }
         };
 
-        unsafe {
-            self.set_get_session_callback(async_callback);
-        }
+        // SAFETY: the callback is installed on a uniquely borrowed context;
+        // its Rust closure is registered with the native extra-data slot and
+        // outlives any session lookup performed by BoringSSL.
+        unsafe { self.set_get_session_callback(async_callback) }
     }
 
     /// Configures certificate verification.
@@ -210,11 +243,20 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
-    pub fn set_async_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub fn set_async_custom_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
     {
-        self.set_custom_verify_callback(mode, async_custom_verify_callback(callback));
+        let index = SELECT_CUSTOM_VERIFY_FUTURE_INDEX.register()?;
+        self.set_custom_verify_callback(mode, async_custom_verify_callback(callback, index))
     }
 }
 
@@ -226,30 +268,49 @@ impl SslCredentialBuilder {
     /// `SslContext` with [`SslRef::set_task_waker`].
     ///
     /// See [`AsyncPrivateKeyMethod`] for more details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     pub fn set_async_private_key_method(
         &mut self,
         method: impl AsyncPrivateKeyMethod,
     ) -> Result<(), ErrorStack> {
+        SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX.register()?;
         self.set_private_key_method(AsyncPrivateKeyMethodBridge(Box::new(method)))
     }
 }
 
 impl SslRef {
-    pub fn set_async_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub fn set_async_custom_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
-        F: Fn(&mut SslRef) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
+        F: Fn(&mut Self) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
     {
-        self.set_custom_verify_callback(mode, async_custom_verify_callback(callback));
+        let index = SELECT_CUSTOM_VERIFY_FUTURE_INDEX.register()?;
+        self.set_custom_verify_callback(mode, async_custom_verify_callback(callback, index))
     }
 
     /// Sets the task waker to be used in async callbacks installed on this `Ssl`.
-    pub fn set_task_waker(&mut self, waker: Option<Waker>) {
-        self.replace_ex_data(*TASK_WAKER_INDEX, waker);
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    pub fn set_task_waker(&mut self, waker: Option<Waker>) -> Result<(), ErrorStack> {
+        self.set_ex_data(TASK_WAKER_INDEX.register()?, waker)
     }
 }
 
 fn async_custom_verify_callback<F>(
     callback: F,
+    index: Index<Ssl, MutOnly<Option<BoxCustomVerifyFuture>>>,
 ) -> impl Fn(&mut SslRef) -> Result<(), SslVerifyError>
 where
     F: Fn(&mut SslRef) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
@@ -257,10 +318,11 @@ where
     move |ssl| {
         let fut_poll_result = with_ex_data_future(
             &mut *ssl,
-            *SELECT_CUSTOM_VERIFY_FUTURE_INDEX,
+            index,
             |ssl| ssl,
             &callback,
             identity,
+            SslAlert::INTERNAL_ERROR,
         );
 
         match fut_poll_result {
@@ -275,9 +337,9 @@ where
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct AsyncSelectCertError;
 
-/// Describes async private key hooks. This is used to off-load signing
-/// operations to a custom, potentially asynchronous, backend. Metadata about the
-/// key such as the type and size are parsed out of the certificate.
+/// Async private-key operations that delegate signing and decryption to a
+/// potentially asynchronous backend. The certificate supplies key metadata
+/// such as the algorithm and key size.
 ///
 /// See [`PrivateKeyMethod`] for the sync version of those hooks.
 ///
@@ -290,6 +352,10 @@ pub trait AsyncPrivateKeyMethod: Send + Sync + 'static {
     /// to finish writing the signature.
     ///
     /// See [`PrivateKeyMethod::sign`] for the sync version of this method.
+    ///
+    /// # Errors
+    ///
+    /// Creating the asynchronous signing operation fails.
     fn sign(
         &self,
         ssl: &mut SslRef,
@@ -305,6 +371,10 @@ pub trait AsyncPrivateKeyMethod: Send + Sync + 'static {
     /// to finish decrypting the input.
     ///
     /// See [`PrivateKeyMethod::decrypt`] for the sync version of this method.
+    ///
+    /// # Errors
+    ///
+    /// Creating the asynchronous decryption operation fails.
     fn decrypt(
         &self,
         ssl: &mut SslRef,
@@ -353,10 +423,6 @@ impl PrivateKeyMethod for AsyncPrivateKeyMethodBridge {
             // which called `complete` without having been returned to with a pending
             // future from `sign` or `decrypt`.
 
-            if cfg!(debug_assertions) {
-                panic!("BUG: btls called complete without a pending operation");
-            }
-
             Err(AsyncPrivateKeyMethodError)
         })
     }
@@ -385,6 +451,7 @@ where
             ClientHello::ssl_mut,
             &callback,
             identity,
+            AsyncSelectCertError,
         );
 
         let fut_result = match fut_poll_result {
@@ -402,8 +469,8 @@ where
 
 /// Creates and drives a private key method future.
 ///
-/// This is a convenience function for the three methods of impl `PrivateKeyMethod``
-/// for `dyn AsyncPrivateKeyMethod`. It relies on [`with_ex_data_future`] to
+/// This is a convenience function used by the three `PrivateKeyMethod`
+/// operations implemented for `dyn AsyncPrivateKeyMethod`. It relies on [`with_ex_data_future`] to
 /// drive the future and then immediately calls the final [`BoxPrivateKeyMethodFinish`]
 /// when the future is ready.
 fn with_private_key_method(
@@ -416,10 +483,13 @@ fn with_private_key_method(
 ) -> Result<usize, PrivateKeyMethodError> {
     let fut_poll_result = with_ex_data_future(
         ssl,
-        *SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX,
+        SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX
+            .get()
+            .ok_or(PrivateKeyMethodError::FAILURE)?,
         |ssl| ssl,
         |ssl| create_fut(ssl, output),
         identity,
+        AsyncPrivateKeyMethodError,
     );
 
     let fut_result = match fut_poll_result {
@@ -436,37 +506,38 @@ fn with_private_key_method(
 ///
 /// This function won't even bother storing the future in `index` if the future
 /// created by `create_fut` returns `Poll::Ready(_)` on the first poll call.
-fn with_ex_data_future<H, R, T, E>(
+fn with_ex_data_future<H, R: 'static, T, E>(
     ssl_handle: &mut H,
     index: Index<Ssl, MutOnly<Option<ExDataFuture<R>>>>,
     get_ssl_mut: impl Fn(&mut H) -> &mut SslRef,
     create_fut: impl FnOnce(&mut H) -> Result<ExDataFuture<R>, E>,
     into_result: impl Fn(R) -> Result<T, E>,
+    failure: E,
 ) -> Poll<Result<T, E>> {
     let ssl = get_ssl_mut(ssl_handle);
-    let waker = ssl
-        .ex_data(*TASK_WAKER_INDEX)
-        .cloned()
-        .flatten()
-        .expect("task waker should be set");
+    let Some(waker) = ssl.slot_data(&TASK_WAKER_INDEX).cloned().flatten() else {
+        return Poll::Ready(Err(failure));
+    };
 
     let mut ctx = Context::from_waker(&waker);
 
-    if let Some(data @ Some(_)) = ssl.ex_data_mut(index).map(MutOnly::get_mut) {
-        let fut_result = into_result(ready!(data.as_mut().unwrap().as_mut().poll(&mut ctx)));
-
-        *data = None;
-
-        Poll::Ready(fut_result)
-    } else {
+    if let Some(data) = ssl.ex_data_mut(index).map(MutOnly::get_mut) {
+        if let Some(future) = data.as_mut() {
+            let result = into_result(ready!(future.as_mut().poll(&mut ctx)));
+            *data = None;
+            return Poll::Ready(result);
+        }
+    }
+    {
         let mut fut = create_fut(ssl_handle)?;
 
         match fut.as_mut().poll(&mut ctx) {
             Poll::Ready(fut_result) => Poll::Ready(into_result(fut_result)),
             Poll::Pending => {
-                get_ssl_mut(ssl_handle).replace_ex_data(index, MutOnly::new(Some(fut)));
-
-                Poll::Pending
+                match get_ssl_mut(ssl_handle).set_ex_data(index, MutOnly::new(Some(fut))) {
+                    Ok(()) => Poll::Pending,
+                    Err(_) => Poll::Ready(Err(failure)),
+                }
             }
         }
     }

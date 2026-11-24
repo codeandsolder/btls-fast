@@ -2,8 +2,45 @@
 //! [RFC 5869](https://www.rfc-editor.org/rfc/rfc5869.html).
 
 use crate::error::ErrorStack;
-use crate::hash::{DigestBytes, MessageDigest};
+use crate::hash::MessageDigest;
 use crate::{cvt, ffi};
+use std::{fmt, ops::Deref};
+
+/// An owned pseudorandom key. Its storage is cleansed on drop, and the
+/// debug representation does not expose key material.
+pub struct HkdfPrk {
+    buf: [u8; ffi::EVP_MAX_MD_SIZE as usize],
+    len: usize,
+}
+
+impl Deref for HkdfPrk {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.buf[..self.len]
+    }
+}
+
+impl AsRef<[u8]> for HkdfPrk {
+    fn as_ref(&self) -> &[u8] {
+        self
+    }
+}
+
+impl fmt::Debug for HkdfPrk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HkdfPrk")
+            .field("len", &self.len)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for HkdfPrk {
+    fn drop(&mut self) {
+        // SAFETY: the full owned byte array is writable throughout destruction.
+        unsafe { ffi::OPENSSL_cleanse(self.buf.as_mut_ptr().cast(), self.buf.len()) };
+    }
+}
 
 /// HKDF for a given hash function.
 ///
@@ -18,14 +55,14 @@ pub struct HkdfSuite {
 
 impl HkdfSuite {
     /// Creates an HKDF suite using `digest`.
-    #[must_use]
-    pub fn new(digest: MessageDigest) -> Self {
+    #[must_use = "Use the returned HKDF instance configured for the selected digest."]
+    pub const fn new(digest: MessageDigest) -> Self {
         Self { digest }
     }
 
     /// Returns `HashLen`, the digest output size in bytes.
-    #[must_use]
-    pub fn prk_size(&self) -> usize {
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
+    pub fn prk_size(self) -> usize {
         self.digest.size()
     }
 
@@ -36,29 +73,16 @@ impl HkdfSuite {
     /// omitted salt and is equivalent to a string of `HashLen` zero octets.
     /// `ikm` is the input keying material. The returned pseudorandom key (PRK)
     /// has length [`HkdfSuite::prk_size`].
-    pub fn extract(&self, salt: &[u8], ikm: &[u8]) -> Result<DigestBytes, ErrorStack> {
-        let mut prk = DigestBytes {
-            buf: [0u8; ffi::EVP_MAX_MD_SIZE as usize],
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid digest width or native HMAC failure.
+    pub fn extract(self, salt: &[u8], ikm: &[u8]) -> Result<HkdfPrk, ErrorStack> {
+        let mut prk = HkdfPrk {
+            buf: [0; ffi::EVP_MAX_MD_SIZE as usize],
             len: 0,
         };
-        ffi::init();
-
-        // BoringSSL's native HKDF_extract API orders these arguments as
-        // secret/IKM, then salt, unlike the RFC 5869 notation and this API.
-        unsafe {
-            cvt(ffi::HKDF_extract(
-                prk.buf.as_mut_ptr(),
-                &mut prk.len,
-                self.digest.as_ptr(),
-                ikm.as_ptr(),
-                ikm.len(),
-                salt.as_ptr(),
-                salt.len(),
-            ))?;
-        }
-
-        debug_assert_eq!(prk.len, self.prk_size());
-
+        prk.len = self.extract_into(salt, ikm, &mut prk.buf)?;
         Ok(prk)
     }
 
@@ -66,32 +90,45 @@ impl HkdfSuite {
     /// length, so that the caller controls the memory holding it, for example to zero it.
     ///
     /// `out` must hold at least [`HkdfSuite::prk_size`] bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid digest width, insufficient output capacity,
+    /// or native HMAC failure.
     pub fn extract_into(
-        &self,
+        self,
         salt: &[u8],
         ikm: &[u8],
         out: &mut [u8],
     ) -> Result<usize, ErrorStack> {
-        if out.len() < self.prk_size() {
-            return Err(ErrorStack::internal_error_str(
-                "HKDF PRK buffer is shorter than the digest output",
-            ));
+        let width = self.prk_size();
+        if width == 0 || width > ffi::EVP_MAX_MD_SIZE as usize {
+            return Err(ErrorStack::internal_error_str("invalid HKDF digest width"));
         }
+        let out = out.get_mut(..width).ok_or_else(|| {
+            ErrorStack::internal_error_str("HKDF PRK buffer is shorter than the digest output")
+        })?;
         ffi::init();
-
         let mut len = 0;
-        // BoringSSL's native HKDF_extract API orders these arguments as
-        // secret/IKM, then salt, unlike the RFC 5869 notation and this API.
-        unsafe {
-            cvt(ffi::HKDF_extract(
+        // SAFETY: the digest's fixed output width fits the exclusive output
+        // slice, length is a writable local, and inputs remain readable.
+        // Native orders the input keying material before the salt.
+        let result = unsafe {
+            ffi::HKDF_extract(
                 out.as_mut_ptr(),
-                &mut len,
+                &raw mut len,
                 self.digest.as_ptr(),
                 ikm.as_ptr(),
                 ikm.len(),
                 salt.as_ptr(),
                 salt.len(),
-            ))?;
+            )
+        };
+        if result <= 0 || len != width {
+            // SAFETY: the exclusive output prefix is writable, including on failure.
+            unsafe { ffi::OPENSSL_cleanse(out.as_mut_ptr().cast(), out.len()) };
+            cvt(result)?;
+            return Err(ErrorStack::internal_error_str("invalid HKDF PRK length"));
         }
         Ok(len)
     }
@@ -105,8 +142,17 @@ impl HkdfSuite {
     /// be empty. The function writes `L` bytes of output keying material into
     /// `okm`, where `L` is its length. `okm` may be empty. HKDF limits `L` to
     /// `255 * HashLen`; output-limit errors are returned as [`ErrorStack`].
-    pub fn expand(&self, prk: &[u8], info: &[u8], okm: &mut [u8]) -> Result<(), ErrorStack> {
-        if prk.len() < self.prk_size() {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid digest width, short PRK, output beyond
+    /// the RFC limit, or native HMAC failure.
+    pub fn expand(self, prk: &[u8], info: &[u8], okm: &mut [u8]) -> Result<(), ErrorStack> {
+        let width = self.prk_size();
+        if width == 0 || width > ffi::EVP_MAX_MD_SIZE as usize {
+            return Err(ErrorStack::internal_error_str("invalid HKDF digest width"));
+        }
+        if prk.len() < width {
             return Err(ErrorStack::internal_error_str(
                 "HKDF PRK is shorter than the digest output",
             ));
@@ -114,6 +160,9 @@ impl HkdfSuite {
 
         ffi::init();
 
+        // SAFETY: the descriptor has a supported nonzero width; all inputs
+        // and exclusive output are live, with exact lengths. Native checks the
+        // RFC output limit before writing.
         unsafe {
             cvt(ffi::HKDF_expand(
                 okm.as_mut_ptr(),

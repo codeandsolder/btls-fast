@@ -11,27 +11,38 @@ pub struct SslEchKeysBuilder {
 }
 
 impl SslEchKeysBuilder {
-    pub fn new() -> Result<SslEchKeysBuilder, ErrorStack> {
+    /// Creates a native ECH key-set builder.
+    ///
+    /// # Errors
+    ///
+    /// Native ECH key-set allocation fails.
+    pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: `SSL_ECH_KEYS_new` returns a newly owned key set or null;
+        // `cvt_p` checks allocation before ownership moves into `SslEchKeys`.
         unsafe {
             ffi::init();
             let keys = cvt_p(ffi::SSL_ECH_KEYS_new())?;
 
-            Ok(SslEchKeysBuilder::from_ptr(keys))
+            Ok(Self {
+                keys: SslEchKeys::from_ptr(keys),
+            })
         }
     }
 
-    pub unsafe fn from_ptr(keys: *mut ffi::SSL_ECH_KEYS) -> Self {
-        Self {
-            keys: unsafe { SslEchKeys::from_ptr(keys) },
-        }
-    }
-
+    /// Adds an ECH configuration paired with its HPKE private key.
+    ///
+    /// # Errors
+    ///
+    /// Native ECH configuration decoding or key registration fails.
     pub fn add_key(
         &mut self,
         is_retry_config: bool,
         ech_config: &[u8],
-        key: HpkeKey,
+        key: &HpkeKey,
     ) -> Result<(), ErrorStack> {
+        // SAFETY: the builder exclusively owns an unpublished key set. Both
+        // borrowed inputs are valid through this synchronous native call;
+        // BoringSSL copies the configuration and retains the private key.
         unsafe {
             cvt_0i(ffi::SSL_ECH_KEYS_add(
                 self.keys.as_ptr(),
@@ -57,6 +68,11 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl SslEchKeys {
+    /// Creates a builder for the native ECH key set.
+    ///
+    /// # Errors
+    ///
+    /// Native key-set allocation fails.
     pub fn builder() -> Result<SslEchKeysBuilder, ErrorStack> {
         SslEchKeysBuilder::new()
     }

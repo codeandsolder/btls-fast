@@ -10,13 +10,14 @@
 //! use btls::mlkem::{Algorithm, MlKemPrivateKey};
 //!
 //! let (public_key, private_key) = MlKemPrivateKey::generate(Algorithm::MlKem768).unwrap();
-//! let (ciphertext, shared_secret) = public_key.encapsulate().unwrap();
+//! let (ciphertext, shared_secret) = public_key.encapsulate();
 //! let decrypted = private_key.decapsulate(&ciphertext).unwrap();
 //! assert_eq!(shared_secret, decrypted);
 //! ```
 
 use std::fmt;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 
 use crate::cvt;
 use crate::error::ErrorStack;
@@ -46,8 +47,8 @@ pub enum Algorithm {
 
 impl Algorithm {
     /// Returns 1184 for ML-KEM-768, 1568 for ML-KEM-1024.
-    #[must_use]
-    pub const fn public_key_bytes(&self) -> usize {
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
+    pub const fn public_key_bytes(self) -> usize {
         match self {
             Self::MlKem768 => MlKem768PublicKey::PUBLIC_KEY_BYTES,
             Self::MlKem1024 => MlKem1024PublicKey::PUBLIC_KEY_BYTES,
@@ -55,8 +56,8 @@ impl Algorithm {
     }
 
     /// Returns 1088 for ML-KEM-768, 1568 for ML-KEM-1024.
-    #[must_use]
-    pub const fn ciphertext_bytes(&self) -> usize {
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
+    pub const fn ciphertext_bytes(self) -> usize {
         match self {
             Self::MlKem768 => MlKem768PrivateKey::CIPHERTEXT_BYTES,
             Self::MlKem1024 => MlKem1024PrivateKey::CIPHERTEXT_BYTES,
@@ -65,10 +66,10 @@ impl Algorithm {
 }
 
 #[derive(Clone)]
-pub struct MlKemPublicKey(Either<Box<MlKem768PublicKey>, Box<MlKem1024PublicKey>>);
+pub struct MlKemPublicKey(Either<Arc<MlKem768PublicKey>, Arc<MlKem1024PublicKey>>);
 
 #[derive(Clone)]
-pub struct MlKemPrivateKey(Either<Box<MlKem768PrivateKey>, Box<MlKem1024PrivateKey>>);
+pub struct MlKemPrivateKey(Either<Arc<MlKem768PrivateKey>, Arc<MlKem1024PrivateKey>>);
 
 #[derive(Clone)]
 enum Either<T768, T1024> {
@@ -80,20 +81,24 @@ impl MlKemPrivateKey {
     /// Generates a new key pair, returning `(public_key, private_key)`.
     ///
     /// The private key is a 64-byte seed. Keep it secret.
-    pub fn generate(algorithm: Algorithm) -> Result<(MlKemPublicKey, MlKemPrivateKey), ErrorStack> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native key generation or public-key parsing fails.
+    pub fn generate(algorithm: Algorithm) -> Result<(MlKemPublicKey, Self), ErrorStack> {
         match algorithm {
             Algorithm::MlKem768 => {
                 let (pk, sk) = MlKem768PrivateKey::generate()?;
                 Ok((
                     MlKemPublicKey(Either::MlKem768(pk)),
-                    MlKemPrivateKey(Either::MlKem768(sk)),
+                    Self(Either::MlKem768(sk)),
                 ))
             }
             Algorithm::MlKem1024 => {
                 let (pk, sk) = MlKem1024PrivateKey::generate()?;
                 Ok((
                     MlKemPublicKey(Either::MlKem1024(pk)),
-                    MlKemPrivateKey(Either::MlKem1024(sk)),
+                    Self(Either::MlKem1024(sk)),
                 ))
             }
         }
@@ -101,18 +106,24 @@ impl MlKemPrivateKey {
 }
 
 impl MlKemPublicKey {
+    /// Parses and validates a serialized public key for the selected parameter set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid length or malformed encoded public key.
     pub fn from_slice(algorithm: Algorithm, public_key: &[u8]) -> Result<Self, ErrorStack> {
         match algorithm {
-            Algorithm::MlKem768 => Ok(Self(Either::MlKem768(Box::new(
+            Algorithm::MlKem768 => Ok(Self(Either::MlKem768(Arc::new(
                 MlKem768PublicKey::from_slice(public_key)?,
             )))),
-            Algorithm::MlKem1024 => Ok(Self(Either::MlKem1024(Box::new(
+            Algorithm::MlKem1024 => Ok(Self(Either::MlKem1024(Arc::new(
                 MlKem1024PublicKey::from_slice(public_key)?,
             )))),
         }
     }
 
     /// Serialized bytes of the public key
+    #[must_use = "Consume the serialized public key or compare it to another encoded key."]
     pub fn as_bytes(&self) -> &[u8] {
         match &self.0 {
             Either::MlKem768(pk) => &pk.bytes,
@@ -120,23 +131,28 @@ impl MlKemPublicKey {
         }
     }
 
-    /// Encapsulates a shared secret to the given public key, returning
-    /// `(ciphertext, shared_secret)`.
-    pub fn encapsulate(&self) -> Result<(Vec<u8>, MlKemSharedSecret), ErrorStack> {
+    /// Encapsulates a shared secret with the given public key, returning
+    /// its ciphertext and the corresponding secret bytes.
+    ///
+    /// The native encapsulation primitive is infallible for a validated
+    /// public key, and writes exactly the parameter set's fixed output sizes.
+    #[must_use = "Use the ciphertext and secret produced by key encapsulation."]
+    pub fn encapsulate(&self) -> (Vec<u8>, MlKemSharedSecret) {
         match &self.0 {
             Either::MlKem768(pk) => {
-                let (ct, ss) = pk.encapsulate();
-                Ok((ct.to_vec(), ss))
+                let (ciphertext, secret) = pk.encapsulate();
+                (ciphertext.to_vec(), secret)
             }
             Either::MlKem1024(pk) => {
-                let (ct, ss) = pk.encapsulate();
-                Ok((ct.to_vec(), ss))
+                let (ciphertext, secret) = pk.encapsulate();
+                (ciphertext.to_vec(), secret)
             }
         }
     }
 
     /// Query public key and ciphertext length
-    pub fn algorithm(&self) -> Algorithm {
+    #[must_use = "Use the key parameter set when interpreting its fixed-size representations."]
+    pub const fn algorithm(&self) -> Algorithm {
         match self.0 {
             Either::MlKem768(_) => Algorithm::MlKem768,
             Either::MlKem1024(_) => Algorithm::MlKem1024,
@@ -145,22 +161,27 @@ impl MlKemPublicKey {
 }
 
 impl MlKemPrivateKey {
-    /// Expand private key from the seed bytes
+    /// Expands the private key from its fixed-length seed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native key expansion fails.
     pub fn from_seed(
         algorithm: Algorithm,
         private_seed: &MlKemPrivateKeySeed,
     ) -> Result<Self, ErrorStack> {
         match algorithm {
-            Algorithm::MlKem768 => Ok(Self(Either::MlKem768(Box::new(
+            Algorithm::MlKem768 => Ok(Self(Either::MlKem768(Arc::new(
                 MlKem768PrivateKey::from_seed(private_seed)?,
             )))),
-            Algorithm::MlKem1024 => Ok(Self(Either::MlKem1024(Box::new(
+            Algorithm::MlKem1024 => Ok(Self(Either::MlKem1024(Arc::new(
                 MlKem1024PrivateKey::from_seed(private_seed)?,
             )))),
         }
     }
 
     /// Secret seed bytes of this private key
+    #[must_use = "Handle the private seed only through an explicit export or derivation operation."]
     pub fn seed_bytes(&self) -> &MlKemPrivateKeySeed {
         match &self.0 {
             Either::MlKem768(sk) => &sk.seed,
@@ -169,6 +190,10 @@ impl MlKemPrivateKey {
     }
 
     /// Decapsulates a shared secret from a ciphertext using the private key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the ciphertext length does not match the parameter set.
     pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<MlKemSharedSecret, ErrorStack> {
         match &self.0 {
             Either::MlKem768(sk) => {
@@ -187,7 +212,8 @@ impl MlKemPrivateKey {
     }
 
     /// Query public key and ciphertext length
-    pub fn algorithm(&self) -> Algorithm {
+    #[must_use = "Use the key parameter set when interpreting its fixed-size representations."]
+    pub const fn algorithm(&self) -> Algorithm {
         match self.0 {
             Either::MlKem768(_) => Algorithm::MlKem768,
             Either::MlKem1024(_) => Algorithm::MlKem1024,
@@ -195,416 +221,234 @@ impl MlKemPrivateKey {
     }
 }
 
-/// ML-KEM-768 private key.
-///
-/// Caches the expanded key for fast decapsulation.
-struct MlKem768PrivateKey {
-    seed: MlKemPrivateKeySeed,
-    expanded: ffi::MLKEM768_private_key,
-}
-
-impl Clone for MlKem768PrivateKey {
-    fn clone(&self) -> Self {
-        // unwrap is safe: cloning a valid key with a valid seed always succeeds
-        Self::from_seed(&self.seed).unwrap()
-    }
-}
-
-impl MlKem768PrivateKey {
-    pub const CIPHERTEXT_BYTES: usize = ffi::MLKEM768_CIPHERTEXT_BYTES as usize;
-
-    /// Generate a new key pair.
-    fn generate() -> Result<(Box<MlKem768PublicKey>, Box<MlKem768PrivateKey>), ErrorStack> {
-        // SAFETY: all buffers are out parameters, correctly sized
-        unsafe {
-            ffi::init();
-            let mut bytes = [0; MlKem768PublicKey::PUBLIC_KEY_BYTES];
-            let mut seed = [0; PRIVATE_KEY_SEED_BYTES];
-            let mut expanded: MaybeUninit<ffi::MLKEM768_private_key> = MaybeUninit::uninit();
-
-            ffi::MLKEM768_generate_key(
-                bytes.as_mut_ptr().cast(),
-                seed.as_mut_ptr(),
-                expanded.as_mut_ptr(),
-            );
-
-            Ok((
-                Box::new(MlKem768PublicKey::from_slice(&bytes)?),
-                Box::new(MlKem768PrivateKey {
-                    seed,
-                    expanded: expanded.assume_init(),
-                }),
-            ))
-        }
-    }
-
-    /// Restore private key from seed.
-    fn from_seed(seed: &MlKemPrivateKeySeed) -> Result<Self, ErrorStack> {
-        // SAFETY: seed is 64 bytes, out parameter correctly sized
-        unsafe {
-            ffi::init();
-            let mut expanded: MaybeUninit<ffi::MLKEM768_private_key> = MaybeUninit::uninit();
-            cvt(ffi::MLKEM768_private_key_from_seed(
-                expanded.as_mut_ptr(),
-                seed.as_ptr(),
-                seed.len(),
-            ))?;
-            Ok(Self {
-                seed: *seed,
-                expanded: expanded.assume_init(),
-            })
-        }
-    }
-
-    /// Derive the public key.
-    #[cfg(test)]
-    fn public_key(&self) -> Result<MlKem768PublicKey, ErrorStack> {
-        // SAFETY: expanded key is valid, buffers correctly sized
-        unsafe {
-            ffi::init();
-            let mut parsed: MaybeUninit<ffi::MLKEM768_public_key> = MaybeUninit::uninit();
-            ffi::MLKEM768_public_from_private(parsed.as_mut_ptr(), &self.expanded);
-
-            let mut bytes = [0u8; MlKem768PublicKey::PUBLIC_KEY_BYTES];
-            let mut cbb: MaybeUninit<ffi::CBB> = MaybeUninit::uninit();
-            cvt(ffi::CBB_init_fixed(
-                cbb.as_mut_ptr(),
-                bytes.as_mut_ptr(),
-                bytes.len(),
-            ))?;
-            cvt(ffi::MLKEM768_marshal_public_key(
-                cbb.as_mut_ptr(),
-                parsed.as_ptr(),
-            ))?;
-
-            Ok(MlKem768PublicKey {
-                bytes,
-                parsed: parsed.assume_init(),
-            })
-        }
-    }
-
-    /// Decapsulate to get the shared secret.
-    fn decapsulate(&self, ciphertext: &[u8; Self::CIPHERTEXT_BYTES]) -> MlKemSharedSecret {
-        // SAFETY: expanded key is valid, ciphertext is correctly sized
-        unsafe {
-            ffi::init();
-            let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
-
-            ffi::MLKEM768_decap(
-                shared_secret.as_mut_ptr(),
-                ciphertext.as_ptr(),
-                ciphertext.len(),
-                &self.expanded,
-            );
-
-            shared_secret
-        }
-    }
-}
-
-impl fmt::Debug for MlKem768PrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MlKem768PrivateKey")
-            .field("key", &"[redacted]")
-            .finish()
-    }
-}
-
-impl Drop for MlKem768PrivateKey {
-    fn drop(&mut self) {
-        // SAFETY: pointers and lengths are valid
-        unsafe {
-            ffi::OPENSSL_cleanse(self.seed.as_mut_ptr().cast(), self.seed.len());
-            ffi::OPENSSL_cleanse(
-                self.expanded.opaque.bytes.as_mut_ptr().cast(),
-                self.expanded.opaque.bytes.len(),
-            );
-        }
-    }
-}
-
-/// ML-KEM-768 public key.
-#[derive(Clone)]
-struct MlKem768PublicKey {
-    bytes: [u8; Self::PUBLIC_KEY_BYTES],
-    parsed: ffi::MLKEM768_public_key,
-}
-
-impl MlKem768PublicKey {
-    pub const PUBLIC_KEY_BYTES: usize = ffi::MLKEM768_PUBLIC_KEY_BYTES as usize;
-
-    /// Parse and validate a public key.
-    ///
-    /// The slice must be [`Self::PUBLIC_KEY_BYTES`] long.
-    fn from_slice(slice: &[u8]) -> Result<Self, ErrorStack> {
-        if slice.len() != Self::PUBLIC_KEY_BYTES {
-            return Err(ErrorStack::internal_error_str("invalid public key length"));
+// All sizes, native types and entrypoints belong to the same parameter set.
+// Shared handles keep one immutable native key representation per generated
+// or restored key. The last private owner cleanses the secret.
+macro_rules! define_mlkem {
+    (
+        $private:ident, $public:ident, $native_private:ident, $native_public:ident,
+        $ciphertext_bytes:ident, $public_bytes:ident,
+        $generate:ident, $restore:ident, $derive_public:ident, $marshal:ident,
+        $decap:ident, $parse:ident, $encap:ident
+    ) => {
+        /// Native expanded ML-KEM private key.
+        ///
+        /// Caches the expanded key for fast decapsulation.
+        struct $private {
+            seed: MlKemPrivateKeySeed,
+            expanded: ffi::$native_private,
         }
 
-        // SAFETY: CBS correctly initialized, length already checked
-        unsafe {
-            ffi::init();
-            let mut cbs = cbs_init(slice);
-            let mut parsed: MaybeUninit<ffi::MLKEM768_public_key> = MaybeUninit::uninit();
+        impl $private {
+            pub const CIPHERTEXT_BYTES: usize = ffi::$ciphertext_bytes as usize;
 
-            cvt(ffi::MLKEM768_parse_public_key(
-                parsed.as_mut_ptr(),
-                &mut cbs,
-            ))?;
-            if cbs.len != 0 {
-                return Err(ErrorStack::internal_error_str(
-                    "trailing bytes after public key",
-                ));
+            /// Generate a new key pair.
+            fn generate() -> Result<(Arc<$public>, Arc<Self>), ErrorStack> {
+                // SAFETY: all buffers are out parameters, correctly sized
+                unsafe {
+                    ffi::init();
+                    let mut bytes = [0; $public::PUBLIC_KEY_BYTES];
+                    let mut seed = [0; PRIVATE_KEY_SEED_BYTES];
+                    let mut expanded: MaybeUninit<ffi::$native_private> = MaybeUninit::zeroed();
+
+                    ffi::$generate(
+                        bytes.as_mut_ptr().cast(),
+                        seed.as_mut_ptr(),
+                        expanded.as_mut_ptr(),
+                    );
+
+                    let private = Arc::new(Self {
+                        seed,
+                        expanded: expanded.assume_init(),
+                    });
+                    Ok((Arc::new($public::from_slice(&bytes)?), private))
+                }
             }
 
-            let mut bytes = [0u8; Self::PUBLIC_KEY_BYTES];
-            bytes.copy_from_slice(slice);
-            Ok(Self {
-                bytes,
-                parsed: parsed.assume_init(),
-            })
-        }
-    }
-
-    /// Encapsulate: returns (ciphertext, shared_secret).
-    fn encapsulate(
-        &self,
-    ) -> (
-        [u8; MlKem768PrivateKey::CIPHERTEXT_BYTES],
-        MlKemSharedSecret,
-    ) {
-        // SAFETY: buffers correctly sized, parsed key is valid
-        unsafe {
-            ffi::init();
-            let mut ciphertext = [0u8; MlKem768PrivateKey::CIPHERTEXT_BYTES];
-            let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
-
-            ffi::MLKEM768_encap(
-                ciphertext.as_mut_ptr(),
-                shared_secret.as_mut_ptr(),
-                &self.parsed,
-            );
-
-            (ciphertext, shared_secret)
-        }
-    }
-}
-
-impl fmt::Debug for MlKem768PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MlKem768PublicKey")
-            .field("bytes", &format_args!("[{}]", self.bytes.len()))
-            .finish()
-    }
-}
-
-/// ML-KEM-1024 private key.
-///
-/// Prefer ML-KEM-768 unless you need AES-256 equivalent security.
-/// Caches the expanded key for fast decapsulation.
-struct MlKem1024PrivateKey {
-    seed: MlKemPrivateKeySeed,
-    expanded: ffi::MLKEM1024_private_key,
-}
-
-impl Clone for MlKem1024PrivateKey {
-    fn clone(&self) -> Self {
-        // unwrap is safe: cloning a valid key with a valid seed always succeeds
-        Self::from_seed(&self.seed).unwrap()
-    }
-}
-
-impl MlKem1024PrivateKey {
-    pub const CIPHERTEXT_BYTES: usize = ffi::MLKEM1024_CIPHERTEXT_BYTES as usize;
-
-    /// Generate a new key pair.
-    fn generate() -> Result<(Box<MlKem1024PublicKey>, Box<MlKem1024PrivateKey>), ErrorStack> {
-        // SAFETY: all buffers are out parameters, correctly sized
-        unsafe {
-            ffi::init();
-            let mut bytes = [0; MlKem1024PublicKey::PUBLIC_KEY_BYTES];
-            let mut seed = [0; PRIVATE_KEY_SEED_BYTES];
-            let mut expanded: MaybeUninit<ffi::MLKEM1024_private_key> = MaybeUninit::uninit();
-
-            ffi::MLKEM1024_generate_key(
-                bytes.as_mut_ptr().cast(),
-                seed.as_mut_ptr(),
-                expanded.as_mut_ptr(),
-            );
-
-            Ok((
-                Box::new(MlKem1024PublicKey::from_slice(&bytes)?),
-                Box::new(MlKem1024PrivateKey {
-                    seed,
-                    expanded: expanded.assume_init(),
-                }),
-            ))
-        }
-    }
-
-    /// Restore private key from seed.
-    fn from_seed(seed: &MlKemPrivateKeySeed) -> Result<Self, ErrorStack> {
-        // SAFETY: seed is 64 bytes, out parameter correctly sized
-        unsafe {
-            ffi::init();
-            let mut expanded: MaybeUninit<ffi::MLKEM1024_private_key> = MaybeUninit::uninit();
-            cvt(ffi::MLKEM1024_private_key_from_seed(
-                expanded.as_mut_ptr(),
-                seed.as_ptr(),
-                seed.len(),
-            ))?;
-            Ok(Self {
-                seed: *seed,
-                expanded: expanded.assume_init(),
-            })
-        }
-    }
-
-    /// Derive the public key.
-    #[cfg(test)]
-    fn public_key(&self) -> Result<MlKem1024PublicKey, ErrorStack> {
-        // SAFETY: expanded key is valid, buffers correctly sized
-        unsafe {
-            ffi::init();
-            let mut parsed: MaybeUninit<ffi::MLKEM1024_public_key> = MaybeUninit::uninit();
-            ffi::MLKEM1024_public_from_private(parsed.as_mut_ptr(), &self.expanded);
-
-            let mut bytes = [0u8; MlKem1024PublicKey::PUBLIC_KEY_BYTES];
-            let mut cbb: MaybeUninit<ffi::CBB> = MaybeUninit::uninit();
-            cvt(ffi::CBB_init_fixed(
-                cbb.as_mut_ptr(),
-                bytes.as_mut_ptr(),
-                bytes.len(),
-            ))?;
-            cvt(ffi::MLKEM1024_marshal_public_key(
-                cbb.as_mut_ptr(),
-                parsed.as_ptr(),
-            ))?;
-
-            Ok(MlKem1024PublicKey {
-                bytes,
-                parsed: parsed.assume_init(),
-            })
-        }
-    }
-
-    /// Decapsulate to get the shared secret.
-    fn decapsulate(&self, ciphertext: &[u8; Self::CIPHERTEXT_BYTES]) -> MlKemSharedSecret {
-        // SAFETY: expanded key is valid, ciphertext is correctly sized
-        unsafe {
-            ffi::init();
-            let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
-
-            ffi::MLKEM1024_decap(
-                shared_secret.as_mut_ptr(),
-                ciphertext.as_ptr(),
-                ciphertext.len(),
-                &self.expanded,
-            );
-
-            shared_secret
-        }
-    }
-}
-
-impl fmt::Debug for MlKem1024PrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MlKem1024PrivateKey")
-            .field("key", &"[redacted]")
-            .finish()
-    }
-}
-
-impl Drop for MlKem1024PrivateKey {
-    fn drop(&mut self) {
-        // SAFETY: pointers and lengths are valid
-        unsafe {
-            ffi::OPENSSL_cleanse(self.seed.as_mut_ptr().cast(), self.seed.len());
-            ffi::OPENSSL_cleanse(
-                self.expanded.opaque.bytes.as_mut_ptr().cast(),
-                self.expanded.opaque.bytes.len(),
-            );
-        }
-    }
-}
-
-/// ML-KEM-1024 public key.
-///
-/// Prefer ML-KEM-768 unless you need AES-256 equivalent security.
-#[derive(Clone)]
-struct MlKem1024PublicKey {
-    bytes: [u8; Self::PUBLIC_KEY_BYTES],
-    parsed: ffi::MLKEM1024_public_key,
-}
-
-impl MlKem1024PublicKey {
-    pub const PUBLIC_KEY_BYTES: usize = ffi::MLKEM1024_PUBLIC_KEY_BYTES as usize;
-
-    /// Parse and validate a serialized public key.
-    ///
-    /// The slice must be [`Self::PUBLIC_KEY_BYTES`] long.
-    fn from_slice(slice: &[u8]) -> Result<Self, ErrorStack> {
-        if slice.len() != Self::PUBLIC_KEY_BYTES {
-            return Err(ErrorStack::internal_error_str("invalid public key length"));
-        }
-
-        // SAFETY: CBS correctly initialized, length already checked
-        unsafe {
-            ffi::init();
-            let mut cbs = cbs_init(slice);
-            let mut parsed: MaybeUninit<ffi::MLKEM1024_public_key> = MaybeUninit::uninit();
-
-            cvt(ffi::MLKEM1024_parse_public_key(
-                parsed.as_mut_ptr(),
-                &mut cbs,
-            ))?;
-            if cbs.len != 0 {
-                return Err(ErrorStack::internal_error_str(
-                    "trailing bytes after public key",
-                ));
+            /// Restore private key from seed.
+            fn from_seed(seed: &MlKemPrivateKeySeed) -> Result<Self, ErrorStack> {
+                // SAFETY: seed is 64 bytes, out parameter correctly sized
+                unsafe {
+                    ffi::init();
+                    let mut expanded: MaybeUninit<ffi::$native_private> = MaybeUninit::zeroed();
+                    cvt(ffi::$restore(
+                        expanded.as_mut_ptr(),
+                        seed.as_ptr(),
+                        seed.len(),
+                    ))?;
+                    Ok(Self {
+                        seed: *seed,
+                        expanded: expanded.assume_init(),
+                    })
+                }
             }
 
-            let mut bytes = [0u8; Self::PUBLIC_KEY_BYTES];
-            bytes.copy_from_slice(slice);
-            Ok(Self {
-                bytes,
-                parsed: parsed.assume_init(),
-            })
+            /// Derive the public key.
+            #[cfg(test)]
+            fn public_key(&self) -> Result<$public, ErrorStack> {
+                // SAFETY: expanded key is valid, buffers correctly sized
+                unsafe {
+                    ffi::init();
+                    let mut parsed: MaybeUninit<ffi::$native_public> = MaybeUninit::zeroed();
+                    ffi::$derive_public(parsed.as_mut_ptr(), &self.expanded);
+
+                    let mut bytes = [0u8; $public::PUBLIC_KEY_BYTES];
+                    let mut cbb: MaybeUninit<ffi::CBB> = MaybeUninit::zeroed();
+                    cvt(ffi::CBB_init_fixed(
+                        cbb.as_mut_ptr(),
+                        bytes.as_mut_ptr(),
+                        bytes.len(),
+                    ))?;
+                    let result = cvt(ffi::$marshal(cbb.as_mut_ptr(), parsed.as_ptr()));
+                    ffi::CBB_cleanup(cbb.as_mut_ptr());
+                    result?;
+
+                    Ok($public {
+                        bytes,
+                        parsed: parsed.assume_init(),
+                    })
+                }
+            }
+
+            /// Decapsulate to get the shared secret.
+            fn decapsulate(&self, ciphertext: &[u8; Self::CIPHERTEXT_BYTES]) -> MlKemSharedSecret {
+                // SAFETY: expanded key is valid, ciphertext is correctly sized
+                unsafe {
+                    ffi::init();
+                    let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
+
+                    ffi::$decap(
+                        shared_secret.as_mut_ptr(),
+                        ciphertext.as_ptr(),
+                        ciphertext.len(),
+                        &raw const self.expanded,
+                    );
+
+                    shared_secret
+                }
+            }
         }
-    }
 
-    /// Encapsulate: returns (ciphertext, shared_secret).
-    fn encapsulate(
-        &self,
-    ) -> (
-        [u8; MlKem1024PrivateKey::CIPHERTEXT_BYTES],
-        [u8; SHARED_SECRET_BYTES],
-    ) {
-        // SAFETY: buffers correctly sized, parsed key is valid
-        unsafe {
-            ffi::init();
-            let mut ciphertext = [0u8; MlKem1024PrivateKey::CIPHERTEXT_BYTES];
-            let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
-
-            ffi::MLKEM1024_encap(
-                ciphertext.as_mut_ptr(),
-                shared_secret.as_mut_ptr(),
-                &self.parsed,
-            );
-
-            (ciphertext, shared_secret)
+        impl fmt::Debug for $private {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($private))
+                    .field("key", &"[redacted]")
+                    .finish()
+            }
         }
-    }
+
+        impl Drop for $private {
+            fn drop(&mut self) {
+                // SAFETY: pointers and lengths are valid
+                unsafe {
+                    ffi::OPENSSL_cleanse(self.seed.as_mut_ptr().cast(), self.seed.len());
+                    ffi::OPENSSL_cleanse(
+                        self.expanded.opaque.bytes.as_mut_ptr().cast(),
+                        self.expanded.opaque.bytes.len(),
+                    );
+                }
+            }
+        }
+
+        /// Parsed native ML-KEM public key.
+        struct $public {
+            bytes: [u8; Self::PUBLIC_KEY_BYTES],
+            parsed: ffi::$native_public,
+        }
+
+        impl $public {
+            pub const PUBLIC_KEY_BYTES: usize = ffi::$public_bytes as usize;
+
+            /// Parse and validate a public key.
+            ///
+            /// The slice must be [`Self::PUBLIC_KEY_BYTES`] long.
+            fn from_slice(slice: &[u8]) -> Result<Self, ErrorStack> {
+                if slice.len() != Self::PUBLIC_KEY_BYTES {
+                    return Err(ErrorStack::internal_error_str("invalid public key length"));
+                }
+
+                // SAFETY: CBS correctly initialized, length already checked
+                unsafe {
+                    ffi::init();
+                    let mut cbs = cbs_init(slice);
+                    let mut parsed: MaybeUninit<ffi::$native_public> = MaybeUninit::zeroed();
+
+                    cvt(ffi::$parse(parsed.as_mut_ptr(), &raw mut cbs))?;
+                    if cbs.len != 0 {
+                        return Err(ErrorStack::internal_error_str(
+                            "trailing bytes after public key",
+                        ));
+                    }
+
+                    let mut bytes = [0u8; Self::PUBLIC_KEY_BYTES];
+                    bytes.copy_from_slice(slice);
+                    Ok(Self {
+                        bytes,
+                        parsed: parsed.assume_init(),
+                    })
+                }
+            }
+
+            /// Encapsulates a random shared secret and returns ciphertext and secret.
+            fn encapsulate(&self) -> ([u8; $private::CIPHERTEXT_BYTES], MlKemSharedSecret) {
+                // SAFETY: buffers correctly sized, parsed key is valid
+                unsafe {
+                    ffi::init();
+                    let mut ciphertext = [0u8; $private::CIPHERTEXT_BYTES];
+                    let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
+
+                    ffi::$encap(
+                        ciphertext.as_mut_ptr(),
+                        shared_secret.as_mut_ptr(),
+                        &raw const self.parsed,
+                    );
+
+                    (ciphertext, shared_secret)
+                }
+            }
+        }
+
+        impl fmt::Debug for $public {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_struct(stringify!($public))
+                    .field("bytes", &format_args!("[{}]", self.bytes.len()))
+                    .finish()
+            }
+        }
+    };
 }
 
-impl fmt::Debug for MlKem1024PublicKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MlKem1024PublicKey")
-            .field("bytes", &format_args!("[{}]", self.bytes.len()))
-            .finish()
-    }
-}
+define_mlkem!(
+    MlKem768PrivateKey,
+    MlKem768PublicKey,
+    MLKEM768_private_key,
+    MLKEM768_public_key,
+    MLKEM768_CIPHERTEXT_BYTES,
+    MLKEM768_PUBLIC_KEY_BYTES,
+    MLKEM768_generate_key,
+    MLKEM768_private_key_from_seed,
+    MLKEM768_public_from_private,
+    MLKEM768_marshal_public_key,
+    MLKEM768_decap,
+    MLKEM768_parse_public_key,
+    MLKEM768_encap
+);
+
+define_mlkem!(
+    MlKem1024PrivateKey,
+    MlKem1024PublicKey,
+    MLKEM1024_private_key,
+    MLKEM1024_public_key,
+    MLKEM1024_CIPHERTEXT_BYTES,
+    MLKEM1024_PUBLIC_KEY_BYTES,
+    MLKEM1024_generate_key,
+    MLKEM1024_private_key_from_seed,
+    MLKEM1024_public_from_private,
+    MLKEM1024_marshal_public_key,
+    MLKEM1024_decap,
+    MLKEM1024_parse_public_key,
+    MLKEM1024_encap
+);
 
 #[cfg(test)]
 mod tests {
@@ -686,10 +530,12 @@ mod tests {
                     #[test]
                     fn roundtrip() {
                         let (pk, sk) = MlKemPrivateKey::generate($algorithm).unwrap();
-                        let (ct, ss1) = pk.encapsulate().unwrap();
+                        let (ct, ss1) = pk.encapsulate();
                         let ss2 = sk.decapsulate(&ct).unwrap();
                         let ss3 = sk.clone().decapsulate(&ct).unwrap();
-                        let ss4 = sk.decapsulate(&ct.clone()).unwrap();
+                        let cloned = sk.clone();
+                        drop(sk);
+                        let ss4 = cloned.decapsulate(&ct).unwrap();
                         assert_eq!(ss1, ss2);
                         assert_eq!(ss1, ss3);
                         assert_eq!(ss1, ss4);
@@ -704,7 +550,7 @@ mod tests {
                         assert_eq!(pk.as_bytes().len(), $pk_len);
                         assert_eq!(private_key.seed_bytes().len(), PRIVATE_KEY_SEED_BYTES);
 
-                        let (ct, ss) = pk.encapsulate().unwrap();
+                        let (ct, ss) = pk.encapsulate();
                         assert_eq!(ct.len(), $ct_len);
                         assert_eq!(ss.len(), SHARED_SECRET_BYTES);
                     }

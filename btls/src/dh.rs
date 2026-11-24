@@ -2,8 +2,7 @@ use crate::error::ErrorStack;
 use crate::ffi;
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
-use std::mem;
-use std::ptr;
+use std::{mem, ptr};
 
 use crate::bn::BigNum;
 use crate::pkey::{HasParams, Params};
@@ -13,8 +12,10 @@ generic_foreign_type_and_impl_send_sync! {
     type CType = ffi::DH;
     fn drop = ffi::DH_free;
 
+    /// Native Diffie-Hellman parameters.
     pub struct Dh<T>;
 
+    /// A borrowed Diffie-Hellman parameter set.
     pub struct DhRef<T>;
 }
 
@@ -40,10 +41,23 @@ where
 }
 
 impl Dh<Params> {
-    pub fn from_params(p: BigNum, g: BigNum, q: BigNum) -> Result<Dh<Params>, ErrorStack> {
+    /// Constructs parameters from a prime modulus, generator, and optional subgroup order.
+    ///
+    /// The native setter stores parameters without proving primality or subgroup
+    /// properties. Callers must supply an appropriate validated group.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if native allocation or parameter installation fails.
+    #[corresponds(DH_set0_pqg)]
+    pub fn from_params(p: BigNum, g: BigNum, q: Option<BigNum>) -> Result<Self, ErrorStack> {
+        // SAFETY: allocation is owned before installation, both required
+        // components are non-null, and the optional q may be null.
+        // Native transfers ownership only after successful installation.
         unsafe {
-            let dh = Dh::from_ptr(cvt_p(ffi::DH_new())?);
-            cvt(DH_set0_pqg(dh.0, p.as_ptr(), q.as_ptr(), g.as_ptr()))?;
+            let dh = Self::from_ptr(cvt_p(ffi::DH_new())?);
+            let q_ptr = q.as_ref().map_or(ptr::null_mut(), ForeignType::as_ptr);
+            cvt(ffi::DH_set0_pqg(dh.as_ptr(), p.as_ptr(), q_ptr, g.as_ptr()))?;
             mem::forget((p, g, q));
             Ok(dh)
         }
@@ -68,8 +82,6 @@ impl Dh<Params> {
         ::libc::c_long
     }
 }
-
-use crate::ffi::DH_set0_pqg;
 
 #[cfg(test)]
 mod tests {
@@ -100,7 +112,7 @@ mod tests {
             "8CF83642A709A097B447997640129DA299B1A47D1EB3750BA308B0FE64F5FBD3",
         )
         .unwrap();
-        let dh = Dh::from_params(p, g, q).unwrap();
+        let dh = Dh::from_params(p, g, Some(q)).unwrap();
         ctx.set_tmp_dh(&dh).unwrap();
     }
 

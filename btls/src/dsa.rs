@@ -6,7 +6,6 @@
 //! without the private key.
 
 use foreign_types::{ForeignType, ForeignTypeRef};
-use libc::c_uint;
 use openssl_macros::corresponds;
 use std::fmt;
 use std::mem;
@@ -15,9 +14,8 @@ use std::ptr;
 use crate::bn::{BigNum, BigNumRef};
 use crate::error::ErrorStack;
 use crate::ffi;
-use crate::pkey::{HasParams, HasPrivate, HasPublic, Private, Public};
-use crate::try_int;
-use crate::{cvt, cvt_p};
+use crate::pkey::{HasParams, HasPrivate, HasPublic, Params, Private, Public};
+use crate::{cvt, cvt_nz, cvt_p};
 
 generic_foreign_type_and_impl_send_sync! {
     type CType = ffi::DSA;
@@ -51,7 +49,7 @@ generic_foreign_type_and_impl_send_sync! {
     ///     Ok(sign)
     /// }
     /// # fn main() {
-    /// #    create_dsa();
+    /// #    create_dsa().unwrap();
     /// # }
     /// ```
     pub struct Dsa<T>;
@@ -62,7 +60,7 @@ generic_foreign_type_and_impl_send_sync! {
 }
 
 impl<T> Clone for Dsa<T> {
-    fn clone(&self) -> Dsa<T> {
+    fn clone(&self) -> Self {
         (**self).to_owned()
     }
 }
@@ -71,6 +69,8 @@ impl<T> ToOwned for DsaRef<T> {
     type Owned = Dsa<T>;
 
     fn to_owned(&self) -> Dsa<T> {
+        // SAFETY: the live native key supports atomic reference counting and
+        // this creates a new owned reference without modifying its key components.
         unsafe {
             ffi::DSA_up_ref(self.as_ptr());
             Dsa::from_ptr(self.as_ptr())
@@ -99,13 +99,12 @@ where
     }
 
     /// Returns a reference to the public key component of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
+    #[corresponds(DSA_get0_pub_key)]
     pub fn pub_key(&self) -> &BigNumRef {
-        unsafe {
-            let mut pub_key = ptr::null();
-            DSA_get0_key(self.as_ptr(), &mut pub_key, ptr::null_mut());
-            BigNumRef::from_ptr(pub_key.cast_mut())
-        }
+        // SAFETY: the public-key capability guarantees the component is
+        // present, and the native key retains it for the shared borrow.
+        unsafe { BigNumRef::from_ptr(ffi::DSA_get0_pub_key(self.as_ptr()).cast_mut()) }
     }
 }
 
@@ -128,13 +127,12 @@ where
     }
 
     /// Returns a reference to the private key component of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
+    #[corresponds(DSA_get0_priv_key)]
     pub fn priv_key(&self) -> &BigNumRef {
-        unsafe {
-            let mut priv_key = ptr::null();
-            DSA_get0_key(self.as_ptr(), ptr::null_mut(), &mut priv_key);
-            BigNumRef::from_ptr(priv_key.cast_mut())
-        }
+        // SAFETY: the private-key capability guarantees the component is
+        // present, and the native key retains it for the shared borrow.
+        unsafe { BigNumRef::from_ptr(ffi::DSA_get0_priv_key(self.as_ptr()).cast_mut()) }
     }
 }
 
@@ -142,41 +140,81 @@ impl<T> DsaRef<T>
 where
     T: HasParams,
 {
-    /// Returns the maximum size of the signature output by `self` in bytes.
+    /// Maximum encoded signature length in bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native key cannot determine its signature length.
     #[corresponds(DSA_size)]
-    #[must_use]
-    pub fn size(&self) -> u32 {
-        unsafe { ffi::DSA_size(self.as_ptr()) as u32 }
+    pub fn signature_capacity(&self) -> Result<usize, ErrorStack> {
+        // SAFETY: the parameter capability guarantees the native key has its
+        // group parameters, including the subgroup order used for sizing.
+        let size = unsafe { ffi::DSA_size(self.as_ptr()) };
+        cvt_nz(size).map(core::num::NonZeroUsize::get)
     }
 
     /// Returns the DSA prime parameter of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
+    #[corresponds(DSA_get0_p)]
     pub fn p(&self) -> &BigNumRef {
-        unsafe {
-            let mut p = ptr::null();
-            DSA_get0_pqg(self.as_ptr(), &mut p, ptr::null_mut(), ptr::null_mut());
-            BigNumRef::from_ptr(p.cast_mut())
-        }
+        // SAFETY: the parameter capability guarantees the component is
+        // present, and the native key retains it for the shared borrow.
+        unsafe { BigNumRef::from_ptr(ffi::DSA_get0_p(self.as_ptr()).cast_mut()) }
     }
 
     /// Returns the DSA sub-prime parameter of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
+    #[corresponds(DSA_get0_q)]
     pub fn q(&self) -> &BigNumRef {
-        unsafe {
-            let mut q = ptr::null();
-            DSA_get0_pqg(self.as_ptr(), ptr::null_mut(), &mut q, ptr::null_mut());
-            BigNumRef::from_ptr(q.cast_mut())
-        }
+        // SAFETY: the parameter capability guarantees the component is
+        // present, and the native key retains it for the shared borrow.
+        unsafe { BigNumRef::from_ptr(ffi::DSA_get0_q(self.as_ptr()).cast_mut()) }
     }
 
     /// Returns the DSA base parameter of `self`.
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
+    #[corresponds(DSA_get0_g)]
     pub fn g(&self) -> &BigNumRef {
+        // SAFETY: the parameter capability guarantees the component is
+        // present, and the native key retains it for the shared borrow.
+        unsafe { BigNumRef::from_ptr(ffi::DSA_get0_g(self.as_ptr()).cast_mut()) }
+    }
+}
+
+impl Dsa<Params> {
+    fn from_parameters(p: BigNum, q: BigNum, g: BigNum) -> Result<Self, ErrorStack> {
+        ffi::init();
+        // SAFETY: the new parameter object owns its allocation before the
+        // setter runs. Native takes the three non-null values only on success.
         unsafe {
-            let mut g = ptr::null();
-            DSA_get0_pqg(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &mut g);
-            BigNumRef::from_ptr(g.cast_mut())
+            let dsa = Self::from_ptr(cvt_p(ffi::DSA_new())?);
+            cvt(ffi::DSA_set0_pqg(
+                dsa.as_ptr(),
+                p.as_ptr(),
+                q.as_ptr(),
+                g.as_ptr(),
+            ))?;
+            mem::forget((p, q, g));
+            Ok(dsa)
         }
+    }
+
+    fn install_key(&mut self, public: BigNum, private: Option<BigNum>) -> Result<(), ErrorStack> {
+        let private_ptr = private
+            .as_ref()
+            .map_or(ptr::null_mut(), ForeignType::as_ptr);
+        // SAFETY: the parameter key is exclusively owned during construction;
+        // native accepts a non-null public component and optional private one,
+        // transferring them only on success.
+        unsafe {
+            cvt(ffi::DSA_set0_key(
+                self.as_ptr(),
+                public.as_ptr(),
+                private_ptr,
+            ))?;
+        };
+        mem::forget((public, private));
+        Ok(())
     }
 }
 
@@ -190,21 +228,28 @@ impl Dsa<Private> {
     ///
     /// [`DSA_generate_parameters_ex`]: https://www.openssl.org/docs/man1.1.0/crypto/DSA_generate_parameters_ex.html
     /// [`DSA_generate_key`]: https://www.openssl.org/docs/man1.1.0/crypto/DSA_generate_key.html
-    pub fn generate(bits: u32) -> Result<Dsa<Private>, ErrorStack> {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsupported bit count or native generation failure.
+    pub fn generate(bits: u32) -> Result<Self, ErrorStack> {
         ffi::init();
+        // SAFETY: the fresh native object is owned from allocation onward.
+        // Null seed, optional outputs and callback request native generation.
+        // Private capability is published only after both native calls succeed.
         unsafe {
-            let dsa = Dsa::from_ptr(cvt_p(ffi::DSA_new())?);
+            let dsa = Dsa::<Params>::from_ptr(cvt_p(ffi::DSA_new())?);
             cvt(ffi::DSA_generate_parameters_ex(
-                dsa.0,
-                c_uint::from(bits),
+                dsa.as_ptr(),
+                bits,
                 ptr::null(),
                 0,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 ptr::null_mut(),
             ))?;
-            cvt(ffi::DSA_generate_key(dsa.0))?;
-            Ok(dsa)
+            cvt(ffi::DSA_generate_key(dsa.as_ptr()))?;
+            Ok(Self::from_ptr(dsa.into_ptr()))
         }
     }
 
@@ -213,22 +258,23 @@ impl Dsa<Private> {
     /// `p`, `q` and `g` are the common parameters.
     /// `priv_key` is the private component of the key pair.
     /// `pub_key` is the public component of the key. Can be computed via `g^(priv_key) mod p`
+    ///
+    /// Components are installed without validating the group or key consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if allocation or component installation fails.
     pub fn from_private_components(
         p: BigNum,
         q: BigNum,
         g: BigNum,
         priv_key: BigNum,
         pub_key: BigNum,
-    ) -> Result<Dsa<Private>, ErrorStack> {
-        ffi::init();
-        unsafe {
-            let dsa = Dsa::from_ptr(cvt_p(ffi::DSA_new())?);
-            cvt(DSA_set0_pqg(dsa.0, p.as_ptr(), q.as_ptr(), g.as_ptr()))?;
-            mem::forget((p, q, g));
-            cvt(DSA_set0_key(dsa.0, pub_key.as_ptr(), priv_key.as_ptr()))?;
-            mem::forget((pub_key, priv_key));
-            Ok(dsa)
-        }
+    ) -> Result<Self, ErrorStack> {
+        let mut dsa = Dsa::<Params>::from_parameters(p, q, g)?;
+        dsa.install_key(pub_key, Some(priv_key))?;
+        // SAFETY: successful installation establishes both key components.
+        Ok(unsafe { Self::from_ptr(dsa.into_ptr()) })
     }
 }
 
@@ -256,20 +302,22 @@ impl Dsa<Public> {
     ///
     /// `p`, `q` and `g` are the common parameters.
     /// `pub_key` is the public component of the key.
+    ///
+    /// Components are installed without validating the group or key consistency.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if allocation or component installation fails.
     pub fn from_public_components(
         p: BigNum,
         q: BigNum,
         g: BigNum,
         pub_key: BigNum,
-    ) -> Result<Dsa<Public>, ErrorStack> {
-        ffi::init();
-        unsafe {
-            let dsa = Dsa::from_ptr(cvt_p(ffi::DSA_new())?);
-            cvt(DSA_set0_pqg(dsa.0, p.as_ptr(), q.as_ptr(), g.as_ptr()))?;
-            mem::forget((p, q, g));
-            cvt(DSA_set0_key(dsa.0, pub_key.into_ptr(), ptr::null_mut()))?;
-            Ok(dsa)
-        }
+    ) -> Result<Self, ErrorStack> {
+        let mut dsa = Dsa::<Params>::from_parameters(p, q, g)?;
+        dsa.install_key(pub_key, None)?;
+        // SAFETY: successful installation establishes the public component.
+        Ok(unsafe { Self::from_ptr(dsa.into_ptr()) })
     }
 }
 
@@ -278,8 +326,6 @@ impl<T> fmt::Debug for Dsa<T> {
         write!(f, "DSA")
     }
 }
-
-use crate::ffi::{DSA_get0_key, DSA_get0_pqg, DSA_set0_key, DSA_set0_pqg};
 
 #[cfg(test)]
 mod test {
@@ -335,9 +381,11 @@ mod test {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn clone() {
         let key = Dsa::generate(2048).unwrap();
-        drop(key.clone());
+        let shared = key.clone();
+        assert_eq!(key.pub_key().to_vec(), shared.pub_key().to_vec());
+        drop(key);
+        assert!(!shared.pub_key().to_vec().is_empty());
     }
 }

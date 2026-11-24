@@ -1,99 +1,80 @@
-//! Base64 encoding support.
-use crate::cvt_n;
+//! Standard padded Base64 encoding and decoding.
 use crate::error::ErrorStack;
 use crate::ffi;
-use libc::c_int;
 use openssl_macros::corresponds;
 
-/// Encodes a slice of bytes to a base64 string.
+/// Encodes a slice of bytes as standard padded Base64.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the input length or computed output length overflow a signed C integer.
+/// Returns an error if the encoded size is unrepresentable or allocation fails.
 #[corresponds(EVP_EncodeBlock)]
-#[must_use]
-pub fn encode_block(src: &[u8]) -> String {
-    assert!(src.len() <= c_int::MAX as usize);
-    let src_len = src.len();
-
-    let len = encoded_len(src_len).unwrap();
-    let mut out = Vec::with_capacity(len);
-
-    // SAFETY: `encoded_len` ensures space for 4 output characters
-    // for every 3 input bytes including padding and nul terminator.
-    // `EVP_EncodeBlock` will write only single byte ASCII characters.
-    // `EVP_EncodeBlock` will only write to not read from `out`.
+pub fn encode_block(src: &[u8]) -> Result<String, ErrorStack> {
+    let mut capacity = 0;
+    // SAFETY: the output length is a writable local; native checks size overflow.
+    let sized = unsafe { ffi::EVP_EncodedLength(&raw mut capacity, src.len()) };
+    if sized != 1 || capacity == 0 {
+        return Err(ErrorStack::internal_error_str(
+            "unrepresentable Base64 length",
+        ));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(capacity)
+        .map_err(ErrorStack::internal_error)?;
+    // SAFETY: EVP_EncodedLength includes the native encoder's trailing NUL.
+    // The allocation covers that entire length and input stays readable.
+    let written = unsafe { ffi::EVP_EncodeBlock(out.as_mut_ptr(), src.as_ptr(), src.len()) };
+    if written != capacity - 1 {
+        return Err(ErrorStack::internal_error_str(
+            "invalid native Base64 length",
+        ));
+    }
+    // SAFETY: native initializes exactly written ASCII characters and the
+    // omitted trailing NUL; initialized bytes are valid UTF-8.
     unsafe {
-        let out_len = ffi::EVP_EncodeBlock(out.as_mut_ptr(), src.as_ptr(), src_len);
-        out.set_len(out_len);
-        String::from_utf8_unchecked(out)
+        out.set_len(written);
+        Ok(String::from_utf8_unchecked(out))
     }
 }
 
-/// Decodes a base64-encoded string to bytes.
+/// Decodes standard padded Base64, ignoring surrounding whitespace.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the input length or computed output length overflow a signed C integer.
-#[corresponds(EVP_DecodeBlock)]
+/// Returns an error for malformed input or allocation failure.
+#[corresponds(EVP_DecodeBase64)]
 pub fn decode_block(src: &str) -> Result<Vec<u8>, ErrorStack> {
     let src = src.trim();
-
-    // https://github.com/openssl/openssl/issues/12143
     if src.is_empty() {
-        return Ok(vec![]);
+        return Ok(Vec::new());
     }
-
-    assert!(src.len() <= c_int::MAX as usize);
-    let src_len = src.len();
-
-    let len = decoded_len(src_len).unwrap();
-    let mut out = Vec::with_capacity(len);
-
-    // SAFETY: `decoded_len` ensures space for 3 output bytes
-    // for every 4 input characters including padding.
-    // `EVP_DecodeBlock` can write fewer bytes after stripping
-    // leading and trailing whitespace, but never more.
-    // `EVP_DecodeBlock` will only write to not read from `out`.
-    unsafe {
-        let out_len = cvt_n(ffi::EVP_DecodeBlock(
+    let mut capacity = 0;
+    // SAFETY: the native sizing function writes a local length and validates
+    // that input consists of complete encoded quads.
+    if unsafe { ffi::EVP_DecodedLength(&raw mut capacity, src.len()) } != 1 {
+        return Err(ErrorStack::internal_error_str("invalid Base64 length"));
+    }
+    let mut out = Vec::new();
+    out.try_reserve_exact(capacity)
+        .map_err(ErrorStack::internal_error)?;
+    let mut written = 0;
+    // SAFETY: capacity is the native maximum decoded size and matches the
+    // reserved allocation. Native validates input and reports actual bytes.
+    let result = unsafe {
+        ffi::EVP_DecodeBase64(
             out.as_mut_ptr(),
+            &raw mut written,
+            capacity,
             src.as_ptr(),
-            src_len,
-        ))?;
-        out.set_len(out_len as usize);
+            src.len(),
+        )
+    };
+    if result != 1 || written > capacity {
+        return Err(ErrorStack::internal_error_str("invalid Base64 encoding"));
     }
-
-    if src.ends_with('=') {
-        out.pop();
-        if src.ends_with("==") {
-            out.pop();
-        }
-    }
-
+    // SAFETY: native success initializes exactly written bytes within capacity.
+    unsafe { out.set_len(written) };
     Ok(out)
-}
-
-fn encoded_len(src_len: usize) -> Option<usize> {
-    let mut len = (src_len / 3).checked_mul(4)?;
-
-    if src_len % 3 != 0 {
-        len = len.checked_add(4)?;
-    }
-
-    len = len.checked_add(1)?;
-
-    Some(len)
-}
-
-fn decoded_len(src_len: usize) -> Option<usize> {
-    let mut len = (src_len / 4).checked_mul(3)?;
-
-    if src_len % 4 != 0 {
-        len = len.checked_add(3)?;
-    }
-
-    Some(len)
 }
 
 #[cfg(test)]
@@ -102,13 +83,13 @@ mod tests {
 
     #[test]
     fn test_encode_block() {
-        assert_eq!(String::new(), encode_block(b""));
-        assert_eq!("Zg==".to_string(), encode_block(b"f"));
-        assert_eq!("Zm8=".to_string(), encode_block(b"fo"));
-        assert_eq!("Zm9v".to_string(), encode_block(b"foo"));
-        assert_eq!("Zm9vYg==".to_string(), encode_block(b"foob"));
-        assert_eq!("Zm9vYmE=".to_string(), encode_block(b"fooba"));
-        assert_eq!("Zm9vYmFy".to_string(), encode_block(b"foobar"));
+        assert_eq!(String::new(), encode_block(b"").unwrap());
+        assert_eq!("Zg==".to_string(), encode_block(b"f").unwrap());
+        assert_eq!("Zm8=".to_string(), encode_block(b"fo").unwrap());
+        assert_eq!("Zm9v".to_string(), encode_block(b"foo").unwrap());
+        assert_eq!("Zm9vYg==".to_string(), encode_block(b"foob").unwrap());
+        assert_eq!("Zm9vYmE=".to_string(), encode_block(b"fooba").unwrap());
+        assert_eq!("Zm9vYmFy".to_string(), encode_block(b"foobar").unwrap());
     }
 
     #[test]
@@ -120,6 +101,17 @@ mod tests {
         assert_eq!(b"foob".to_vec(), decode_block("Zm9vYg==").unwrap());
         assert_eq!(b"fooba".to_vec(), decode_block("Zm9vYmE=").unwrap());
         assert_eq!(b"foobar".to_vec(), decode_block("Zm9vYmFy").unwrap());
+    }
+
+    #[test]
+    fn rejects_invalid_payloads_and_preserves_nuls() {
+        for invalid in ["Zg", "Z===", "Zg==Zm9v", "Zg==!", "Zm 9v", "===="] {
+            assert!(decode_block(invalid).is_err(), "{invalid}");
+        }
+        for input in [&[0][..], &[1, 0], &[1, 2, 0], &[0, 0, 0, 0]] {
+            let encoded = encode_block(input).unwrap();
+            assert_eq!(decode_block(&encoded).unwrap(), input);
+        }
     }
 
     #[test]

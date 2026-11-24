@@ -83,7 +83,7 @@ fn make_delegation_certificate(now: i64) -> (PKey<Private>, X509) {
     let mut name = X509NameBuilder::new().unwrap();
     name.append_entry_by_text("CN", "delegated-credential.test")
         .unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
 
     let mut certificate = X509::builder().unwrap();
     certificate.set_version(2).unwrap();
@@ -341,15 +341,17 @@ fn patch_delegated_credential_usage_is_false_on_resumption() {
     let session = Arc::new(Mutex::new(None));
     client_context
         .set_session_cache_mode(SslSessionCacheMode::CLIENT | SslSessionCacheMode::NO_INTERNAL);
-    client_context.set_new_session_callback({
-        let session = session.clone();
-        move |_, ticket| {
-            let mut session = session.lock().unwrap();
-            if session.is_none() {
-                *session = Some(ticket);
+    client_context
+        .set_new_session_callback({
+            let session = session.clone();
+            move |_, ticket| {
+                let mut session = session.lock().unwrap();
+                if session.is_none() {
+                    *session = Some(ticket);
+                }
             }
-        }
-    });
+        })
+        .unwrap();
     let client_context = client_context.build();
 
     for resumed in [false, true] {
@@ -380,17 +382,20 @@ fn patch_delegated_credential_is_disabled_by_default() {
     // A default client must not offer the extension at all.
     let offered = Arc::new(Mutex::new(None));
     let mut server = super::server::Server::builder();
-    server.ctx().set_select_certificate_callback({
-        let offered = offered.clone();
-        move |client_hello| {
-            *offered.lock().unwrap() = Some(
-                client_hello
-                    .get_extension(ExtensionType::DELEGATED_CREDENTIAL)
-                    .is_some(),
-            );
-            Ok(())
-        }
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback({
+            let offered = offered.clone();
+            move |client_hello| {
+                *offered.lock().unwrap() = Some(
+                    client_hello
+                        .get_extension(ExtensionType::DELEGATED_CREDENTIAL)
+                        .is_some(),
+                );
+                Ok(())
+            }
+        })
+        .unwrap();
     let server = server.build();
     let stream = server.client().connect();
     assert_eq!(*offered.lock().unwrap(), Some(false));

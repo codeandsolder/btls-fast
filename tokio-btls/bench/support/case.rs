@@ -1,8 +1,9 @@
 //! Target dimensions, clocks and the body matrix shared by every benchmark.
 
 use std::{
-    fmt,
+    fmt, io,
     sync::LazyLock,
+    thread::{self, ThreadId},
     time::{Duration, Instant},
 };
 
@@ -17,7 +18,6 @@ pub struct BenchTarget {
 }
 
 /// Stream operation the measured client performs.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum Direction {
     /// The client reads bodies a tokio-btls server sends.
@@ -38,7 +38,6 @@ impl fmt::Display for Direction {
 }
 
 /// Transport under the measured client stream.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum Transport {
     /// In-process pipe; a tokio-btls server on the same task works between timed batches.
@@ -59,7 +58,6 @@ impl fmt::Display for Transport {
 }
 
 /// Clock a measured duration is read from.
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub enum Clock {
     /// Elapsed wall time. A TCP server streams bodies for as long as the connection lasts.
@@ -70,9 +68,13 @@ pub enum Clock {
 }
 
 /// A measurement started on one [`Clock`].
-pub(crate) enum Stopwatch {
+///
+/// Keep only the sendable CPU-time count, plus the originating thread ID. Async
+/// benchmark futures may be moved, but thread-local measurements must not silently
+/// combine samples from different executor threads.
+pub enum Stopwatch {
     Wall(Instant),
-    Cpu(ThreadTime),
+    Cpu { start: Duration, thread: ThreadId },
 }
 
 // ===== impl Clock =====
@@ -82,7 +84,13 @@ impl Clock {
     pub(crate) fn start(self) -> Stopwatch {
         match self {
             Self::Wall => Stopwatch::Wall(Instant::now()),
-            Self::Cpu => Stopwatch::Cpu(ThreadTime::now()),
+            Self::Cpu => {
+                let thread = thread::current().id();
+                Stopwatch::Cpu {
+                    start: ThreadTime::now().as_duration(),
+                    thread,
+                }
+            }
         }
     }
 }
@@ -100,17 +108,32 @@ impl fmt::Display for Clock {
 
 impl Stopwatch {
     /// Time on the clock since the measurement started.
-    pub(crate) fn elapsed(&self) -> Duration {
+    ///
+    /// # Errors
+    ///
+    /// A CPU-time measurement moved to another thread, its clock could not
+    /// be read, or its reported counter went backwards.
+    pub(crate) fn elapsed(&self) -> io::Result<Duration> {
         match self {
-            Self::Wall(start) => start.elapsed(),
-            Self::Cpu(start) => start.elapsed(),
+            Self::Wall(start) => Ok(start.elapsed()),
+            Self::Cpu { start, thread } => {
+                // Read the end timestamp before doing any validation work.
+                let end = ThreadTime::try_now()?.as_duration();
+                if *thread != thread::current().id() {
+                    return Err(io::Error::other(
+                        "CPU-time benchmark switched executor threads",
+                    ));
+                }
+                end.checked_sub(*start)
+                    .ok_or_else(|| io::Error::other("thread CPU-time counter went backwards"))
+            }
         }
     }
 }
 
 /// Whether a stream carries TLS records or the bare body.
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum Tls {
+pub enum Tls {
     Enabled,
     Disabled,
 }
@@ -176,7 +199,7 @@ impl fmt::Display for BodyKind {
 const KIB: usize = 1024;
 
 /// Largest plaintext in one TLS record.
-pub(crate) const MAX_RECORD: usize = 16 * KIB;
+pub const MAX_RECORD: usize = 16 * KIB;
 
 /// Bytes a TLS 1.3 AES-GCM record adds: a 5-byte header, the inner content type and a 16-byte tag
 /// ([RFC 8446 §5.2](https://www.rfc-editor.org/rfc/rfc8446#section-5.2)).
@@ -184,16 +207,16 @@ const RECORD_OVERHEAD: usize = 22;
 
 /// Body bytes a batch moves between two clock reads: whole bodies, at least one. Over TCP a
 /// larger body moves in parts of this size, so a batch always fits the socket buffers.
-pub(crate) const BATCH_LEN: usize = 128 * KIB;
+pub const BATCH_LEN: usize = 128 * KIB;
 
 /// Most slices in one chunked write; they live in a stack array.
-pub(crate) const MAX_SLICES: usize = 16;
+pub const MAX_SLICES: usize = 16;
 
 /// Body sizes measured by every target, each split into 16 chunks.
 ///
 /// The x4 ladder crosses the record size (16 KiB), tokio-btls's 64 KiB seal budget and rustls's
 /// 64 KiB send limit, and extends to a 4 MiB working set.
-pub(crate) const BODY_CASES: &[BodyCase] = &[
+pub const BODY_CASES: &[BodyCase] = &[
     BodyCase {
         len: KIB,
         chunk_size: 64,
@@ -232,3 +255,30 @@ const _: () = {
         i += 1;
     }
 };
+
+#[cfg(test)]
+mod stopwatch_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_time_measurements_reject_executor_migration() -> io::Result<()> {
+        let stopwatch = Clock::Cpu.start();
+        let elapsed = stopwatch.elapsed()?;
+        assert!(elapsed <= ThreadTime::now().as_duration());
+        let result = std::thread::spawn(move || stopwatch.elapsed())
+            .join()
+            .map_err(|_| io::Error::other("clock test thread panicked"))?;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Other);
+        Ok(())
+    }
+
+    #[test]
+    fn wall_clock_measurements_are_sendable() -> io::Result<()> {
+        let stopwatch = Clock::Wall.start();
+        let elapsed = std::thread::spawn(move || stopwatch.elapsed())
+            .join()
+            .map_err(|_| io::Error::other("clock test thread panicked"))??;
+        assert!(elapsed > Duration::ZERO);
+        Ok(())
+    }
+}

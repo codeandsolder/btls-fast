@@ -3,15 +3,15 @@ use std::{io, pin::Pin, task::Context};
 /// The underlying stream and the task context of the poll driving it.
 ///
 /// Each poll installs its context for the transport I/O it drives and clears it afterwards.
-pub(crate) struct Transport<S> {
+pub struct Transport<S> {
     pub(crate) stream: S,
     // Address of the installed `Context`, or 0. An address, unlike a pointer, keeps `Send`/`Sync`.
     context: usize,
 }
 
 impl<S> Transport<S> {
-    pub(crate) fn new(stream: S) -> Self {
-        Transport { stream, context: 0 }
+    pub(crate) const fn new(stream: S) -> Self {
+        Self { stream, context: 0 }
     }
 
     /// Installs `cx` as the context of later [`parts`](Self::parts) calls.
@@ -23,11 +23,11 @@ impl<S> Transport<S> {
     /// the first `parts` call until it is dropped.
     #[inline]
     pub(crate) unsafe fn set_context(&mut self, cx: &mut Context<'_>) {
-        self.context = cx as *mut _ as usize;
+        self.context = std::ptr::from_mut(cx) as usize;
     }
 
     #[inline]
-    pub(crate) fn clear_context(&mut self) {
+    pub(crate) const fn clear_context(&mut self) {
         self.context = 0;
     }
 

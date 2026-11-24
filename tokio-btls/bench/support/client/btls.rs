@@ -1,4 +1,4 @@
-//! tokio-btls adapter: BoringSSL through the crate under test.
+//! tokio-btls adapter: `BoringSSL` through the crate under test.
 
 use std::pin::Pin;
 
@@ -17,7 +17,7 @@ impl ClientAdapter for Adapter {
     type Stream<S>
         = SslStream<S>
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 
     const NAME: &'static str = "tokio-btls";
     const TLS: Tls = Tls::Enabled;
@@ -36,7 +36,7 @@ impl ClientAdapter for Adapter {
         transport: S,
     ) -> Result<Self::Stream<S>, BoxError>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let ssl = connector
             .configure()?

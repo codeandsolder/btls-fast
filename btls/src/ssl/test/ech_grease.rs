@@ -504,7 +504,10 @@ fn ech_policy_clear_restores_context_or_default() {
                 }
             };
             let mut client = server.client_with_root_ca();
-            client.ctx().set_ech_grease_callback(policy(0, 239));
+            client
+                .ctx()
+                .set_ech_grease_callback(policy(0, 239))
+                .unwrap();
             if clear_context {
                 client.ctx().clear_ech_grease_callback();
             }
@@ -570,7 +573,8 @@ fn ech_policy_cannot_change_during_certificate_verification() {
                 }
                 verified.fetch_add(1, Ordering::SeqCst);
                 Ok(())
-            });
+            })
+            .unwrap();
         },
         false,
     );
@@ -587,10 +591,13 @@ fn ech_metadata_includes_grease_in_wire_order() {
     let mut client = server.client_with_root_ca();
     client.ctx().set_grease_enabled(true);
     client.ctx().set_permute_extensions(true);
-    client.ctx().set_ech_grease_callback(move |_, info| {
-        *observed.lock().unwrap() = info.extensions().collect();
-        Ok(parameters(info, 239))
-    });
+    client
+        .ctx()
+        .set_ech_grease_callback(move |_, info| {
+            *observed.lock().unwrap() = info.extensions().collect();
+            Ok(parameters(info, 239))
+        })
+        .unwrap();
     let mut client = client.build().builder();
     client.ssl().set_enable_ech_grease(true);
     let messages = connect_and_capture(client, None);
@@ -632,12 +639,15 @@ fn ech_policy_accounts_for_record_size_limit() {
             .unwrap();
         client.ctx().set_record_size_limit(limit);
         client.ctx().set_extension_permutation(&order).unwrap();
-        client.ctx().set_ech_grease_callback(move |_, info| {
-            *metadata.lock().unwrap() =
-                Some((info.extensions().collect::<Vec<_>>(), info.message_length()));
-            // Stay above the small-ClientHello padding range to compare exact sizes.
-            Ok(parameters(info, 4096))
-        });
+        client
+            .ctx()
+            .set_ech_grease_callback(move |_, info| {
+                *metadata.lock().unwrap() =
+                    Some((info.extensions().collect::<Vec<_>>(), info.message_length()));
+                // Stay above the small-ClientHello padding range to compare exact sizes.
+                Ok(parameters(info, 4096))
+            })
+            .unwrap();
         let mut client = client.build().builder();
         client.ssl().set_enable_ech_grease(true);
         let messages = connect_and_capture(client, None);
@@ -685,9 +695,11 @@ fn ech_connector_policy_uses_per_connection_host_length() {
         .set_serial_number(fixture.serial_number())
         .unwrap();
     certificate
-        .set_subject_name(fixture.subject_name())
+        .set_subject_name(fixture.subject_name().unwrap())
         .unwrap();
-    certificate.set_issuer_name(fixture.subject_name()).unwrap();
+    certificate
+        .set_issuer_name(fixture.subject_name().unwrap())
+        .unwrap();
     certificate.set_not_before(fixture.not_before()).unwrap();
     certificate.set_not_after(fixture.not_after()).unwrap();
     certificate.set_pubkey(&key).unwrap();
@@ -704,16 +716,19 @@ fn ech_connector_policy_uses_per_connection_host_length() {
     let mut server = Server::builder();
     server.expected_connections_count(4);
     server.ctx().set_certificate(&certificate).unwrap();
-    server.ctx().set_select_certificate_callback(move |hello| {
-        captured.lock().unwrap().push((
-            hello.get_extension(ExtensionType::SERVER_NAME).is_some(),
-            hello
-                .get_extension(ExtensionType::ENCRYPTED_CLIENT_HELLO)
-                .unwrap()
-                .to_vec(),
-        ));
-        Ok(())
-    });
+    server
+        .ctx()
+        .set_select_certificate_callback(move |hello| {
+            captured.lock().unwrap().push((
+                hello.get_extension(ExtensionType::SERVER_NAME).is_some(),
+                hello
+                    .get_extension(ExtensionType::ENCRYPTED_CLIENT_HELLO)
+                    .unwrap()
+                    .to_vec(),
+            ));
+            Ok(())
+        })
+        .unwrap();
     let server = server.build();
     let host_length = Ssl::new_ex_index::<usize>().unwrap();
     for rounding in [NssPre3127, Nss3127] {
@@ -727,20 +742,22 @@ fn ech_connector_policy_uses_per_connection_host_length() {
         builder
             .set_min_proto_version(Some(SslVersion::TLS1_3))
             .unwrap();
-        builder.set_ech_grease_callback(move |ssl, info| {
-            let host_len = *ssl.ex_data(host_length).unwrap();
-            let parameters = info.nss_parameters(100, host_len, rounding)?;
-            metadata
-                .lock()
-                .unwrap()
-                .push((host_len, info.server_name_length(), parameters));
-            Ok(parameters)
-        });
+        builder
+            .set_ech_grease_callback(move |ssl, info| {
+                let host_len = *ssl.ex_data(host_length).unwrap();
+                let parameters = info.nss_parameters(100, host_len, rounding)?;
+                metadata
+                    .lock()
+                    .unwrap()
+                    .push((host_len, info.server_name_length(), parameters));
+                Ok(parameters)
+            })
+            .unwrap();
         let connector = builder.build();
         for host in ["foobar.com", "127.0.0.1"] {
             let mut connection = connector.configure().unwrap();
             connection.set_enable_ech_grease(true);
-            connection.set_ex_data(host_length, host.len());
+            connection.set_ex_data(host_length, host.len()).unwrap();
             let ssl = connection.into_ssl(host).unwrap();
             let mut stream = ssl.connect(server.connect_tcp()).unwrap();
             stream.read_exact(&mut [0]).unwrap();
@@ -1167,18 +1184,18 @@ fn ech_context_policy_and_connection_override() {
         }
     };
     let mut base = server.client_with_root_ca();
-    base.ctx().set_ech_grease_callback(policy(0));
+    base.ctx().set_ech_grease_callback(policy(0)).unwrap();
     let base = base.build();
     let mut other = SslContext::builder(SslMethod::tls()).unwrap();
     other.set_ca_file("test/root-ca.pem").unwrap();
-    other.set_ech_grease_callback(policy(1));
+    other.set_ech_grease_callback(policy(1)).unwrap();
     let other = other.build();
     for selected in [0, 0, 1, 2] {
         let mut connection = base.builder();
         let ssl = connection.ssl();
         ssl.set_enable_ech_grease(true);
         ssl.set_hostname("localhost").unwrap();
-        ssl.set_ex_data(index, selected);
+        ssl.set_ex_data(index, selected).unwrap();
         if selected != 0 {
             ssl.set_ssl_context(&other).unwrap();
         }
@@ -1213,22 +1230,26 @@ fn ech_policy_resumption_preserves_psk_binder() {
         .set_session_cache_mode(crate::ssl::SslSessionCacheMode::CLIENT);
     client
         .ctx()
-        .set_new_session_callback(move |_, session| saved.lock().unwrap().push(session));
+        .set_new_session_callback(move |_, session| saved.lock().unwrap().push(session))
+        .unwrap();
     let called = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&called);
     let sizes = Arc::new(Mutex::new(None));
     let reported = Arc::clone(&sizes);
-    client.ctx().set_ech_grease_callback(move |_, info| {
-        let resumed = count.fetch_add(1, Ordering::SeqCst) != 0;
-        assert_eq!(info.psk_extension_length() != 0, resumed);
-        let parameters = info.nss_parameters(100, 9, Nss3127)?;
-        *reported.lock().unwrap() = Some((
-            info.psk_extension_length(),
-            info.message_length(),
-            usize::from(parameters.payload_length.get()),
-        ));
-        Ok(parameters)
-    });
+    client
+        .ctx()
+        .set_ech_grease_callback(move |_, info| {
+            let resumed = count.fetch_add(1, Ordering::SeqCst) != 0;
+            assert_eq!(info.psk_extension_length() != 0, resumed);
+            let parameters = info.nss_parameters(100, 9, Nss3127)?;
+            *reported.lock().unwrap() = Some((
+                info.psk_extension_length(),
+                info.message_length(),
+                usize::from(parameters.payload_length.get()),
+            ));
+            Ok(parameters)
+        })
+        .unwrap();
     let client = client.build();
     let mut first = client.builder();
     first.ssl().set_hostname("localhost").unwrap();

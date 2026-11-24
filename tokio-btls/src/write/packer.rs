@@ -19,7 +19,7 @@ pub(super) struct Packer<'a> {
 
 impl<'a> Packer<'a> {
     #[inline]
-    pub(super) fn new(bufs: &'a [io::IoSlice<'a>]) -> Self {
+    pub(super) const fn new(bufs: &'a [io::IoSlice<'a>]) -> Self {
         Packer {
             bufs,
             i: 0,
@@ -32,8 +32,8 @@ impl<'a> Packer<'a> {
     /// Skips empty slices and returns the plaintext of the next record, or `None` once every
     /// slice is sealed.
     ///
-    /// Always inlined: it is the body of the `ssl_write_records` loop.
-    #[inline(always)]
+    /// Kept small to enable inlining into the `ssl_write_records` hot loop.
+    #[inline]
     pub(super) fn next_record(&mut self) -> Option<&[u8]> {
         let bufs = self.bufs;
         let head = loop {

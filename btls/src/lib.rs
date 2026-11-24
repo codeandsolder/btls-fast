@@ -1,6 +1,6 @@
-//! Bindings to BoringSSL
+//! Bindings to `BoringSSL`
 //!
-//! This crate provides a safe interface to the BoringSSL cryptography library.
+//! This crate provides a safe interface to the `BoringSSL` cryptography library.
 //!
 //! # Versioning
 //!
@@ -11,11 +11,11 @@
 //! However, semantic versioning guarantees still hold, as all the crate versions will be updated
 //! based on the crate with most significant changes.
 //!
-//! ## BoringSSL version
+//! ## `BoringSSL` version
 //!
-//! By default, the crate statically links against a pinned BoringSSL revision, vendored as a
+//! By default, the crate statically links against a pinned `BoringSSL` revision, vendored as a
 //! submodule at `btls-sys/deps/boringssl`. The current pin is upstream tag `0.20260929.0`.
-//! *Note*: any BoringSSL revision bumps will be released as a major version update of all crates.
+//! *Note*: any `BoringSSL` revision bumps will be released as a major version update of all crates.
 //!
 //! # Compilation and linking options
 //!
@@ -26,7 +26,7 @@
 //!
 //! ## Support for pre-built binaries or custom source
 //!
-//! While this crate can build BoringSSL on its own, you may want to provide pre-built binaries instead.
+//! While this crate can build `BoringSSL` on its own, you may want to provide pre-built binaries instead.
 //! To do so, specify the environment variable `BORING_BSSL{,_FIPS}_PATH` with the path to the binaries.
 //!
 //! You can also provide specific headers by setting `BORING_BSSL{,_FIPS}_INCLUDE_PATH`.
@@ -34,15 +34,15 @@
 //! _Notes_: The crate will look for headers in the`$BORING_BSSL{,_FIPS}_INCLUDE_PATH/openssl/`
 //! folder, make sure to place your headers there.
 //!
-//! In alternative a different path for the BoringSSL source code directory can be specified by setting
+//! In alternative a different path for the `BoringSSL` source code directory can be specified by setting
 //! `BORING_BSSL{,_FIPS}_SOURCE_PATH` which will automatically be compiled during the build process.
 //!
-//! _Warning_: When providing a different version of BoringSSL make sure to use a compatible one, the
+//! _Warning_: When providing a different version of `BoringSSL` make sure to use a compatible one, the
 //! crate relies on the presence of certain functions.
 //!
 //! ## Building with a FIPS-validated module
 //!
-//! Only BoringCrypto module version `853ca1ea1168dff08011e5d42d94609cc0ca2e27`, as certified with
+//! Only `BoringCrypto` module version `853ca1ea1168dff08011e5d42d94609cc0ca2e27`, as certified with
 //! [FIPS 140-2 certificate 4407](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/4407)
 //! is supported by this crate. Support is enabled by this crate's `fips` feature.
 //!
@@ -52,20 +52,20 @@
 //! $ cargo test --features fips fips::is_enabled
 //! ```
 //!
-//! ## Linking current BoringSSL version with precompiled FIPS-validated module (`bcm.o`)
+//! ## Linking current `BoringSSL` version with precompiled FIPS-validated module (`bcm.o`)
 //!
-//! It's possible to link latest supported version of BoringSSL with FIPS-validated crypto module
+//! It's possible to link latest supported version of `BoringSSL` with FIPS-validated crypto module
 //! (`bcm.o`). To enable this compilation option one should enable `fips-link-precompiled`
 //! compilation feature and provide a `BORING_BSSL_FIPS_PRECOMPILED_BCM_O` env variable with a path to the
 //! precompiled FIPS-validated `bcm.o` module.
 //!
-//! Note that `BORING_BSSL_PRECOMPILED_BCM_O` is never used, as linking BoringSSL with precompiled non-FIPS
+//! Note that `BORING_BSSL_PRECOMPILED_BCM_O` is never used, as linking `BoringSSL` with precompiled non-FIPS
 //! module is not supported.
 //!
 //! ## Linking with a C++ standard library
 //!
 //! Recent versions of boringssl require some C++ standard library features, so btls needs to link
-//! with a STL implementation. This can be controlled using the BORING_BSSL_RUST_CPPLIB variable. If
+//! with a STL implementation. This can be controlled using the `BORING_BSSL_RUST_CPPLIB` variable. If
 //! no library is specified, libc++ is used on macOS and iOS whereas libstdc++ is used on other Unix
 //! systems.
 //!
@@ -78,8 +78,8 @@
 //!
 //! ## Post-quantum cryptography
 //!
-//! Upstream BoringSSL supports and enables `X25519MLKEM768`, the post-quantum key agreement from
-//! RFC 10024, by default. btls patches BoringSSL to additionally support:
+//! Upstream `BoringSSL` supports and enables `X25519MLKEM768`, the post-quantum key agreement from
+//! RFC 10024, by default. btls patches `BoringSSL` to additionally support:
 //!
 //! - `X25519Kyber768Draft00`, under codepoint `0x6399`. This is the pre-standard predecessor of
 //!   `X25519MLKEM768`. Not recommended; it's being phased out.
@@ -152,6 +152,21 @@ pub mod symm;
 pub mod version;
 pub mod x509;
 
+#[cfg(feature = "rpk")]
+const fn native_u8(value: c_int) -> u8 {
+    let [low, high0, high1, high2] = value.to_le_bytes();
+    // Native TLS certificate-type constants must fit without truncation.
+    assert!(high0 == 0 && high1 == 0 && high2 == 0);
+    low
+}
+
+const fn native_u16(value: c_int) -> u16 {
+    let [low, high, upper_low, upper_high] = value.to_le_bytes();
+    // These conversions occur only in compile-time native protocol constants.
+    assert!(upper_low == 0 && upper_high == 0);
+    u16::from_le_bytes([low, high])
+}
+
 fn cvt_p<T>(r: *mut T) -> Result<*mut T, ErrorStack> {
     if r.is_null() {
         Err(ErrorStack::get())
@@ -217,8 +232,9 @@ unsafe extern "C" fn free_data_box<T>(
     _argp: *mut c_void,
 ) {
     if !ptr.is_null() {
-        unsafe {
-            drop(Box::<T>::from_raw(ptr.cast::<T>()));
-        }
+        // SAFETY: the typed index registered this exact Box<T> destructor;
+        // the native container transfers its owned allocation on cleanup.
+        // Contain any application destructor panic at the C ABI boundary.
+        let _ = crate::util::catch_native(|| unsafe { drop(Box::<T>::from_raw(ptr.cast::<T>())) });
     }
 }

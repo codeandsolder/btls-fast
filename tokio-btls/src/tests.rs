@@ -577,14 +577,39 @@ async fn stack_overflow_goes_out_in_the_same_write() {
 }
 
 #[tokio::test]
+async fn full_aead_record_falls_back_to_buffer_without_extra_write() {
+    // A maximum-size AEAD record needs more than the 16 KiB stack scratch.
+    // Falling back must still seal and transmit it in one transport poll.
+    let (mut client, mut server) = tls_pair().await;
+    let mut cx = Context::from_waker(Waker::noop());
+    let data: Vec<u8> = (0..MAX_RECORD).map(|i| (i % 251) as u8).collect();
+
+    let limits = client.ssl().seal_app_data_limits();
+    let res = Pin::new(&mut client).poll_write(&mut cx, &data);
+    assert!(matches!(res, Poll::Ready(Ok(MAX_RECORD))), "{res:?}");
+    if let Some(limits) = limits {
+        assert!(limits.sealed_len(MAX_RECORD).unwrap() > SEAL_STACK_LEN);
+        assert_eq!(client.get_ref().polls, 1);
+        assert!(client.0.get_ref().write_buf.is_empty());
+    }
+
+    client.shutdown().await.unwrap();
+    let mut received = Vec::new();
+    server.read_to_end(&mut received).await.unwrap();
+    assert_eq!(received, data);
+}
+
+#[tokio::test]
 async fn first_server_write_carries_tickets() {
     let tickets = Arc::new(AtomicUsize::new(0));
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_session_cache_mode(SslSessionCacheMode::CLIENT);
     let counter = tickets.clone();
-    connector.set_new_session_callback(move |_, _| {
-        counter.fetch_add(1, Ordering::Relaxed);
-    });
+    connector
+        .set_new_session_callback(move |_, _| {
+            counter.fetch_add(1, Ordering::Relaxed);
+        })
+        .unwrap();
     let (mut client, mut server) = tls_pair_from(connector, SslVersion::TLS1_3, None, None).await;
 
     // The server defers its tickets to the first write, which seals them ahead of the data.
@@ -789,7 +814,9 @@ async fn early_data_budget_keeps_full_records() {
     connector.set_early_data_enabled(true);
     connector.set_ca_file("tests/cert.pem").unwrap();
     let latest = session.clone();
-    connector.set_client_session_callback(move |_, new| *latest.lock().unwrap() = Some(new));
+    connector
+        .set_client_session_callback(move |_, new| *latest.lock().unwrap() = Some(new))
+        .unwrap();
     let connector = connector.build();
 
     // The first connection leaves a ticket that allows early data.

@@ -11,7 +11,6 @@
 //! rand_bytes(&mut buf).unwrap();
 //! ```
 use crate::ffi;
-use libc::c_int;
 
 use crate::cvt;
 use crate::error::ErrorStack;
@@ -32,12 +31,15 @@ use crate::error::ErrorStack;
 /// ```
 ///
 /// [`RAND_bytes`]: https://www.openssl.org/docs/man1.1.0/crypto/RAND_bytes.html
+///
+/// # Errors
+///
+/// Returns an error if the native call reports failure. The current native
+/// implementation aborts if sufficient random data cannot be obtained.
 pub fn rand_bytes(buf: &mut [u8]) -> Result<(), ErrorStack> {
-    unsafe {
-        ffi::init();
-        assert!(buf.len() <= c_int::MAX as usize);
-        cvt(ffi::RAND_bytes(buf.as_mut_ptr(), buf.len()))
-    }
+    ffi::init();
+    // SAFETY: native accepts the full size_t length of this exclusive writable slice.
+    unsafe { cvt(ffi::RAND_bytes(buf.as_mut_ptr(), buf.len())) }
 }
 
 #[cfg(test)]

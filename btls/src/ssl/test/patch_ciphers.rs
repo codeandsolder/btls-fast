@@ -551,7 +551,9 @@ fn boringssl_patch_dhe_ciphers_report_complete_metadata() {
         assert!(!kx_name.is_null());
         assert_eq!(unsafe { CStr::from_ptr(kx_name) }.to_bytes(), b"DHE_RSA");
 
-        let description = cipher.description();
+        let description = cipher
+            .description()
+            .expect("patched cipher has a description");
         assert!(
             description.contains("Kx=DH") && description.contains("Au=RSA"),
             "{} has incomplete metadata: {description}",

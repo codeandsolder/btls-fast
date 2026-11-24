@@ -1,6 +1,6 @@
 use crate::ffi;
 use foreign_types::{ForeignType, ForeignTypeRef};
-use libc::{c_int, c_uint, c_ulong, time_t};
+use libc::{c_int, c_uint, c_ulong};
 use openssl_macros::corresponds;
 use std::net::IpAddr;
 
@@ -62,6 +62,8 @@ impl X509VerifyParam {
     /// Create an X509VerifyParam
     #[corresponds(X509_VERIFY_PARAM_new)]
     pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: the native constructor returns a distinct owned verification
+        // parameter object, or null if allocation fails.
         unsafe {
             ffi::init();
             let handle = cvt_p(ffi::X509_VERIFY_PARAM_new())?;
@@ -71,15 +73,14 @@ impl X509VerifyParam {
 }
 
 impl X509VerifyParamRef {
-    /// Set verification flags.
+    /// Enables the supplied certificate-verification flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native parameter object rejects the flags.
     #[corresponds(X509_VERIFY_PARAM_set_flags)]
-    pub fn set_flags(&mut self, flags: X509VerifyFlags) {
-        self.try_set_flags(flags).expect("use try_set_flags");
-    }
-
-    /// Set verification flags.
-    #[corresponds(X509_VERIFY_PARAM_set_flags)]
-    pub fn try_set_flags(&mut self, flags: X509VerifyFlags) -> Result<(), ErrorStack> {
+    pub fn set_flags(&mut self, flags: X509VerifyFlags) -> Result<(), ErrorStack> {
+        // SAFETY: the native verification parameters are uniquely borrowed.
         unsafe {
             cvt(ffi::X509_VERIFY_PARAM_set_flags(
                 self.as_ptr(),
@@ -88,15 +89,14 @@ impl X509VerifyParamRef {
         }
     }
 
-    /// Clear verification flags.
+    /// Disables the supplied certificate-verification flags.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native parameter object rejects the update.
     #[corresponds(X509_VERIFY_PARAM_clear_flags)]
-    pub fn clear_flags(&mut self, flags: X509VerifyFlags) {
-        self.try_clear_flags(flags).expect("use try_clear_flags");
-    }
-
-    /// Clear verification flags.
-    #[corresponds(X509_VERIFY_PARAM_clear_flags)]
-    pub fn try_clear_flags(&mut self, flags: X509VerifyFlags) -> Result<(), ErrorStack> {
+    pub fn clear_flags(&mut self, flags: X509VerifyFlags) -> Result<(), ErrorStack> {
+        // SAFETY: the native verification parameters are uniquely borrowed.
         unsafe {
             cvt(ffi::X509_VERIFY_PARAM_clear_flags(
                 self.as_ptr(),
@@ -108,6 +108,7 @@ impl X509VerifyParamRef {
     /// Set the host flags.
     #[corresponds(X509_VERIFY_PARAM_set_hostflags)]
     pub fn set_hostflags(&mut self, hostflags: X509CheckFlags) {
+        // SAFETY: the borrowed native parameter object is uniquely writable.
         unsafe {
             ffi::X509_VERIFY_PARAM_set_hostflags(self.as_ptr(), hostflags.bits());
         }
@@ -115,8 +116,9 @@ impl X509VerifyParamRef {
 
     /// Gets verification flags.
     #[corresponds(X509_VERIFY_PARAM_get_flags)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn flags(&self) -> X509VerifyFlags {
+        // SAFETY: the native parameter object stays live for this flag query.
         let bits = unsafe { ffi::X509_VERIFY_PARAM_get_flags(self.as_ptr()) };
         X509VerifyFlags::from_bits_retain(bits)
     }
@@ -124,6 +126,8 @@ impl X509VerifyParamRef {
     /// Set the expected DNS hostname.
     #[corresponds(X509_VERIFY_PARAM_set1_host)]
     pub fn set_host(&mut self, host: &str) -> Result<(), ErrorStack> {
+        // SAFETY: the exclusively borrowed native object copies this
+        // readable hostname. The sentinel NUL handles the zero-length case.
         unsafe {
             // len == 0 means "run strlen" :(
             let raw_host = if host.is_empty() { "\0" } else { host };
@@ -138,6 +142,8 @@ impl X509VerifyParamRef {
     /// Set the expected email address.
     #[corresponds(X509_VERIFY_PARAM_set1_email)]
     pub fn set_email(&mut self, email: &str) -> Result<(), ErrorStack> {
+        // SAFETY: the exclusively borrowed native object copies this
+        // readable address. The sentinel NUL handles the zero-length case.
         unsafe {
             // len == 0 means "run strlen" :(
             let raw_email = if email.is_empty() { "\0" } else { email };
@@ -152,6 +158,8 @@ impl X509VerifyParamRef {
     /// Set the expected IPv4 or IPv6 address.
     #[corresponds(X509_VERIFY_PARAM_set1_ip)]
     pub fn set_ip(&mut self, ip: IpAddr) -> Result<(), ErrorStack> {
+        // SAFETY: the native verifier copies a correctly sized 4- or
+        // 16-byte IP address while the parameter object is exclusively borrowed.
         unsafe {
             let mut buf = [0; 16];
             let len = match ip {
@@ -172,18 +180,18 @@ impl X509VerifyParamRef {
         }
     }
 
-    /// Set the verification time, where time is of type time_t, traditionaly defined as seconds since the epoch
+    /// Set the verification time in seconds since the Unix epoch.
     #[corresponds(X509_VERIFY_PARAM_set_time_posix)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_time(&mut self, time: time_t) {
-        // libc and the C headers can disagree on time_t width on 32-bit musl.
-        // The POSIX entry point takes a fixed-width timestamp on every target.
-        unsafe { ffi::X509_VERIFY_PARAM_set_time_posix(self.as_ptr(), i64::from(time)) }
+    pub fn set_time(&mut self, time: i64) {
+        // SAFETY: The parameter object is live and uniquely borrowed; the
+        // POSIX API takes a fixed-width timestamp on every target.
+        unsafe { ffi::X509_VERIFY_PARAM_set_time_posix(self.as_ptr(), time) }
     }
 
     /// Set the verification depth
     #[corresponds(X509_VERIFY_PARAM_set_depth)]
     pub fn set_depth(&mut self, depth: c_int) {
+        // SAFETY: the native verification parameters are uniquely borrowed.
         unsafe { ffi::X509_VERIFY_PARAM_set_depth(self.as_ptr(), depth) }
     }
 
@@ -192,6 +200,23 @@ impl X509VerifyParamRef {
     /// If a parameter is unset in `src`, the existing value in `self`` is preserved.
     #[corresponds(X509_VERIFY_PARAM_set1)]
     pub fn copy_from(&mut self, src: &Self) -> Result<(), ErrorStack> {
+        // SAFETY: the destination is exclusively borrowed, the source remains
+        // live and immutably borrowed while native copies its parameters.
         unsafe { cvt(ffi::X509_VERIFY_PARAM_set1(self.as_ptr(), src.as_ptr())) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn flags_roundtrip_without_panicking_wrappers() -> Result<(), ErrorStack> {
+        let mut params = X509VerifyParam::new()?;
+        params.set_flags(X509VerifyFlags::CRL_CHECK)?;
+        assert!(params.flags().contains(X509VerifyFlags::CRL_CHECK));
+        params.clear_flags(X509VerifyFlags::CRL_CHECK)?;
+        assert!(!params.flags().contains(X509VerifyFlags::CRL_CHECK));
+        Ok(())
     }
 }

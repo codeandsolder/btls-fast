@@ -63,7 +63,7 @@ fn verify(
 
     store_ctx
         .init(&trusted, cert, &untrusted, |ctx| {
-            configure(ctx.verify_param_mut());
+            configure(ctx.verify_param_mut().unwrap());
             ctx.verify_cert().unwrap();
 
             Ok(ctx.verify_result())

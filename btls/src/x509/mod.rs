@@ -20,7 +20,6 @@ use std::net::IpAddr;
 use std::path::Path;
 use std::ptr;
 use std::str;
-use std::sync::LazyLock;
 
 use crate::asn1::{
     Asn1BitStringRef, Asn1IntegerRef, Asn1Object, Asn1ObjectRef, Asn1StringRef, Asn1TimeRef,
@@ -29,7 +28,7 @@ use crate::asn1::{
 use crate::bio::{MemBio, MemBioSlice};
 use crate::conf::ConfRef;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::{replace_boxed, Index, IndexSlot};
 use crate::hash::{DigestBytes, MessageDigest};
 use crate::nid::Nid;
 use crate::pkey::{HasPrivate, HasPublic, PKey, PKeyRef, Public};
@@ -42,6 +41,18 @@ use crate::x509::verify::{X509CheckFlags, X509VerifyParam, X509VerifyParamRef};
 use crate::{cvt, cvt_n, cvt_p};
 use crate::{ffi, free_data_box};
 
+// Both certificate builders expose the same native version-setting contract.
+macro_rules! version_setter {
+    ($(#[$attr:meta])* $setter:ident) => {
+        $(#[$attr])*
+        #[corresponds($setter)]
+        pub fn set_version(&mut self, version: c_long) -> Result<(), ErrorStack> {
+            // SAFETY: The builder owns a live native object and is exclusively borrowed.
+            unsafe { cvt(ffi::$setter(self.0.as_ptr(), version)) }
+        }
+    };
+}
+
 pub mod extension;
 pub mod store;
 pub mod verify;
@@ -49,14 +60,14 @@ pub mod verify;
 #[cfg(test)]
 mod tests;
 
-static STORE_INDEX: LazyLock<Index<X509StoreContext, store::X509Store>> =
-    LazyLock::new(|| X509StoreContext::new_ex_index().unwrap());
+struct ContextInputs {
+    trust: store::X509Store,
+    cert: X509,
+    chain: Stack<X509>,
+}
 
-static CERT_INDEX: LazyLock<Index<X509StoreContext, X509>> =
-    LazyLock::new(|| X509StoreContext::new_ex_index().unwrap());
-
-static CERT_CHAIN_INDEX: LazyLock<Index<X509StoreContext, Stack<X509>>> =
-    LazyLock::new(|| X509StoreContext::new_ex_index().unwrap());
+static CONTEXT_INPUTS_INDEX: IndexSlot<X509StoreContext, ContextInputs> =
+    IndexSlot::new(X509StoreContext::new_ex_index);
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::X509_STORE_CTX;
@@ -67,19 +78,13 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl X509StoreContext {
-    /// Returns the index which can be used to obtain a reference to the `Ssl` associated with a
-    /// context.
-    #[corresponds(SSL_get_ex_data_X509_STORE_CTX_idx)]
-    pub fn ssl_idx() -> Result<Index<X509StoreContext, SslRef>, ErrorStack> {
-        unsafe { cvt_n(ffi::SSL_get_ex_data_X509_STORE_CTX_idx()).map(|idx| Index::from_raw(idx)) }
-    }
-
     /// Creates a new `X509StoreContext` instance.
     #[corresponds(X509_STORE_CTX_new)]
-    pub fn new() -> Result<X509StoreContext, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: The native initializer returns an owned context or null; `cvt_p` rejects null before wrapping ownership.
         unsafe {
             ffi::init();
-            cvt_p(ffi::X509_STORE_CTX_new()).map(|p| X509StoreContext::from_ptr(p))
+            cvt_p(ffi::X509_STORE_CTX_new()).map(|p| Self::from_ptr(p))
         }
     }
 
@@ -88,10 +93,11 @@ impl X509StoreContext {
     /// Each invocation of this function is guaranteed to return a distinct index. These can be used
     /// to store data in the context that can be retrieved later by callbacks, for example.
     #[corresponds(SSL_CTX_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<X509StoreContext, T>, ErrorStack>
+    pub fn new_ex_index<T>() -> Result<Index<Self, T>, ErrorStack>
     where
         T: 'static + Sync + Send,
     {
+        // SAFETY: The global index allocator receives a matching typed free callback and yields a validated nonnegative slot.
         unsafe {
             ffi::init();
             let idx = cvt_n(get_new_x509_store_ctx_idx(Some(free_data_box::<T>)))?;
@@ -101,10 +107,33 @@ impl X509StoreContext {
 }
 
 impl X509StoreContextRef {
-    /// Returns application data pertaining to an `X509` store context.
+    /// Returns the SSL connection associated with a native certificate
+    /// verification callback, if present.
+    ///
+    /// The native reserved slot borrows the connection and does not own a
+    /// boxed application value; it must never expose mutable SSL access.
+    #[must_use = "Use the associated connection to inspect verification context."]
+    pub fn ssl(&self) -> Option<&SslRef> {
+        // SAFETY: BoringSSL reserves this index for a borrowed live SSL
+        // during certificate verification; no safe setter can access it.
+        unsafe {
+            let ptr = ffi::X509_STORE_CTX_get_ex_data(
+                self.as_ptr(),
+                ffi::SSL_get_ex_data_X509_STORE_CTX_idx(),
+            );
+            SslRef::from_const_ptr_opt(ptr.cast())
+        }
+    }
+
+    /// Returns application data pertaining to this certificate store context.
     #[corresponds(X509_STORE_CTX_get_ex_data)]
-    #[must_use]
-    pub fn ex_data<T>(&self, index: Index<X509StoreContext, T>) -> Option<&T> {
+    #[must_use = "Use the returned application data, or handle an empty slot."]
+    pub fn ex_data<T: 'static + Send + Sync>(
+        &self,
+        index: Index<X509StoreContext, T>,
+    ) -> Option<&T> {
+        // SAFETY: index identifies a registered boxed T; the native object
+        // keeps the allocation alive throughout the shared borrow.
         unsafe {
             ffi::X509_STORE_CTX_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
@@ -112,9 +141,14 @@ impl X509StoreContextRef {
         }
     }
 
-    /// Returns a mutable reference to the extra data at the specified index.
+    /// Returns a mutable reference to registered application data.
     #[corresponds(X509_STORE_CTX_get_ex_data)]
-    pub fn ex_data_mut<T>(&mut self, index: Index<X509StoreContext, T>) -> Option<&mut T> {
+    pub fn ex_data_mut<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<X509StoreContext, T>,
+    ) -> Option<&mut T> {
+        // SAFETY: exclusive context access guarantees exclusive application
+        // data access; reserved native borrowed-pointer slots are excluded.
         unsafe {
             ffi::X509_STORE_CTX_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
@@ -122,35 +156,43 @@ impl X509StoreContextRef {
         }
     }
 
-    /// Sets or overwrites the extra data at the specified index.
+    /// Sets or overwrites application data at a registered extra-data index.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `Ssl::new_ex_index` method to create an `Index`.
+    /// # Errors
+    ///
+    /// The native container cannot allocate the slot.
     #[corresponds(X509_STORE_CTX_set_ex_data)]
-    pub fn set_ex_data<T>(&mut self, index: Index<X509StoreContext, T>, data: T) {
-        if let Some(old) = self.ex_data_mut(index) {
-            *old = data;
-
-            return;
-        }
-
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the native extra-data setter mutates the context; exclusive access is required"
+    )]
+    pub fn set_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<X509StoreContext, T>,
+        data: T,
+    ) -> Result<(), ErrorStack> {
+        let ctx = self.as_ptr();
+        // SAFETY: the exclusive context and typed owned index establish the
+        // matching boxed slot; the native setter accepts ownership on success.
         unsafe {
-            let data = Box::new(data);
-
-            ffi::X509_STORE_CTX_set_ex_data(
-                self.as_ptr(),
-                index.as_raw(),
-                Box::into_raw(data).cast(),
-            );
+            replace_boxed(
+                ffi::X509_STORE_CTX_get_ex_data(ctx, index.as_raw()),
+                data,
+                |ptr| cvt(ffi::X509_STORE_CTX_set_ex_data(ctx, index.as_raw(), ptr)),
+            )?;
         }
+        Ok(())
     }
 
     /// Returns the verify result of the context.
     #[corresponds(X509_STORE_CTX_get_error)]
     pub fn verify_result(&self) -> X509VerifyResult {
+        // SAFETY: The live store context returns an integer error code; decoding it does not borrow native storage.
         unsafe { X509VerifyError::from_raw(ffi::X509_STORE_CTX_get_error(self.as_ptr())) }
     }
+}
 
+impl X509StoreContext {
     /// Initializes this context with the given certificate, certificates chain and certificate
     /// store. After initializing the context, the `with_context` closure is called with the prepared
     /// context. As long as the closure is running, the context stays initialized and can be used
@@ -179,12 +221,14 @@ impl X509StoreContextRef {
 
         impl Drop for Cleanup<'_> {
             fn drop(&mut self) {
+                // SAFETY: The guard owns the initialized store context; native cleanup runs exactly once on scope exit.
                 unsafe {
                     ffi::X509_STORE_CTX_cleanup(self.0.as_ptr());
                 }
             }
         }
 
+        // SAFETY: The borrowed trust store, certificate and chain remain live throughout the callback and the scoped cleanup guard.
         unsafe {
             let cleanup = Cleanup(self);
 
@@ -206,47 +250,77 @@ impl X509StoreContextRef {
     /// * `cert` - The certificate that should be verified.
     /// * `cert_chain` - The certificates chain.
     #[corresponds(X509_STORE_CTX_init)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the native context is reinitialized in place and must be exclusively borrowed"
+    )]
     pub fn reset_with_context_data(
         &mut self,
         trust: store::X509Store,
         cert: X509,
         cert_chain: Stack<X509>,
     ) -> Result<(), ErrorStack> {
+        // Allocate the typed slot and owner before modifying native context.
+        let index = CONTEXT_INPUTS_INDEX.register()?;
+        let inputs = Box::new(ContextInputs {
+            trust,
+            cert,
+            chain: cert_chain,
+        });
+        let ctx = self.as_ptr();
+        // SAFETY: self owns the context; inputs remain alive until the
+        // native initialization and installation both succeed or are cleaned up.
         unsafe {
-            if let Err(e) = cvt(ffi::X509_STORE_CTX_init(
-                self.as_ptr(),
-                trust.as_ptr(),
-                cert.as_ptr(),
-                cert_chain.as_ptr(),
+            cvt(ffi::X509_STORE_CTX_init(
+                ctx,
+                inputs.trust.as_ptr(),
+                inputs.cert.as_ptr(),
+                inputs.chain.as_ptr(),
+            ))?;
+            let owner = Box::into_raw(inputs);
+            if let Err(error) = cvt(ffi::X509_STORE_CTX_set_ex_data(
+                ctx,
+                index.as_raw(),
+                owner.cast(),
             )) {
-                ffi::X509_STORE_CTX_cleanup(self.as_ptr());
-
-                return Err(e);
+                ffi::X509_STORE_CTX_cleanup(ctx);
+                drop(Box::from_raw(owner));
+                return Err(error);
             }
         }
-
-        self.set_ex_data(*STORE_INDEX, trust);
-        self.set_ex_data(*CERT_INDEX, cert);
-        self.set_ex_data(*CERT_CHAIN_INDEX, cert_chain);
-
         Ok(())
     }
+}
 
+impl X509StoreContextRef {
     /// Returns a reference to the X509 verification configuration.
     #[corresponds(X509_STORE_CTX_get0_param)]
-    pub fn verify_param(&mut self) -> &X509VerifyParamRef {
-        unsafe { X509VerifyParamRef::from_ptr(ffi::X509_STORE_CTX_get0_param(self.as_ptr())) }
+    #[must_use = "Inspect or retain the borrowed verification parameters."]
+    pub fn verify_param(&self) -> Option<&X509VerifyParamRef> {
+        // SAFETY: the parameter, if initialized, is owned by this context.
+        unsafe {
+            X509VerifyParamRef::from_const_ptr_opt(ffi::X509_STORE_CTX_get0_param(self.as_ptr()))
+        }
     }
 
     /// Returns a mutable reference to the X509 verification configuration.
     #[corresponds(X509_STORE_CTX_get0_param)]
-    pub fn verify_param_mut(&mut self) -> &mut X509VerifyParamRef {
-        unsafe { X509VerifyParamRef::from_ptr_mut(ffi::X509_STORE_CTX_get0_param(self.as_ptr())) }
+    pub fn verify_param_mut(&mut self) -> Option<&mut X509VerifyParamRef> {
+        // SAFETY: the parameter, if initialized, is uniquely borrowed
+        // through this exclusive context reference.
+        let ptr = unsafe { ffi::X509_STORE_CTX_get0_param(self.as_ptr()) };
+        if ptr.is_null() {
+            None
+        } else {
+            // SAFETY: non-null parameter remains owned by the borrowed context.
+            Some(unsafe { X509VerifyParamRef::from_ptr_mut(ptr) })
+        }
     }
 
     /// Sets the X509 verification configuration.
     #[corresponds(X509_STORE_CTX_set0_param)]
     pub fn set_verify_param(&mut self, param: X509VerifyParam) {
+        // SAFETY: The native setter takes ownership of the consumed verification parameter; the context is exclusively borrowed.
         unsafe { ffi::X509_STORE_CTX_set0_param(self.as_ptr(), param.into_ptr()) }
     }
 
@@ -258,19 +332,23 @@ impl X509StoreContextRef {
     /// This will only work inside of a call to `init`.
     #[corresponds(X509_verify_cert)]
     pub fn verify_cert(&mut self) -> Result<bool, ErrorStack> {
+        if self.verify_param().is_none() {
+            return Err(ErrorStack::internal_error_str(
+                "certificate context is uninitialized",
+            ));
+        }
+        // SAFETY: the live native context has initialized verification parameters.
         unsafe { cvt_n(ffi::X509_verify_cert(self.as_ptr())).map(|n| n != 0) }
     }
 
     /// Set the verify result of the context.
     #[corresponds(X509_STORE_CTX_set_error)]
     pub fn set_error(&mut self, result: X509VerifyResult) {
+        // SAFETY: The context remains live while updating its native verification result with an encoded error constant.
         unsafe {
             ffi::X509_STORE_CTX_set_error(
                 self.as_ptr(),
-                result
-                    .err()
-                    .as_ref()
-                    .map_or(ffi::X509_V_OK, X509VerifyError::as_raw),
+                result.err().map_or(ffi::X509_V_OK, X509VerifyError::as_raw),
             );
         }
     }
@@ -278,8 +356,9 @@ impl X509StoreContextRef {
     /// Returns a reference to the certificate which caused the error or None if
     /// no certificate is relevant to the error.
     #[corresponds(X509_STORE_CTX_get_current_cert)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn current_cert(&self) -> Option<&X509Ref> {
+        // SAFETY: The native getter returns a borrowed certificate (or null) whose lifetime is bounded by this context.
         unsafe {
             let ptr = ffi::X509_STORE_CTX_get_current_cert(self.as_ptr());
             if ptr.is_null() {
@@ -295,15 +374,18 @@ impl X509StoreContextRef {
     /// entity certificate, one if it is the certificate which signed the end
     /// entity certificate and so on.
     #[corresponds(X509_STORE_CTX_get_error_depth)]
-    #[must_use]
-    pub fn error_depth(&self) -> u32 {
-        unsafe { ffi::X509_STORE_CTX_get_error_depth(self.as_ptr()) as u32 }
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub fn error_depth(&self) -> Option<u32> {
+        // SAFETY: the live context returns an integer depth; a negative native
+        // value is not a valid depth and must not wrap to an unsigned value.
+        u32::try_from(unsafe { ffi::X509_STORE_CTX_get_error_depth(self.as_ptr()) }).ok()
     }
 
     /// Returns a reference to a complete valid `X509` certificate chain.
     #[corresponds(X509_STORE_CTX_get0_chain)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn chain(&self) -> Option<&StackRef<X509>> {
+        // SAFETY: The returned native chain is borrowed from this context, checked for null and not freed independently.
         unsafe {
             let chain = X509_STORE_CTX_get0_chain(self.as_ptr());
 
@@ -318,8 +400,9 @@ impl X509StoreContextRef {
     /// Returns a reference to the `X509` certificates used to initialize the
     /// [`X509StoreContextRef`].
     #[corresponds(X509_STORE_CTX_get0_untrusted)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn untrusted(&self) -> Option<&StackRef<X509>> {
+        // SAFETY: The untrusted certificate stack belongs to the live context; null is checked before creating a shared reference.
         unsafe {
             let certs = ffi::X509_STORE_CTX_get0_untrusted(self.as_ptr());
 
@@ -334,8 +417,9 @@ impl X509StoreContextRef {
     /// Returns a reference to the certificate being verified.
     /// May return None if a raw public key is being verified.
     #[corresponds(X509_STORE_CTX_get0_cert)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn cert(&self) -> Option<&X509Ref> {
+        // SAFETY: The native context retains the certificate; a non-null pointer is borrowed only for the context lifetime.
         unsafe {
             let ptr = ffi::X509_STORE_CTX_get0_cert(self.as_ptr());
             if ptr.is_null() {
@@ -353,38 +437,37 @@ pub struct X509Builder(X509);
 impl X509Builder {
     /// Creates a new builder.
     #[corresponds(X509_new)]
-    pub fn new() -> Result<X509Builder, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: Native allocation returns an owned certificate or null; the checked pointer transfers to `X509`.
         unsafe {
             ffi::init();
-            cvt_p(ffi::X509_new()).map(|p| X509Builder(X509::from_ptr(p)))
+            cvt_p(ffi::X509_new()).map(|p| Self(X509::from_ptr(p)))
         }
     }
 
     /// Sets the notAfter constraint on the certificate.
     #[corresponds(X509_set1_notAfter)]
     pub fn set_not_after(&mut self, not_after: &Asn1TimeRef) -> Result<(), ErrorStack> {
+        // SAFETY: The builder uniquely owns the certificate, and the borrowed ASN.1 timestamp remains valid during copying.
         unsafe { cvt(X509_set1_notAfter(self.0.as_ptr(), not_after.as_ptr())) }
     }
 
     /// Sets the notBefore constraint on the certificate.
     #[corresponds(X509_set1_notBefore)]
     pub fn set_not_before(&mut self, not_before: &Asn1TimeRef) -> Result<(), ErrorStack> {
+        // SAFETY: The builder uniquely owns the certificate, and the borrowed ASN.1 timestamp remains valid during copying.
         unsafe { cvt(X509_set1_notBefore(self.0.as_ptr(), not_before.as_ptr())) }
     }
 
-    /// Sets the version of the certificate.
-    ///
-    /// Note that the version is zero-indexed; that is, a certificate corresponding to version 3 of
-    /// the X.509 standard should pass `2` to this method.
-    #[corresponds(X509_set_version)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_version(&mut self, version: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::X509_set_version(self.0.as_ptr(), version.into())) }
-    }
+    version_setter!(
+        /// Sets the zero-indexed version of the certificate (2 for X.509 v3).
+        X509_set_version
+    );
 
     /// Sets the serial number of the certificate.
     #[corresponds(X509_set_serialNumber)]
     pub fn set_serial_number(&mut self, serial_number: &Asn1IntegerRef) -> Result<(), ErrorStack> {
+        // SAFETY: Both the owned certificate builder and borrowed ASN.1 serial are live through the native setter.
         unsafe {
             cvt(ffi::X509_set_serialNumber(
                 self.0.as_ptr(),
@@ -396,6 +479,7 @@ impl X509Builder {
     /// Sets the issuer name of the certificate.
     #[corresponds(X509_set_issuer_name)]
     pub fn set_issuer_name(&mut self, issuer_name: &X509NameRef) -> Result<(), ErrorStack> {
+        // SAFETY: The issuer-name reference remains live while the native setter copies it into the owned certificate.
         unsafe {
             cvt(ffi::X509_set_issuer_name(
                 self.0.as_ptr(),
@@ -417,13 +501,14 @@ impl X509Builder {
     /// x509_name.append_entry_by_text("ST", "CA").unwrap();
     /// x509_name.append_entry_by_text("O", "Some organization").unwrap();
     /// x509_name.append_entry_by_text("CN", "www.example.com").unwrap();
-    /// let x509_name = x509_name.build();
+    /// let x509_name = x509_name.build().unwrap();
     ///
     /// let mut x509 = btls::x509::X509::builder().unwrap();
     /// x509.set_subject_name(&x509_name).unwrap();
     /// ```
     #[corresponds(X509_set_subject_name)]
     pub fn set_subject_name(&mut self, subject_name: &X509NameRef) -> Result<(), ErrorStack> {
+        // SAFETY: The subject-name reference remains live while the native setter copies it into the owned certificate.
         unsafe {
             cvt(ffi::X509_set_subject_name(
                 self.0.as_ptr(),
@@ -438,6 +523,7 @@ impl X509Builder {
     where
         T: HasPublic,
     {
+        // SAFETY: The public-key reference remains valid while the native setter takes its own reference.
         unsafe { cvt(ffi::X509_set_pubkey(self.0.as_ptr(), key.as_ptr())) }
     }
 
@@ -445,22 +531,20 @@ impl X509Builder {
     ///
     /// Set `issuer` to `None` if the certificate will be self-signed.
     #[corresponds(X509V3_set_ctx)]
-    #[must_use]
+    #[must_use = "Use the returned context when constructing certificate extensions."]
     pub fn x509v3_context<'a>(
         &'a self,
         issuer: Option<&'a X509Ref>,
         conf: Option<&'a ConfRef>,
     ) -> X509v3Context<'a> {
+        // SAFETY: The local native context is initialized in place; all issuer, subject and config pointers are borrowed for the returned context lifetime.
         unsafe {
             let mut ctx = mem::zeroed();
 
-            let issuer = match issuer {
-                Some(issuer) => issuer.as_ptr(),
-                None => self.0.as_ptr(),
-            };
+            let issuer = issuer.map_or_else(|| self.0.as_ptr(), ForeignTypeRef::as_ptr);
             let subject = self.0.as_ptr();
             ffi::X509V3_set_ctx(
-                &mut ctx,
+                &raw mut ctx,
                 issuer,
                 subject,
                 ptr::null_mut(),
@@ -470,7 +554,7 @@ impl X509Builder {
 
             // nodb case taken care of since we zeroed ctx above
             if let Some(conf) = conf {
-                ffi::X509V3_set_nconf(&mut ctx, conf.as_ptr());
+                ffi::X509V3_set_nconf(&raw mut ctx, conf.as_ptr());
             }
 
             X509v3Context(ctx, PhantomData)
@@ -480,6 +564,7 @@ impl X509Builder {
     /// Adds an X509 extension value to the certificate.
     #[corresponds(X509_add_ext)]
     pub fn append_extension(&mut self, extension: &X509ExtensionRef) -> Result<(), ErrorStack> {
+        // SAFETY: The builder exclusively owns its certificate and the input extension stays live during native copying.
         unsafe {
             cvt(ffi::X509_add_ext(self.0.as_ptr(), extension.as_ptr(), -1))?;
             Ok(())
@@ -492,11 +577,12 @@ impl X509Builder {
     where
         T: HasPrivate,
     {
+        // SAFETY: The private key and digest handles remain live for the synchronous native signature operation.
         unsafe { cvt(ffi::X509_sign(self.0.as_ptr(), key.as_ptr(), hash.as_ptr())) }
     }
 
     /// Consumes the builder, returning the certificate.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> X509 {
         self.0
     }
@@ -513,61 +599,47 @@ foreign_type_and_impl_send_sync! {
 impl X509Ref {
     /// Returns this certificate's subject name.
     #[corresponds(X509_get_subject_name)]
-    #[must_use]
-    pub fn subject_name(&self) -> &X509NameRef {
-        unsafe {
-            let name = ffi::X509_get_subject_name(self.as_ptr());
-            X509NameRef::from_const_ptr_opt(name).expect("issuer name must not be null")
-        }
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
+    pub fn subject_name(&self) -> Option<&X509NameRef> {
+        // SAFETY: the name, when present, is borrowed from this live certificate.
+        unsafe { X509NameRef::from_const_ptr_opt(ffi::X509_get_subject_name(self.as_ptr())) }
     }
 
     /// Returns the hash of the certificates subject
     #[corresponds(X509_subject_name_hash)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_name_hash(&self) -> u32 {
+        // SAFETY: The native hash is a scalar computed from the live certificate and does not expose a pointer.
         unsafe { ffi::X509_subject_name_hash(self.as_ptr()) as u32 }
     }
 
     /// Returns this certificate's subject alternative name entries, if they exist.
     #[corresponds(X509_get_ext_d2i)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_alt_names(&self) -> Option<Stack<GeneralName>> {
-        unsafe {
-            let stack = ffi::X509_get_ext_d2i(
-                self.as_ptr(),
-                ffi::NID_subject_alt_name,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
-            if stack.is_null() {
-                None
-            } else {
-                Some(Stack::from_ptr(stack.cast()))
-            }
-        }
+        self.alt_names(ffi::NID_subject_alt_name)
     }
 
     /// Returns this certificate's issuer name.
     #[corresponds(X509_get_issuer_name)]
-    #[must_use]
-    pub fn issuer_name(&self) -> &X509NameRef {
-        unsafe {
-            let name = ffi::X509_get_issuer_name(self.as_ptr());
-            X509NameRef::from_const_ptr_opt(name).expect("issuer name must not be null")
-        }
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
+    pub fn issuer_name(&self) -> Option<&X509NameRef> {
+        // SAFETY: the issuer name, when present, is borrowed from this live certificate.
+        unsafe { X509NameRef::from_const_ptr_opt(ffi::X509_get_issuer_name(self.as_ptr())) }
     }
 
     /// Returns this certificate's issuer alternative name entries, if they exist.
     #[corresponds(X509_get_ext_d2i)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn issuer_alt_names(&self) -> Option<Stack<GeneralName>> {
+        self.alt_names(ffi::NID_issuer_alt_name)
+    }
+
+    fn alt_names(&self, nid: c_int) -> Option<Stack<GeneralName>> {
+        // SAFETY: Both call sites supply a native GENERAL_NAMES extension NID,
+        // and the decoder transfers ownership of the stack and its elements.
         unsafe {
-            let stack = ffi::X509_get_ext_d2i(
-                self.as_ptr(),
-                ffi::NID_issuer_alt_name,
-                ptr::null_mut(),
-                ptr::null_mut(),
-            );
+            let stack = ffi::X509_get_ext_d2i(self.as_ptr(), nid, ptr::null_mut(), ptr::null_mut());
             if stack.is_null() {
                 None
             } else {
@@ -578,8 +650,9 @@ impl X509Ref {
 
     /// Returns this certificate's subject key id, if it exists.
     #[corresponds(X509_get0_subject_key_id)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_key_id(&self) -> Option<&Asn1StringRef> {
+        // SAFETY: The returned subject key identifier is a borrowed embedded ASN.1 string, checked for null.
         unsafe {
             let data = ffi::X509_get0_subject_key_id(self.as_ptr());
             Asn1StringRef::from_const_ptr_opt(data)
@@ -588,8 +661,9 @@ impl X509Ref {
 
     /// Returns this certificate's authority key id, if it exists.
     #[corresponds(X509_get0_authority_key_id)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn authority_key_id(&self) -> Option<&Asn1StringRef> {
+        // SAFETY: The returned authority key identifier is borrowed from the certificate and checked for null.
         unsafe {
             let data = ffi::X509_get0_authority_key_id(self.as_ptr());
             Asn1StringRef::from_const_ptr_opt(data)
@@ -598,6 +672,7 @@ impl X509Ref {
 
     #[corresponds(X509_get_pubkey)]
     pub fn public_key(&self) -> Result<PKey<Public>, ErrorStack> {
+        // SAFETY: The native public-key getter transfers a reference to the caller, checked for null before taking ownership.
         unsafe {
             let pkey = cvt_p(ffi::X509_get_pubkey(self.as_ptr()))?;
             Ok(PKey::from_ptr(pkey))
@@ -607,6 +682,7 @@ impl X509Ref {
     /// Returns a digest of the DER representation of the certificate.
     #[corresponds(X509_digest)]
     pub fn digest(&self, hash_type: MessageDigest) -> Result<DigestBytes, ErrorStack> {
+        // SAFETY: The digest buffer is fully allocated and the writable output-length slot is valid for the synchronous native call.
         unsafe {
             let mut digest = DigestBytes {
                 buf: [0; ffi::EVP_MAX_MD_SIZE as usize],
@@ -617,7 +693,7 @@ impl X509Ref {
                 self.as_ptr(),
                 hash_type.as_ptr(),
                 digest.buf.as_mut_ptr(),
-                &mut len,
+                &raw mut len,
             ))?;
             digest.len = try_int(len)?;
 
@@ -625,15 +701,11 @@ impl X509Ref {
         }
     }
 
-    #[deprecated(since = "0.10.9", note = "renamed to digest")]
-    pub fn fingerprint(&self, hash_type: MessageDigest) -> Result<Vec<u8>, ErrorStack> {
-        self.digest(hash_type).map(|b| b.to_vec())
-    }
-
     /// Returns the certificate's Not After validity period.
     #[corresponds(X509_getm_notAfter)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn not_after(&self) -> &Asn1TimeRef {
+        // SAFETY: The native timestamp pointer is embedded in this live certificate and validated before borrowing.
         unsafe {
             let date = X509_getm_notAfter(self.as_ptr());
             assert!(!date.is_null());
@@ -643,8 +715,9 @@ impl X509Ref {
 
     /// Returns the certificate's Not Before validity period.
     #[corresponds(X509_getm_notBefore)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn not_before(&self) -> &Asn1TimeRef {
+        // SAFETY: The native timestamp pointer is embedded in this live certificate and validated before borrowing.
         unsafe {
             let date = X509_getm_notBefore(self.as_ptr());
             assert!(!date.is_null());
@@ -654,11 +727,12 @@ impl X509Ref {
 
     /// Returns the certificate's signature
     #[corresponds(X509_get0_signature)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn signature(&self) -> &Asn1BitStringRef {
+        // SAFETY: The native call writes to an initialized output pointer slot and borrows the embedded signature from this certificate.
         unsafe {
             let mut signature = ptr::null();
-            X509_get0_signature(&mut signature, ptr::null_mut(), self.as_ptr());
+            X509_get0_signature(&raw mut signature, ptr::null_mut(), self.as_ptr());
             assert!(!signature.is_null());
             Asn1BitStringRef::from_ptr(signature.cast_mut())
         }
@@ -666,11 +740,12 @@ impl X509Ref {
 
     /// Returns the certificate's signature algorithm.
     #[corresponds(X509_get0_signature)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn signature_algorithm(&self) -> &X509AlgorithmRef {
+        // SAFETY: The native call writes to an initialized output pointer slot and borrows the embedded signature algorithm.
         unsafe {
             let mut algor = ptr::null();
-            X509_get0_signature(ptr::null_mut(), &mut algor, self.as_ptr());
+            X509_get0_signature(ptr::null_mut(), &raw mut algor, self.as_ptr());
             assert!(!algor.is_null());
             X509AlgorithmRef::from_ptr(algor.cast_mut())
         }
@@ -680,12 +755,23 @@ impl X509Ref {
     /// Access field.
     #[corresponds(X509_get1_ocsp)]
     pub fn ocsp_responders(&self) -> Result<Stack<OpensslString>, ErrorStack> {
-        unsafe { cvt_p(ffi::X509_get1_ocsp(self.as_ptr())).map(|p| Stack::from_ptr(p)) }
+        // SAFETY: The native API transfers ownership of the stack and each
+        // NUL-terminated string. Validate UTF-8 before exposing OpensslString.
+        let strings: Stack<OpensslString> =
+            unsafe { Stack::from_ptr(cvt_p(ffi::X509_get1_ocsp(self.as_ptr()))?) };
+        for string in &strings {
+            // SAFETY: Each native element is a live, allocated C string.
+            unsafe { CStr::from_ptr(string.as_ptr()) }
+                .to_str()
+                .map_err(ErrorStack::internal_error)?;
+        }
+        Ok(strings)
     }
 
     /// Checks that this certificate issued `subject`.
     #[corresponds(X509_check_issued)]
-    pub fn issued(&self, subject: &X509Ref) -> X509VerifyResult {
+    pub fn issued(&self, subject: &Self) -> X509VerifyResult {
+        // SAFETY: Both certificate references remain live throughout the native issuer/subject compatibility query.
         unsafe {
             let r = ffi::X509_check_issued(self.as_ptr(), subject.as_ptr());
             X509VerifyError::from_raw(r)
@@ -703,13 +789,15 @@ impl X509Ref {
     where
         T: HasPublic,
     {
+        // SAFETY: The certificate and public key references remain live during signature verification; the integer result is checked.
         unsafe { cvt_n(ffi::X509_verify(self.as_ptr(), key.as_ptr())).map(|n| n != 0) }
     }
 
     /// Returns this certificate's serial number.
     #[corresponds(X509_get_serialNumber)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn serial_number(&self) -> &Asn1IntegerRef {
+        // SAFETY: The serial-number pointer is embedded in this live certificate and checked before borrowing.
         unsafe {
             let r = ffi::X509_get_serialNumber(self.as_ptr());
             assert!(!r.is_null());
@@ -721,6 +809,10 @@ impl X509Ref {
     ///
     /// This uses the default hostname matching behavior. Use
     /// [`X509Ref::check_host_with_flags`] to customize it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a native error for an invalid host string or certificate matcher failure.
     pub fn check_host(&self, host: &str) -> Result<bool, ErrorStack> {
         self.check_host_with_flags(host, X509CheckFlags::empty())
     }
@@ -732,6 +824,7 @@ impl X509Ref {
         host: &str,
         flags: X509CheckFlags,
     ) -> Result<bool, ErrorStack> {
+        // SAFETY: The host byte slice and certificate stay live for the call; BoringSSL receives the exact host length.
         unsafe {
             cvt_n(ffi::X509_check_host(
                 self.as_ptr(),
@@ -748,6 +841,7 @@ impl X509Ref {
     pub fn check_ip_asc(&self, address: &str) -> Result<bool, ErrorStack> {
         let c_str = CString::new(address).map_err(ErrorStack::internal_error)?;
 
+        // SAFETY: The address is a valid NUL-terminated C string for the duration of the native IP matcher.
         unsafe { cvt_n(ffi::X509_check_ip_asc(self.as_ptr(), c_str.as_ptr(), 0)).map(|n| n == 1) }
     }
 
@@ -772,6 +866,7 @@ impl ToOwned for X509Ref {
     type Owned = X509;
 
     fn to_owned(&self) -> X509 {
+        // SAFETY: The native certificate increments its reference count before the new owner is constructed.
         unsafe {
             X509_up_ref(self.as_ptr());
             X509::from_ptr(self.as_ptr())
@@ -781,6 +876,10 @@ impl ToOwned for X509Ref {
 
 impl X509 {
     /// Returns a new builder.
+    ///
+    /// # Errors
+    ///
+    /// The native certificate object cannot be allocated.
     pub fn builder() -> Result<X509Builder, ErrorStack> {
         X509Builder::new()
     }
@@ -806,7 +905,8 @@ impl X509 {
 
     /// Deserializes a list of PEM-formatted certificates.
     #[corresponds(PEM_read_bio_X509)]
-    pub fn stack_from_pem(pem: &[u8]) -> Result<Vec<X509>, ErrorStack> {
+    pub fn stack_from_pem(pem: &[u8]) -> Result<Vec<Self>, ErrorStack> {
+        // SAFETY: The memory BIO borrows the input bytes for the parser lifetime; every successful PEM result transfers one owned certificate.
         unsafe {
             ffi::init();
             let bio = MemBioSlice::new(pem)?;
@@ -818,8 +918,7 @@ impl X509 {
                 if r.is_null() {
                     let err = ffi::ERR_peek_last_error();
 
-                    #[allow(clippy::useless_conversion)]
-                    if ffi::ERR_GET_LIB(err) == ffi::ERR_LIB_PEM.0.try_into().unwrap()
+                    if u32::try_from(ffi::ERR_GET_LIB(err)).ok() == Some(ffi::ERR_LIB_PEM.0)
                         && ffi::ERR_GET_REASON(err) == ffi::PEM_R_NO_START_LINE
                     {
                         ErrorStack::clear();
@@ -827,9 +926,8 @@ impl X509 {
                     }
 
                     return Err(ErrorStack::get());
-                } else {
-                    certs.push(X509::from_ptr(r));
                 }
+                certs.push(Self::from_ptr(r));
             }
 
             Ok(certs)
@@ -838,23 +936,25 @@ impl X509 {
 }
 
 impl Clone for X509 {
-    fn clone(&self) -> X509 {
+    fn clone(&self) -> Self {
         X509Ref::to_owned(self)
     }
 }
 
 impl fmt::Debug for X509 {
     fn fmt(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        let serial = match &self.serial_number().to_bn() {
-            Ok(bn) => match bn.to_hex_str() {
-                Ok(hex) => hex.to_string(),
-                Err(_) => String::new(),
-            },
-            Err(_) => String::new(),
-        };
+        let serial = self
+            .serial_number()
+            .to_bn()
+            .and_then(|bn| bn.to_hex_str())
+            .map_or_else(|_| String::new(), |hex| hex.to_string());
         let mut debug_struct = formatter.debug_struct("X509");
         debug_struct.field("serial_number", &serial);
-        debug_struct.field("signature_algorithm", &self.signature_algorithm().object());
+        if let Some(oid) = self.signature_algorithm().object() {
+            debug_struct.field("signature_algorithm", &oid);
+        } else {
+            debug_struct.field("signature_algorithm", &None::<&Asn1ObjectRef>);
+        }
         debug_struct.field("issuer", &self.issuer_name());
         debug_struct.field("subject", &self.subject_name());
         if let Some(subject_alt_names) = &self.subject_alt_names() {
@@ -872,13 +972,14 @@ impl fmt::Debug for X509 {
     }
 }
 
-impl AsRef<X509Ref> for X509Ref {
-    fn as_ref(&self) -> &X509Ref {
+impl AsRef<Self> for X509Ref {
+    fn as_ref(&self) -> &Self {
         self
     }
 }
 
-impl Stackable for X509 {
+// SAFETY: the native stack type matches reference-counted native X509 objects.
+unsafe impl Stackable for X509 {
     type StackType = ffi::stack_st_X509;
 }
 
@@ -886,8 +987,8 @@ impl Stackable for X509 {
 pub struct X509v3Context<'a>(ffi::X509V3_CTX, PhantomData<(&'a X509Ref, &'a ConfRef)>);
 
 impl X509v3Context<'_> {
-    #[must_use]
-    pub fn as_ptr(&self) -> *mut ffi::X509V3_CTX {
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
+    pub const fn as_ptr(&self) -> *mut ffi::X509V3_CTX {
         std::ptr::addr_of!(self.0).cast_mut()
     }
 }
@@ -900,7 +1001,8 @@ foreign_type_and_impl_send_sync! {
     pub struct X509Extension;
 }
 
-impl Stackable for X509Extension {
+// SAFETY: the native stack type matches owned native X509_EXTENSION objects.
+unsafe impl Stackable for X509Extension {
     type StackType = ffi::stack_st_X509_EXTENSION;
 }
 
@@ -915,39 +1017,41 @@ impl X509Extension {
     /// mini-language that can read arbitrary files.
     ///
     /// See the extension module for builder types which will construct certain common extensions.
+    ///
+    /// # Errors
+    ///
+    /// The name or value contains NUL, or native extension parsing fails.
     pub fn new(
         conf: Option<&ConfRef>,
         context: Option<&X509v3Context>,
         name: &str,
         value: &str,
-    ) -> Result<X509Extension, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         let name = CString::new(name).map_err(ErrorStack::internal_error)?;
         let value = CString::new(value).map_err(ErrorStack::internal_error)?;
-        let mut ctx;
+        // SAFETY: The input strings are owned NUL-terminated buffers and the initialized native context lives until extension construction returns.
         unsafe {
             ffi::init();
+            let mut ctx = mem::zeroed();
             let conf = conf.map_or(ptr::null_mut(), ConfRef::as_ptr);
-            let context_ptr = match context {
-                Some(c) => c.as_ptr(),
-                None => {
-                    ctx = mem::zeroed();
-
+            let context_ptr = context.map_or_else(
+                || {
                     ffi::X509V3_set_ctx(
-                        &mut ctx,
+                        &raw mut ctx,
                         ptr::null_mut(),
                         ptr::null_mut(),
                         ptr::null_mut(),
                         ptr::null_mut(),
                         0,
                     );
-                    &mut ctx
-                }
-            };
+                    &raw mut ctx
+                },
+                X509v3Context::as_ptr,
+            );
             let name = name.as_ptr().cast_mut();
             let value = value.as_ptr().cast_mut();
 
-            cvt_p(ffi::X509V3_EXT_nconf(conf, context_ptr, name, value))
-                .map(|p| X509Extension::from_ptr(p))
+            cvt_p(ffi::X509V3_EXT_nconf(conf, context_ptr, name, value)).map(|p| Self::from_ptr(p))
         }
     }
 
@@ -961,38 +1065,41 @@ impl X509Extension {
     /// mini-language that can read arbitrary files.
     ///
     /// See the extension module for builder types which will construct certain common extensions.
+    ///
+    /// # Errors
+    ///
+    /// The value contains NUL, or native extension parsing fails.
     pub fn new_nid(
         conf: Option<&ConfRef>,
         context: Option<&X509v3Context>,
         name: Nid,
         value: &str,
-    ) -> Result<X509Extension, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         let value = CString::new(value).map_err(ErrorStack::internal_error)?;
-        let mut ctx;
+        // SAFETY: The input string is owned and NUL-terminated, while the native configuration/context pointers are valid during parsing.
         unsafe {
             ffi::init();
+            let mut ctx = mem::zeroed();
             let conf = conf.map_or(ptr::null_mut(), ConfRef::as_ptr);
-            let context_ptr = match context {
-                Some(c) => c.as_ptr(),
-                None => {
-                    ctx = mem::zeroed();
-
+            let context_ptr = context.map_or_else(
+                || {
                     ffi::X509V3_set_ctx(
-                        &mut ctx,
+                        &raw mut ctx,
                         ptr::null_mut(),
                         ptr::null_mut(),
                         ptr::null_mut(),
                         ptr::null_mut(),
                         0,
                     );
-                    &mut ctx
-                }
-            };
+                    &raw mut ctx
+                },
+                X509v3Context::as_ptr,
+            );
             let name = name.as_raw();
             let value = value.as_ptr().cast_mut();
 
             cvt_p(ffi::X509V3_EXT_nconf_nid(conf, context_ptr, name, value))
-                .map(|p| X509Extension::from_ptr(p))
+                .map(|p| Self::from_ptr(p))
         }
     }
 
@@ -1000,11 +1107,16 @@ impl X509Extension {
         nid: Nid,
         critical: bool,
         value: *mut c_void,
-    ) -> Result<X509Extension, ErrorStack> {
+    ) -> Result<Self, ErrorStack> {
         ffi::init();
+        // SAFETY: The internal caller supplies a valid ASN.1 extension payload; the decoder owns its resulting checked pointer.
         unsafe {
-            cvt_p(ffi::X509V3_EXT_i2d(nid.as_raw(), critical as _, value))
-                .map(|p| X509Extension::from_ptr(p))
+            cvt_p(ffi::X509V3_EXT_i2d(
+                nid.as_raw(),
+                c_int::from(critical),
+                value,
+            ))
+            .map(|p| Self::from_ptr(p))
         }
     }
 }
@@ -1022,16 +1134,22 @@ pub struct X509NameBuilder(X509Name);
 
 impl X509NameBuilder {
     /// Creates a new builder.
-    pub fn new() -> Result<X509NameBuilder, ErrorStack> {
+    ///
+    /// # Errors
+    ///
+    /// Native X.509 name allocation fails.
+    pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: Native allocation returns a newly owned name or null, checked before wrapping ownership.
         unsafe {
             ffi::init();
-            cvt_p(ffi::X509_NAME_new()).map(|p| X509NameBuilder(X509Name::from_ptr(p)))
+            cvt_p(ffi::X509_NAME_new()).map(|p| Self(X509Name::from_ptr(p)))
         }
     }
 
     /// Add a field entry by str.
     #[corresponds(X509_NAME_add_entry_by_txt)]
     pub fn append_entry_by_text(&mut self, field: &str, value: &str) -> Result<(), ErrorStack> {
+        // SAFETY: The owned name builder and both borrowed bytes are live; native length conversion is checked.
         unsafe {
             let field = CString::new(field).map_err(ErrorStack::internal_error)?;
             cvt(ffi::X509_NAME_add_entry_by_txt(
@@ -1054,6 +1172,7 @@ impl X509NameBuilder {
         value: &str,
         ty: Asn1Type,
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The owned name builder and byte slices are live while BoringSSL copies the typed field.
         unsafe {
             let field = CString::new(field).map_err(ErrorStack::internal_error)?;
             cvt(ffi::X509_NAME_add_entry_by_txt(
@@ -1071,6 +1190,7 @@ impl X509NameBuilder {
     /// Add a field entry by NID.
     #[corresponds(X509_NAME_add_entry_by_NID)]
     pub fn append_entry_by_nid(&mut self, field: Nid, value: &str) -> Result<(), ErrorStack> {
+        // SAFETY: The owned name builder and the borrowed UTF-8 bytes remain live through native insertion.
         unsafe {
             cvt(ffi::X509_NAME_add_entry_by_NID(
                 self.0.as_ptr(),
@@ -1092,6 +1212,7 @@ impl X509NameBuilder {
         value: &str,
         ty: Asn1Type,
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The owned name builder and the borrowed typed bytes remain valid during native copying.
         unsafe {
             cvt(ffi::X509_NAME_add_entry_by_NID(
                 self.0.as_ptr(),
@@ -1105,13 +1226,15 @@ impl X509NameBuilder {
         }
     }
 
-    /// Return an `X509Name`.
-    #[must_use]
-    pub fn build(self) -> X509Name {
-        // Round-trip through bytes because OpenSSL is not const correct and
-        // names in a "modified" state compute various things lazily. This can
-        // lead to data-races because OpenSSL doesn't have locks or anything.
-        X509Name::from_der(&self.0.to_der().unwrap()).unwrap()
+    /// Return an owned `X509Name` with all lazy native fields initialized.
+    ///
+    /// # Errors
+    ///
+    /// Encoding or decoding the native X.509 name fails.
+    pub fn build(self) -> Result<X509Name, ErrorStack> {
+        // Re-encoding initializes the name's lazily computed native fields
+        // before it is published across threads.
+        X509Name::from_der(&self.0.to_der()?)
     }
 }
 
@@ -1125,6 +1248,10 @@ foreign_type_and_impl_send_sync! {
 
 impl X509Name {
     /// Returns a new builder.
+    ///
+    /// # Errors
+    ///
+    /// Native X.509 name allocation fails.
     pub fn builder() -> Result<X509NameBuilder, ErrorStack> {
         X509NameBuilder::new()
     }
@@ -1132,9 +1259,14 @@ impl X509Name {
     /// Loads subject names from a file containing PEM-formatted certificates.
     ///
     /// This is commonly used in conjunction with `SslContextBuilder::set_client_ca_list`.
-    pub fn load_client_ca_file<P: AsRef<Path>>(file: P) -> Result<Stack<X509Name>, ErrorStack> {
+    ///
+    /// # Errors
+    ///
+    /// The path contains NUL or the CA file cannot be loaded or decoded.
+    pub fn load_client_ca_file<P: AsRef<Path>>(file: P) -> Result<Stack<Self>, ErrorStack> {
         let file = CString::new(file.as_ref().as_os_str().as_encoded_bytes())
             .map_err(ErrorStack::internal_error)?;
+        // SAFETY: The filename is a valid NUL-terminated buffer; a non-null result transfers the owned CA stack.
         unsafe { cvt_p(ffi::SSL_load_client_CA_file(file.as_ptr())).map(|p| Stack::from_ptr(p)) }
     }
 
@@ -1148,14 +1280,15 @@ impl X509Name {
     }
 }
 
-impl Stackable for X509Name {
+// SAFETY: the native stack type matches owned native X509_NAME objects.
+unsafe impl Stackable for X509Name {
     type StackType = ffi::stack_st_X509_NAME;
 }
 
 impl X509NameRef {
     /// Returns the name entries by the nid.
-    #[must_use]
-    pub fn entries_by_nid(&self, nid: Nid) -> X509NameEntries<'_> {
+    #[must_use = "Use the returned iterator or element to inspect the collection."]
+    pub const fn entries_by_nid(&self, nid: Nid) -> X509NameEntries<'_> {
         X509NameEntries {
             name: self,
             nid: Some(nid),
@@ -1164,8 +1297,8 @@ impl X509NameRef {
     }
 
     /// Returns an iterator over all `X509NameEntry` values
-    #[must_use]
-    pub fn entries(&self) -> X509NameEntries<'_> {
+    #[must_use = "Use the returned iterator or element to inspect the collection."]
+    pub const fn entries(&self) -> X509NameEntries<'_> {
         X509NameEntries {
             name: self,
             nid: None,
@@ -1177,12 +1310,15 @@ impl X509NameRef {
     ///
     /// This function will return `None` if the underlying string contains invalid utf-8.
     #[corresponds(X509_NAME_print_ex)]
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn print_ex(&self, flags: i32) -> Option<String> {
+        // SAFETY: The native output BIO is live while the name printer writes into it; negative return is checked.
         unsafe {
             let bio = MemBio::new().ok()?;
-            ffi::X509_NAME_print_ex(bio.as_ptr(), self.as_ptr(), 0, flags as _);
-            let buf = bio.get_buf().to_vec();
+            if ffi::X509_NAME_print_ex(bio.as_ptr(), self.as_ptr(), 0, flags.try_into().ok()?) < 0 {
+                return None;
+            }
+            let buf = bio.get_buf().ok()?.to_vec();
             let res = String::from_utf8(buf);
             res.ok()
         }
@@ -1197,7 +1333,8 @@ impl X509NameRef {
 
     /// Compares `self` and `other`'s canonicalized forms.
     #[corresponds(X509_NAME_cmp)]
-    pub fn try_cmp(&self, other: &X509NameRef) -> Result<std::cmp::Ordering, ErrorStack> {
+    pub fn try_cmp(&self, other: &Self) -> Result<std::cmp::Ordering, ErrorStack> {
+        // SAFETY: The two native names are borrowed for the comparison call, and the error sentinel is checked.
         let r = unsafe { ffi::X509_NAME_cmp(self.as_ptr(), other.as_ptr()) };
         if r == -2 {
             return Err(ErrorStack::get());
@@ -1223,29 +1360,23 @@ impl<'a> Iterator for X509NameEntries<'a> {
     type Item = &'a X509NameEntryRef;
 
     fn next(&mut self) -> Option<&'a X509NameEntryRef> {
+        // SAFETY: The iterator borrows the name for its full lifetime; native index lookups yield borrowed embedded entries.
         unsafe {
-            match self.nid {
-                Some(nid) => {
-                    // There is a `Nid` specified to search for
-                    self.loc =
-                        ffi::X509_NAME_get_index_by_NID(self.name.as_ptr(), nid.as_raw(), self.loc);
-                    if self.loc == -1 {
-                        return None;
-                    }
+            if let Some(nid) = self.nid {
+                self.loc =
+                    ffi::X509_NAME_get_index_by_NID(self.name.as_ptr(), nid.as_raw(), self.loc);
+                if self.loc < 0 {
+                    return None;
                 }
-                None => {
-                    // Iterate over all `Nid`s
-                    self.loc += 1;
-                    if self.loc >= ffi::X509_NAME_entry_count(self.name.as_ptr()) {
-                        return None;
-                    }
+            } else {
+                self.loc += 1;
+                if self.loc >= ffi::X509_NAME_entry_count(self.name.as_ptr()) {
+                    return None;
                 }
             }
 
             let entry = ffi::X509_NAME_get_entry(self.name.as_ptr(), self.loc);
-            assert!(!entry.is_null());
-
-            Some(X509NameEntryRef::from_ptr(entry))
+            X509NameEntryRef::from_const_ptr_opt(entry)
         }
     }
 }
@@ -1261,8 +1392,9 @@ foreign_type_and_impl_send_sync! {
 impl X509NameEntryRef {
     /// Returns the field value of an `X509NameEntry`.
     #[corresponds(X509_NAME_ENTRY_get_data)]
-    #[must_use]
+    #[must_use = "Use the returned extension bytes when inspecting the certificate."]
     pub fn data(&self) -> &Asn1StringRef {
+        // SAFETY: The entry owns a live embedded ASN.1 data field; the returned reference cannot outlive its entry.
         unsafe {
             let data = ffi::X509_NAME_ENTRY_get_data(self.as_ptr());
             Asn1StringRef::from_ptr(data)
@@ -1272,8 +1404,9 @@ impl X509NameEntryRef {
     /// Returns the `Asn1Object` value of an `X509NameEntry`.
     /// This is useful for finding out about the actual `Nid` when iterating over all `X509NameEntries`.
     #[corresponds(X509_NAME_ENTRY_get_object)]
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn object(&self) -> &Asn1ObjectRef {
+        // SAFETY: The entry owns a live embedded ASN.1 object; the returned reference cannot outlive its entry.
         unsafe {
             let object = ffi::X509_NAME_ENTRY_get_object(self.as_ptr());
             Asn1ObjectRef::from_ptr(object)
@@ -1293,23 +1426,23 @@ pub struct X509ReqBuilder(X509Req);
 impl X509ReqBuilder {
     /// Returns a builder for a certificate request.
     #[corresponds(X509_REQ_new)]
-    pub fn new() -> Result<X509ReqBuilder, ErrorStack> {
+    pub fn new() -> Result<Self, ErrorStack> {
+        // SAFETY: Native allocation returns a new request or null; ownership transfers only after null-checking.
         unsafe {
             ffi::init();
-            cvt_p(ffi::X509_REQ_new()).map(|p| X509ReqBuilder(X509Req::from_ptr(p)))
+            cvt_p(ffi::X509_REQ_new()).map(|p| Self(X509Req::from_ptr(p)))
         }
     }
 
-    /// Set the numerical value of the version field.
-    #[corresponds(X509_REQ_set_version)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_version(&mut self, version: i32) -> Result<(), ErrorStack> {
-        unsafe { cvt(ffi::X509_REQ_set_version(self.0.as_ptr(), version.into())) }
-    }
+    version_setter!(
+        /// Sets the numerical value of the request version field.
+        X509_REQ_set_version
+    );
 
     /// Set the issuer name.
     #[corresponds(X509_REQ_set_subject_name)]
     pub fn set_subject_name(&mut self, subject_name: &X509NameRef) -> Result<(), ErrorStack> {
+        // SAFETY: The owned request and borrowed subject name stay live while BoringSSL copies the latter.
         unsafe {
             cvt(ffi::X509_REQ_set_subject_name(
                 self.0.as_ptr(),
@@ -1324,18 +1457,20 @@ impl X509ReqBuilder {
     where
         T: HasPublic,
     {
+        // SAFETY: The native key setter receives a live request and public-key handle and copies the key reference.
         unsafe { cvt(ffi::X509_REQ_set_pubkey(self.0.as_ptr(), key.as_ptr())) }
     }
 
     /// Return an `X509v3Context`. This context object can be used to construct
     /// certain `X509` extensions.
-    #[must_use]
+    #[must_use = "Use the returned context when constructing certificate extensions."]
     pub fn x509v3_context<'a>(&'a self, conf: Option<&'a ConfRef>) -> X509v3Context<'a> {
+        // SAFETY: The native context is initialized locally; the request and optional configuration are borrowed for the context lifetime.
         unsafe {
             let mut ctx = mem::zeroed();
 
             ffi::X509V3_set_ctx(
-                &mut ctx,
+                &raw mut ctx,
                 ptr::null_mut(),
                 ptr::null_mut(),
                 self.0.as_ptr(),
@@ -1345,7 +1480,7 @@ impl X509ReqBuilder {
 
             // nodb case taken care of since we zeroed ctx above
             if let Some(conf) = conf {
-                ffi::X509V3_set_nconf(&mut ctx, conf.as_ptr());
+                ffi::X509V3_set_nconf(&raw mut ctx, conf.as_ptr());
             }
 
             X509v3Context(ctx, PhantomData)
@@ -1353,10 +1488,15 @@ impl X509ReqBuilder {
     }
 
     /// Permits any number of extension fields to be added to the certificate.
+    ///
+    /// # Errors
+    ///
+    /// Native allocation or extension attachment fails.
     pub fn add_extensions(
         &mut self,
         extensions: &StackRef<X509Extension>,
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The extensions stack remains live while the native request copies it.
         unsafe {
             cvt(ffi::X509_REQ_add_extensions(
                 self.0.as_ptr(),
@@ -1371,6 +1511,7 @@ impl X509ReqBuilder {
     where
         T: HasPrivate,
     {
+        // SAFETY: The request, private key and digest handles stay live for the synchronous signature operation.
         unsafe {
             cvt(ffi::X509_REQ_sign(
                 self.0.as_ptr(),
@@ -1381,7 +1522,7 @@ impl X509ReqBuilder {
     }
 
     /// Returns the `X509Req`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> X509Req {
         self.0
     }
@@ -1397,6 +1538,10 @@ foreign_type_and_impl_send_sync! {
 
 impl X509Req {
     /// A builder for `X509Req`.
+    ///
+    /// # Errors
+    ///
+    /// Native certificate-request allocation fails.
     pub fn builder() -> Result<X509ReqBuilder, ErrorStack> {
         X509ReqBuilder::new()
     }
@@ -1440,15 +1585,18 @@ impl X509ReqRef {
 
     /// Returns the numerical value of the version field of the certificate request.
     #[corresponds(X509_REQ_get_version)]
-    #[must_use]
-    pub fn version(&self) -> i32 {
-        unsafe { X509_REQ_get_version(self.as_ptr()) as i32 }
+    #[must_use = "Use the returned certificate version when inspecting its encoding."]
+    pub fn version(&self) -> c_long {
+        // SAFETY: the native request is live and provides a scalar version;
+        // retain its full native width rather than truncating to `i32`.
+        unsafe { X509_REQ_get_version(self.as_ptr()) }
     }
 
     /// Returns the subject name of the certificate request.
     #[corresponds(X509_REQ_get_subject_name)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn subject_name(&self) -> &X509NameRef {
+        // SAFETY: The subject name is owned by the live request and its returned pointer is checked before borrowing.
         unsafe {
             let name = X509_REQ_get_subject_name(self.as_ptr());
             assert!(!name.is_null());
@@ -1459,6 +1607,7 @@ impl X509ReqRef {
     /// Returns the public key of the certificate request.
     #[corresponds(X509_REQ_get_pubkey)]
     pub fn public_key(&self) -> Result<PKey<Public>, ErrorStack> {
+        // SAFETY: The native getter transfers a public-key reference, checked before wrapping ownership.
         unsafe {
             let key = cvt_p(ffi::X509_REQ_get_pubkey(self.as_ptr()))?;
             Ok(PKey::from_ptr(key))
@@ -1473,12 +1622,14 @@ impl X509ReqRef {
     where
         T: HasPublic,
     {
+        // SAFETY: Both request and public-key references remain live through the native verification call.
         unsafe { cvt_n(ffi::X509_REQ_verify(self.as_ptr(), key.as_ptr())).map(|n| n != 0) }
     }
 
     /// Returns the extensions of the certificate request.
     #[corresponds(X509_REQ_get_extensions)]
     pub fn extensions(&self) -> Result<Stack<X509Extension>, ErrorStack> {
+        // SAFETY: The native getter yields a new owned extension stack, checked before transferring ownership.
         unsafe {
             let extensions = cvt_p(ffi::X509_REQ_get_extensions(self.as_ptr()))?;
             Ok(Stack::from_ptr(extensions))
@@ -1516,18 +1667,21 @@ impl X509VerifyError {
     ///
     /// Some methods on [`X509VerifyError`] are not thread safe if the error
     /// number is invalid.
-    pub unsafe fn from_raw(err: c_int) -> X509VerifyResult {
+    ///
+    /// # Errors
+    ///
+    /// Returns a verification error for any native code except `X509_V_OK`.
+    pub const unsafe fn from_raw(err: c_int) -> X509VerifyResult {
         if err == ffi::X509_V_OK {
             Ok(())
         } else {
-            Err(X509VerifyError(err))
+            Err(Self(err))
         }
     }
 
     /// Return the integer representation of an [`X509VerifyError`].
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 
@@ -1535,11 +1689,11 @@ impl X509VerifyError {
     ///
     /// Returns empty string if the message was not UTF-8.
     #[corresponds(X509_verify_cert_error_string)]
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn error_string(&self) -> &'static str {
+    #[must_use = "The returned description is needed to report verification failure."]
+    pub fn error_string(self) -> &'static str {
         ffi::init();
 
+        // SAFETY: The native error lookup returns a static NUL-terminated message for the supplied scalar code.
         unsafe {
             let s = ffi::X509_verify_cert_error_string(c_long::from(self.0));
             CStr::from_ptr(s).to_str().unwrap_or_default()
@@ -1547,82 +1701,141 @@ impl X509VerifyError {
     }
 }
 
-#[allow(missing_docs)] // no need to document the constants
 impl X509VerifyError {
+    /// Native verification failure `X509_V_ERR_UNSPECIFIED`.
     pub const UNSPECIFIED: Self = Self(ffi::X509_V_ERR_UNSPECIFIED);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT`.
     pub const UNABLE_TO_GET_ISSUER_CERT: Self = Self(ffi::X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_CRL`.
     pub const UNABLE_TO_GET_CRL: Self = Self(ffi::X509_V_ERR_UNABLE_TO_GET_CRL);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE`.
     pub const UNABLE_TO_DECRYPT_CERT_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_DECRYPT_CERT_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE`.
     pub const UNABLE_TO_DECRYPT_CRL_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_DECRYPT_CRL_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY`.
     pub const UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY);
+    /// Native verification failure `X509_V_ERR_CERT_SIGNATURE_FAILURE`.
     pub const CERT_SIGNATURE_FAILURE: Self = Self(ffi::X509_V_ERR_CERT_SIGNATURE_FAILURE);
+    /// Native verification failure `X509_V_ERR_CRL_SIGNATURE_FAILURE`.
     pub const CRL_SIGNATURE_FAILURE: Self = Self(ffi::X509_V_ERR_CRL_SIGNATURE_FAILURE);
+    /// Native verification failure `X509_V_ERR_CERT_NOT_YET_VALID`.
     pub const CERT_NOT_YET_VALID: Self = Self(ffi::X509_V_ERR_CERT_NOT_YET_VALID);
+    /// Native verification failure `X509_V_ERR_CERT_HAS_EXPIRED`.
     pub const CERT_HAS_EXPIRED: Self = Self(ffi::X509_V_ERR_CERT_HAS_EXPIRED);
+    /// Native verification failure `X509_V_ERR_CRL_NOT_YET_VALID`.
     pub const CRL_NOT_YET_VALID: Self = Self(ffi::X509_V_ERR_CRL_NOT_YET_VALID);
+    /// Native verification failure `X509_V_ERR_CRL_HAS_EXPIRED`.
     pub const CRL_HAS_EXPIRED: Self = Self(ffi::X509_V_ERR_CRL_HAS_EXPIRED);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD`.
     pub const ERROR_IN_CERT_NOT_BEFORE_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CERT_NOT_BEFORE_FIELD);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD`.
     pub const ERROR_IN_CERT_NOT_AFTER_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CERT_NOT_AFTER_FIELD);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD`.
     pub const ERROR_IN_CRL_LAST_UPDATE_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CRL_LAST_UPDATE_FIELD);
+    /// Native verification failure `X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD`.
     pub const ERROR_IN_CRL_NEXT_UPDATE_FIELD: Self =
         Self(ffi::X509_V_ERR_ERROR_IN_CRL_NEXT_UPDATE_FIELD);
+    /// Native verification failure `X509_V_ERR_OUT_OF_MEM`.
     pub const OUT_OF_MEM: Self = Self(ffi::X509_V_ERR_OUT_OF_MEM);
+    /// Native verification failure `X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT`.
     pub const DEPTH_ZERO_SELF_SIGNED_CERT: Self = Self(ffi::X509_V_ERR_DEPTH_ZERO_SELF_SIGNED_CERT);
+    /// Native verification failure `X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN`.
     pub const SELF_SIGNED_CERT_IN_CHAIN: Self = Self(ffi::X509_V_ERR_SELF_SIGNED_CERT_IN_CHAIN);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
     pub const UNABLE_TO_GET_ISSUER_CERT_LOCALLY: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE`.
     pub const UNABLE_TO_VERIFY_LEAF_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_UNABLE_TO_VERIFY_LEAF_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_CERT_CHAIN_TOO_LONG`.
     pub const CERT_CHAIN_TOO_LONG: Self = Self(ffi::X509_V_ERR_CERT_CHAIN_TOO_LONG);
+    /// Native verification failure `X509_V_ERR_CERT_REVOKED`.
     pub const CERT_REVOKED: Self = Self(ffi::X509_V_ERR_CERT_REVOKED);
+    /// Native verification failure `X509_V_ERR_INVALID_CA`.
     pub const INVALID_CA: Self = Self(ffi::X509_V_ERR_INVALID_CA);
+    /// Native verification failure `X509_V_ERR_PATH_LENGTH_EXCEEDED`.
     pub const PATH_LENGTH_EXCEEDED: Self = Self(ffi::X509_V_ERR_PATH_LENGTH_EXCEEDED);
+    /// Native verification failure `X509_V_ERR_INVALID_PURPOSE`.
     pub const INVALID_PURPOSE: Self = Self(ffi::X509_V_ERR_INVALID_PURPOSE);
+    /// Native verification failure `X509_V_ERR_CERT_UNTRUSTED`.
     pub const CERT_UNTRUSTED: Self = Self(ffi::X509_V_ERR_CERT_UNTRUSTED);
+    /// Native verification failure `X509_V_ERR_CERT_REJECTED`.
     pub const CERT_REJECTED: Self = Self(ffi::X509_V_ERR_CERT_REJECTED);
+    /// Native verification failure `X509_V_ERR_SUBJECT_ISSUER_MISMATCH`.
     pub const SUBJECT_ISSUER_MISMATCH: Self = Self(ffi::X509_V_ERR_SUBJECT_ISSUER_MISMATCH);
+    /// Native verification failure `X509_V_ERR_AKID_SKID_MISMATCH`.
     pub const AKID_SKID_MISMATCH: Self = Self(ffi::X509_V_ERR_AKID_SKID_MISMATCH);
+    /// Native verification failure `X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH`.
     pub const AKID_ISSUER_SERIAL_MISMATCH: Self = Self(ffi::X509_V_ERR_AKID_ISSUER_SERIAL_MISMATCH);
+    /// Native verification failure `X509_V_ERR_KEYUSAGE_NO_CERTSIGN`.
     pub const KEYUSAGE_NO_CERTSIGN: Self = Self(ffi::X509_V_ERR_KEYUSAGE_NO_CERTSIGN);
+    /// Native verification failure `X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER`.
     pub const UNABLE_TO_GET_CRL_ISSUER: Self = Self(ffi::X509_V_ERR_UNABLE_TO_GET_CRL_ISSUER);
+    /// Native verification failure `X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION`.
     pub const UNHANDLED_CRITICAL_EXTENSION: Self =
         Self(ffi::X509_V_ERR_UNHANDLED_CRITICAL_EXTENSION);
+    /// Native verification failure `X509_V_ERR_KEYUSAGE_NO_CRL_SIGN`.
     pub const KEYUSAGE_NO_CRL_SIGN: Self = Self(ffi::X509_V_ERR_KEYUSAGE_NO_CRL_SIGN);
+    /// Native verification failure `X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION`.
     pub const UNHANDLED_CRITICAL_CRL_EXTENSION: Self =
         Self(ffi::X509_V_ERR_UNHANDLED_CRITICAL_CRL_EXTENSION);
+    /// Native verification failure `X509_V_ERR_INVALID_NON_CA`.
     pub const INVALID_NON_CA: Self = Self(ffi::X509_V_ERR_INVALID_NON_CA);
+    /// Native verification failure `X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED`.
     pub const PROXY_PATH_LENGTH_EXCEEDED: Self = Self(ffi::X509_V_ERR_PROXY_PATH_LENGTH_EXCEEDED);
+    /// Native verification failure `X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE`.
     pub const KEYUSAGE_NO_DIGITAL_SIGNATURE: Self =
         Self(ffi::X509_V_ERR_KEYUSAGE_NO_DIGITAL_SIGNATURE);
+    /// Native verification failure `X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED`.
     pub const PROXY_CERTIFICATES_NOT_ALLOWED: Self =
         Self(ffi::X509_V_ERR_PROXY_CERTIFICATES_NOT_ALLOWED);
+    /// Native verification failure `X509_V_ERR_INVALID_EXTENSION`.
     pub const INVALID_EXTENSION: Self = Self(ffi::X509_V_ERR_INVALID_EXTENSION);
+    /// Native verification failure `X509_V_ERR_INVALID_POLICY_EXTENSION`.
     pub const INVALID_POLICY_EXTENSION: Self = Self(ffi::X509_V_ERR_INVALID_POLICY_EXTENSION);
+    /// Native verification failure `X509_V_ERR_NO_EXPLICIT_POLICY`.
     pub const NO_EXPLICIT_POLICY: Self = Self(ffi::X509_V_ERR_NO_EXPLICIT_POLICY);
+    /// Native verification failure `X509_V_ERR_DIFFERENT_CRL_SCOPE`.
     pub const DIFFERENT_CRL_SCOPE: Self = Self(ffi::X509_V_ERR_DIFFERENT_CRL_SCOPE);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE`.
     pub const UNSUPPORTED_EXTENSION_FEATURE: Self =
         Self(ffi::X509_V_ERR_UNSUPPORTED_EXTENSION_FEATURE);
+    /// Native verification failure `X509_V_ERR_UNNESTED_RESOURCE`.
     pub const UNNESTED_RESOURCE: Self = Self(ffi::X509_V_ERR_UNNESTED_RESOURCE);
+    /// Native verification failure `X509_V_ERR_PERMITTED_VIOLATION`.
     pub const PERMITTED_VIOLATION: Self = Self(ffi::X509_V_ERR_PERMITTED_VIOLATION);
+    /// Native verification failure `X509_V_ERR_EXCLUDED_VIOLATION`.
     pub const EXCLUDED_VIOLATION: Self = Self(ffi::X509_V_ERR_EXCLUDED_VIOLATION);
+    /// Native verification failure `X509_V_ERR_SUBTREE_MINMAX`.
     pub const SUBTREE_MINMAX: Self = Self(ffi::X509_V_ERR_SUBTREE_MINMAX);
+    /// Native verification failure `X509_V_ERR_APPLICATION_VERIFICATION`.
     pub const APPLICATION_VERIFICATION: Self = Self(ffi::X509_V_ERR_APPLICATION_VERIFICATION);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE`.
     pub const UNSUPPORTED_CONSTRAINT_TYPE: Self = Self(ffi::X509_V_ERR_UNSUPPORTED_CONSTRAINT_TYPE);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX`.
     pub const UNSUPPORTED_CONSTRAINT_SYNTAX: Self =
         Self(ffi::X509_V_ERR_UNSUPPORTED_CONSTRAINT_SYNTAX);
+    /// Native verification failure `X509_V_ERR_UNSUPPORTED_NAME_SYNTAX`.
     pub const UNSUPPORTED_NAME_SYNTAX: Self = Self(ffi::X509_V_ERR_UNSUPPORTED_NAME_SYNTAX);
+    /// Native verification failure `X509_V_ERR_CRL_PATH_VALIDATION_ERROR`.
     pub const CRL_PATH_VALIDATION_ERROR: Self = Self(ffi::X509_V_ERR_CRL_PATH_VALIDATION_ERROR);
+    /// Native verification failure `X509_V_ERR_HOSTNAME_MISMATCH`.
     pub const HOSTNAME_MISMATCH: Self = Self(ffi::X509_V_ERR_HOSTNAME_MISMATCH);
+    /// Native verification failure `X509_V_ERR_EMAIL_MISMATCH`.
     pub const EMAIL_MISMATCH: Self = Self(ffi::X509_V_ERR_EMAIL_MISMATCH);
+    /// Native verification failure `X509_V_ERR_IP_ADDRESS_MISMATCH`.
     pub const IP_ADDRESS_MISMATCH: Self = Self(ffi::X509_V_ERR_IP_ADDRESS_MISMATCH);
+    /// Native verification failure `X509_V_ERR_INVALID_CALL`.
     pub const INVALID_CALL: Self = Self(ffi::X509_V_ERR_INVALID_CALL);
+    /// Native verification failure `X509_V_ERR_STORE_LOOKUP`.
     pub const STORE_LOOKUP: Self = Self(ffi::X509_V_ERR_STORE_LOOKUP);
+    /// Native verification failure `X509_V_ERR_NAME_CONSTRAINTS_WITHOUT_SANS`.
     pub const NAME_CONSTRAINTS_WITHOUT_SANS: Self =
         Self(ffi::X509_V_ERR_NAME_CONSTRAINTS_WITHOUT_SANS);
 }
@@ -1636,61 +1849,57 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl GeneralName {
-    unsafe fn new(
-        type_: c_int,
-        asn1_type: Asn1Type,
-        value: &[u8],
-    ) -> Result<GeneralName, ErrorStack> {
+    fn new(type_: c_int, asn1_type: Asn1Type, value: &[u8]) -> Result<Self, ErrorStack> {
         ffi::init();
+        let len = try_int(value.len())?;
+        // SAFETY: both allocations are checked. Once the native ASN.1 string
+        // is linked into the GENERAL_NAME union with its matching tag, the
+        // owning wrapper frees it even when filling the payload fails.
         unsafe {
-            let gn = GeneralName::from_ptr(cvt_p(ffi::GENERAL_NAME_new())?);
+            let gn = Self::from_ptr(cvt_p(ffi::GENERAL_NAME_new())?);
+            let string = cvt_p(ffi::ASN1_STRING_type_new(asn1_type.as_raw()))?;
             (*gn.as_ptr()).type_ = type_;
-            let s = cvt_p(ffi::ASN1_STRING_type_new(asn1_type.as_raw()))?;
-            ffi::ASN1_STRING_set(s, value.as_ptr().cast(), value.len().try_into().unwrap());
-
-            (*gn.as_ptr()).d.ptr = s.cast();
-
+            (*gn.as_ptr()).d.ptr = string.cast();
+            cvt(ffi::ASN1_STRING_set(string, value.as_ptr().cast(), len))?;
             Ok(gn)
         }
     }
 
-    pub(crate) fn new_email(email: &[u8]) -> Result<GeneralName, ErrorStack> {
-        unsafe { GeneralName::new(ffi::GEN_EMAIL, Asn1Type::IA5STRING, email) }
+    pub(crate) fn new_email(email: &[u8]) -> Result<Self, ErrorStack> {
+        Self::new(ffi::GEN_EMAIL, Asn1Type::IA5STRING, email)
     }
 
-    pub(crate) fn new_dns(dns: &[u8]) -> Result<GeneralName, ErrorStack> {
-        unsafe { GeneralName::new(ffi::GEN_DNS, Asn1Type::IA5STRING, dns) }
+    pub(crate) fn new_dns(dns: &[u8]) -> Result<Self, ErrorStack> {
+        Self::new(ffi::GEN_DNS, Asn1Type::IA5STRING, dns)
     }
 
-    pub(crate) fn new_uri(uri: &[u8]) -> Result<GeneralName, ErrorStack> {
-        unsafe { GeneralName::new(ffi::GEN_URI, Asn1Type::IA5STRING, uri) }
+    pub(crate) fn new_uri(uri: &[u8]) -> Result<Self, ErrorStack> {
+        Self::new(ffi::GEN_URI, Asn1Type::IA5STRING, uri)
     }
 
-    pub(crate) fn new_ip(ip: IpAddr) -> Result<GeneralName, ErrorStack> {
+    pub(crate) fn new_ip(ip: IpAddr) -> Result<Self, ErrorStack> {
         match ip {
-            IpAddr::V4(addr) => unsafe {
-                GeneralName::new(ffi::GEN_IPADD, Asn1Type::OCTET_STRING, &addr.octets())
-            },
-            IpAddr::V6(addr) => unsafe {
-                GeneralName::new(ffi::GEN_IPADD, Asn1Type::OCTET_STRING, &addr.octets())
-            },
+            IpAddr::V4(addr) => Self::new(ffi::GEN_IPADD, Asn1Type::OCTET_STRING, &addr.octets()),
+            IpAddr::V6(addr) => Self::new(ffi::GEN_IPADD, Asn1Type::OCTET_STRING, &addr.octets()),
         }
     }
 
-    pub(crate) fn new_rid(oid: Asn1Object) -> Result<GeneralName, ErrorStack> {
+    pub(crate) fn new_rid(oid: Asn1Object) -> Result<Self, ErrorStack> {
+        // SAFETY: The newly allocated general name takes ownership of the consumed registered-ID object.
         unsafe {
             ffi::init();
             let gn = cvt_p(ffi::GENERAL_NAME_new())?;
             (*gn).type_ = ffi::GEN_RID;
             (*gn).d.registeredID = oid.into_ptr();
 
-            Ok(GeneralName::from_ptr(gn))
+            Ok(Self::from_ptr(gn))
         }
     }
 }
 
 impl GeneralNameRef {
     fn ia5_string(&self, ffi_type: c_int) -> Option<&str> {
+        // SAFETY: The type discriminant is checked before accessing the matching IA5 union member; its bytes belong to the live name.
         unsafe {
             if (*self.as_ptr()).type_ != ffi_type {
                 return None;
@@ -1706,26 +1915,27 @@ impl GeneralNameRef {
     }
 
     /// Returns the contents of this `GeneralName` if it is an `rfc822Name`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn email(&self) -> Option<&str> {
         self.ia5_string(ffi::GEN_EMAIL)
     }
 
     /// Returns the contents of this `GeneralName` if it is a `dNSName`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn dnsname(&self) -> Option<&str> {
         self.ia5_string(ffi::GEN_DNS)
     }
 
     /// Returns the contents of this `GeneralName` if it is an `uniformResourceIdentifier`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn uri(&self) -> Option<&str> {
         self.ia5_string(ffi::GEN_URI)
     }
 
     /// Returns the contents of this `GeneralName` if it is an `iPAddress`.
-    #[must_use]
+    #[must_use = "Use the returned certificate attribute or encoded description."]
     pub fn ipaddress(&self) -> Option<&[u8]> {
+        // SAFETY: The type discriminant is checked before accessing the matching IP union member, borrowed from the live name.
         unsafe {
             if (*self.as_ptr()).type_ != ffi::GEN_IPADD {
                 return None;
@@ -1753,7 +1963,8 @@ impl fmt::Debug for GeneralNameRef {
     }
 }
 
-impl Stackable for GeneralName {
+// SAFETY: the native stack type matches owned native GENERAL_NAME objects.
+unsafe impl Stackable for GeneralName {
     type StackType = ffi::stack_st_GENERAL_NAME;
 }
 
@@ -1767,28 +1978,35 @@ foreign_type_and_impl_send_sync! {
 
 impl X509AlgorithmRef {
     /// Returns the ASN.1 OID of this algorithm.
-    #[must_use]
-    pub fn object(&self) -> &Asn1ObjectRef {
+    #[must_use = "Use the returned certificate attribute or encoded description."]
+    pub fn object(&self) -> Option<&Asn1ObjectRef> {
+        // SAFETY: the native call fills the initialized output pointer with
+        // an OID borrowed from the live algorithm; absent OIDs remain null.
         unsafe {
             let mut oid = ptr::null();
-            X509_ALGOR_get0(&mut oid, ptr::null_mut(), ptr::null_mut(), self.as_ptr());
-            assert!(!oid.is_null());
-            Asn1ObjectRef::from_ptr(oid.cast_mut())
+            X509_ALGOR_get0(
+                &raw mut oid,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                self.as_ptr(),
+            );
+            Asn1ObjectRef::from_const_ptr_opt(oid)
         }
     }
 }
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::X509_OBJECT;
-    fn drop = X509_OBJECT_free;
+    fn drop = ffi::X509_OBJECT_free;
 
     /// An `X509` or an X509 certificate revocation list.
     pub struct X509Object;
 }
 
 impl X509ObjectRef {
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn x509(&self) -> Option<&X509Ref> {
+        // SAFETY: The object owns the returned certificate pointer; null is checked before creating a borrowed reference.
         unsafe {
             let ptr = X509_OBJECT_get0_X509(self.as_ptr());
             if ptr.is_null() {
@@ -1800,7 +2018,8 @@ impl X509ObjectRef {
     }
 }
 
-impl Stackable for X509Object {
+// SAFETY: the native stack type matches owned native X509_OBJECT references.
+unsafe impl Stackable for X509Object {
     type StackType = ffi::stack_st_X509_OBJECT;
 }
 
@@ -1813,14 +2032,7 @@ use crate::ffi::{
 
 use crate::ffi::X509_OBJECT_get0_X509;
 
-#[allow(bad_style)]
-unsafe fn X509_OBJECT_free(x: *mut ffi::X509_OBJECT) {
-    unsafe {
-        ffi::X509_OBJECT_free_contents(x);
-        ffi::OPENSSL_free(x.cast());
-    }
-}
-
 unsafe fn get_new_x509_store_ctx_idx(f: ffi::CRYPTO_EX_free) -> c_int {
+    // SAFETY: The native index allocator stores a matching destructor callback and receives only null auxiliary arguments.
     unsafe { ffi::X509_STORE_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }

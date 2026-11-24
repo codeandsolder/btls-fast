@@ -59,10 +59,8 @@
 //! ```
 use foreign_types::{ForeignType, ForeignTypeRef, Opaque};
 use openssl_macros::corresponds;
-use std::any::TypeId;
-use std::collections::HashMap;
 use std::convert::TryInto;
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_void};
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
 use std::ffi::{CStr, CString};
 use std::fmt;
 use std::io::prelude::*;
@@ -75,12 +73,12 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::slice;
 use std::str;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
 
 use crate::dh::DhRef;
 use crate::ec::EcKeyRef;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::{replace_boxed, Index, IndexRegistry, IndexSlot};
 use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
@@ -88,12 +86,16 @@ use crate::pkey::Public;
 use crate::pkey::{HasPrivate, PKeyRef, Params, Private};
 use crate::srtp::{SrtpProtectionProfile, SrtpProtectionProfileRef};
 use crate::ssl::bio::BioMethod;
-use crate::ssl::callbacks::*;
+use crate::ssl::callbacks::{
+    raw_cert_verify, raw_client_psk, raw_custom_verify, raw_server_psk, raw_sni, raw_ticket_key,
+    raw_tlsext_status, raw_verify, ssl_raw_custom_verify, ssl_raw_verify,
+};
 use crate::ssl::ech::SslEchKeys;
 use crate::ssl::error::InnerError;
 use crate::stack::{Stack, StackRef, Stackable};
 use crate::symm::CipherCtxRef;
 use crate::try_int;
+use crate::util::native_input;
 use crate::x509::store::{X509Store, X509StoreBuilder, X509StoreBuilderRef, X509StoreRef};
 use crate::x509::verify::X509VerifyParamRef;
 use crate::x509::{
@@ -146,10 +148,9 @@ bitflags! {
     /// Options controlling the behavior of an `SslContext`.
     #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
     pub struct SslOptions: c_uint {
-        /// Disables a countermeasure against an SSLv3/TLSv1.0 vulnerability affecting CBC ciphers.
-        const DONT_INSERT_EMPTY_FRAGMENTS = ffi::SSL_OP_DONT_INSERT_EMPTY_FRAGMENTS as _;
 
-        /// A "reasonable default" set of options which enables compatibility flags.
+        /// `BoringSSL`'s enabled-by-default options, including compatibility
+        /// with legacy servers without the renegotiation-info extension.
         const ALL = ffi::SSL_OP_ALL as _;
 
         /// Do not query the MTU.
@@ -160,37 +161,18 @@ bitflags! {
         /// Disables the use of session tickets for session resumption.
         const NO_TICKET = ffi::SSL_OP_NO_TICKET as _;
 
-        /// Always start a new session when performing a renegotiation on the server side.
-        const NO_SESSION_RESUMPTION_ON_RENEGOTIATION =
-            ffi::SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION as _;
 
-        /// Disables the use of TLS compression.
-        const NO_COMPRESSION = ffi::SSL_OP_NO_COMPRESSION as _;
 
-        /// Allow legacy insecure renegotiation with servers or clients that do not support secure
-        /// renegotiation.
-        const ALLOW_UNSAFE_LEGACY_RENEGOTIATION =
-            ffi::SSL_OP_ALLOW_UNSAFE_LEGACY_RENEGOTIATION as _;
 
-        /// Creates a new key for each session when using ECDHE.
-        const SINGLE_ECDH_USE = ffi::SSL_OP_SINGLE_ECDH_USE as _;
 
-        /// Creates a new key for each session when using DHE.
-        const SINGLE_DH_USE = ffi::SSL_OP_SINGLE_DH_USE as _;
 
         /// Use the server's preferences rather than the client's when selecting a cipher.
         ///
         /// This has no effect on the client side.
         const CIPHER_SERVER_PREFERENCE = ffi::SSL_OP_CIPHER_SERVER_PREFERENCE as _;
 
-        /// Disables version rollback attach detection.
-        const TLS_ROLLBACK_BUG = ffi::SSL_OP_TLS_ROLLBACK_BUG as _;
 
-        /// Disables the use of SSLv2.
-        const NO_SSLV2 = ffi::SSL_OP_NO_SSLv2 as _;
 
-        /// Disables the use of SSLv3.
-        const NO_SSLV3 = ffi::SSL_OP_NO_SSLv3 as _;
 
         /// Disables the use of TLSv1.0.
         const NO_TLSV1 = ffi::SSL_OP_NO_TLSv1 as _;
@@ -210,13 +192,10 @@ bitflags! {
         /// Disables the use of DTLSv1.2.
         const NO_DTLSV1_2 = ffi::SSL_OP_NO_DTLSv1_2 as _;
 
-        /// Disallow all renegotiation in TLSv1.2 and earlier.
-        #[cfg(not(feature = "fips"))]
-        const NO_RENEGOTIATION = ffi::SSL_OP_NO_RENEGOTIATION as _;
 
         /// Disables TLS 1.3 PSK resumption and 0-RTT by omitting PSK-DHE-KE.
         ///
-        /// BoringSSL does not implement PSK-KE, so disabling PSK-DHE-KE also prevents the client
+        /// `BoringSSL` does not implement PSK-KE, so disabling PSK-DHE-KE also prevents the client
         /// from offering a pre-shared key. See [RFC 8446 section 4.2.9].
         ///
         /// [RFC 8446 section 4.2.9]: https://www.rfc-editor.org/rfc/rfc8446#section-4.2.9
@@ -240,16 +219,6 @@ bitflags! {
         /// nonblocking context.
         const ACCEPT_MOVING_WRITE_BUFFER = ffi::SSL_MODE_ACCEPT_MOVING_WRITE_BUFFER as _;
 
-        /// Enables automatic retries after TLS session events such as renegotiations or heartbeats.
-        ///
-        /// By default, OpenSSL will return a `WantRead` error after a renegotiation or heartbeat.
-        /// This option will cause OpenSSL to automatically continue processing the requested
-        /// operation instead.
-        ///
-        /// Note that `SslStream::read` and `SslStream::write` will automatically retry regardless
-        /// of the state of this option. It only affects `SslStream::ssl_read` and
-        /// `SslStream::ssl_write`.
-        const AUTO_RETRY = ffi::SSL_MODE_AUTO_RETRY as _;
 
         /// Disables automatic chain building when verifying a peer's certificate.
         ///
@@ -258,12 +227,8 @@ bitflags! {
         /// out of certificates it knows of, and this option will disable that behavior.
         const NO_AUTO_CHAIN = ffi::SSL_MODE_NO_AUTO_CHAIN as _;
 
-        /// Release memory buffers when the session does not need them.
-        ///
-        /// This saves ~34 KiB of memory for idle streams.
-        const RELEASE_BUFFERS = ffi::SSL_MODE_RELEASE_BUFFERS as _;
 
-        /// Sends the fake `TLS_FALLBACK_SCSV` cipher suite in the ClientHello message of a
+        /// Sends the fake `TLS_FALLBACK_SCSV` cipher suite in the `ClientHello` message of a
         /// handshake.
         ///
         /// This should only be enabled if a client has failed to connect to a server which
@@ -284,8 +249,9 @@ pub struct SslMethod {
 impl SslMethod {
     /// Support all versions of the TLS protocol.
     #[corresponds(TLS_method)]
-    #[must_use]
+    #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub fn tls() -> Self {
+        // SAFETY: The TLS method is a process-lifetime immutable native descriptor returned by BoringSSL.
         unsafe {
             Self {
                 ptr: ffi::TLS_method(),
@@ -298,11 +264,11 @@ impl SslMethod {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
-    #[must_use]
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
+    #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub unsafe fn tls_with_buffer() -> Self {
+        // SAFETY: The explicitly requested no-X509 TLS method is a process-lifetime immutable native descriptor.
         unsafe {
             Self {
                 ptr: ffi::TLS_with_buffers_method(),
@@ -313,8 +279,9 @@ impl SslMethod {
 
     /// Support all versions of the DTLS protocol.
     #[corresponds(DTLS_method)]
-    #[must_use]
+    #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub fn dtls() -> Self {
+        // SAFETY: The DTLS method is a process-lifetime immutable native descriptor returned by BoringSSL.
         unsafe {
             Self {
                 ptr: ffi::DTLS_method(),
@@ -333,9 +300,9 @@ impl SslMethod {
     ///
     /// The caller must ensure the pointer is valid.
     #[corresponds(TLS_server_method)]
-    #[must_use]
-    pub unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> SslMethod {
-        SslMethod {
+    #[must_use = "The returned builder assumes ownership of the supplied native context."]
+    pub const unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> Self {
+        Self {
             ptr,
             is_x509_method: false,
         }
@@ -345,34 +312,23 @@ impl SslMethod {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
-    pub unsafe fn assume_x509(&mut self) {
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
+    pub const unsafe fn assume_x509(&mut self) {
         self.is_x509_method = true;
     }
 
     /// Returns a pointer to the underlying OpenSSL value.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_ptr(&self) -> *const ffi::SSL_METHOD {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_ptr(self) -> *const ffi::SSL_METHOD {
         self.ptr
-    }
-
-    #[doc(hidden)]
-    #[deprecated(note = "renamed to `tls()`")]
-    pub fn tls_server() -> Self {
-        Self::tls()
-    }
-
-    #[doc(hidden)]
-    #[deprecated(note = "renamed to `tls()`")]
-    pub fn tls_client() -> Self {
-        Self::tls()
     }
 }
 
+// SAFETY: native TLS method pointers are immutable process-lifetime descriptors;
+// the Rust wrapper owns no mutable state behind the pointer.
 unsafe impl Sync for SslMethod {}
+// SAFETY: transferring this descriptor cannot invalidate its static storage.
 unsafe impl Send for SslMethod {}
 
 bitflags! {
@@ -409,7 +365,7 @@ impl From<X509VerifyError> for SslVerifyError {
     fn from(err: X509VerifyError) -> Self {
         // SAFETY: only maps an integer.
         let alert = unsafe { ffi::SSL_alert_from_verify_result(c_long::from(err.as_raw())) };
-        SslVerifyError::Invalid(SslAlert(alert))
+        Self::Invalid(SslAlert(alert))
     }
 }
 
@@ -457,23 +413,22 @@ impl SslFiletype {
     /// The PEM format.
     ///
     /// This corresponds to `SSL_FILETYPE_PEM`.
-    pub const PEM: SslFiletype = SslFiletype(ffi::SSL_FILETYPE_PEM);
+    pub const PEM: Self = Self(ffi::SSL_FILETYPE_PEM);
 
     /// The ASN1 format.
     ///
     /// This corresponds to `SSL_FILETYPE_ASN1`.
-    pub const ASN1: SslFiletype = SslFiletype(ffi::SSL_FILETYPE_ASN1);
+    pub const ASN1: Self = Self(ffi::SSL_FILETYPE_ASN1);
 
     /// Constructs an `SslFiletype` from a raw OpenSSL value.
-    #[must_use]
-    pub fn from_raw(raw: c_int) -> SslFiletype {
-        SslFiletype(raw)
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
+    pub const fn from_raw(raw: c_int) -> Self {
+        Self(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -484,18 +439,17 @@ pub struct StatusType(c_int);
 
 impl StatusType {
     /// An OSCP status.
-    pub const OCSP: StatusType = StatusType(ffi::TLSEXT_STATUSTYPE_ocsp);
+    pub const OCSP: Self = Self(ffi::TLSEXT_STATUSTYPE_ocsp);
 
     /// Constructs a `StatusType` from a raw OpenSSL value.
-    #[must_use]
-    pub fn from_raw(raw: c_int) -> StatusType {
-        StatusType(raw)
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
+    pub const fn from_raw(raw: c_int) -> Self {
+        Self(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -506,40 +460,61 @@ pub struct NameType(c_int);
 
 impl NameType {
     /// A host name.
-    pub const HOST_NAME: NameType = NameType(ffi::TLSEXT_NAMETYPE_host_name);
+    pub const HOST_NAME: Self = Self(ffi::TLSEXT_NAMETYPE_host_name);
 
     /// Constructs a `StatusType` from a raw OpenSSL value.
-    #[must_use]
-    pub fn from_raw(raw: c_int) -> StatusType {
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
+    pub const fn from_raw(raw: c_int) -> StatusType {
         StatusType(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
 
-static INDEXES: LazyLock<Mutex<HashMap<TypeId, c_int>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static SSL_INDEXES: LazyLock<Mutex<HashMap<TypeId, c_int>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static SESSION_CTX_INDEX: LazyLock<Index<Ssl, SslContext>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
-static X509_FLAG_INDEX: LazyLock<Index<SslContext, bool>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum CallbackRole {
+    CertVerify,
+    Verify,
+    CustomVerify,
+    ServerName,
+    TicketKey,
+    Alpn,
+    SelectCert,
+    Compression,
+    PrivateKey,
+    Status,
+    PskClient,
+    PskServer,
+    NewSession,
+    RemoveSession,
+    GetSession,
+    Keylog,
+    Info,
+    Quic,
+    EchGrease,
+}
+
+static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
+    LazyLock::new(IndexRegistry::new);
+static SSL_CALLBACKS: LazyLock<IndexRegistry<Ssl, CallbackRole>> =
+    LazyLock::new(IndexRegistry::new);
+
+static SESSION_CTX_INDEX: IndexSlot<Ssl, SslContext> = IndexSlot::new(Ssl::new_ex_index);
+static X509_FLAG_INDEX: IndexSlot<SslContext, bool> = IndexSlot::new(SslContext::new_ex_index);
 
 type CertVerifyFn = unsafe extern "C" fn(*mut ffi::X509_STORE_CTX, *mut c_void) -> c_int;
 
-// Verify stores and the cert verify trampoline, which BoringSSL cannot return.
-static VERIFY_STORE_INDEX: LazyLock<Index<SslContext, X509Store>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
-static SSL_VERIFY_STORE_INDEX: LazyLock<Index<Ssl, Option<X509Store>>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
-static CERT_VERIFY_INDEX: LazyLock<Index<SslContext, CertVerifyFn>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
+// Native getters are unavailable for these mirrored configuration values.
+static VERIFY_STORE_INDEX: IndexSlot<SslContext, Option<X509Store>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static SSL_VERIFY_STORE_INDEX: IndexSlot<Ssl, Option<X509Store>> =
+    IndexSlot::new(Ssl::new_ex_index);
+static CERT_VERIFY_INDEX: IndexSlot<SslContext, Option<CertVerifyFn>> =
+    IndexSlot::new(SslContext::new_ex_index);
 
 /// An error returned from the SNI callback.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -547,12 +522,12 @@ pub struct SniError(c_int);
 
 impl SniError {
     /// Abort the handshake with a fatal alert.
-    pub const ALERT_FATAL: SniError = SniError(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
+    pub const ALERT_FATAL: Self = Self(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
 
     /// Send a warning alert to the client and continue the handshake.
-    pub const ALERT_WARNING: SniError = SniError(ffi::SSL_TLSEXT_ERR_ALERT_WARNING);
+    pub const ALERT_WARNING: Self = Self(ffi::SSL_TLSEXT_ERR_ALERT_WARNING);
 
-    pub const NOACK: SniError = SniError(ffi::SSL_TLSEXT_ERR_NOACK);
+    pub const NOACK: Self = Self(ffi::SSL_TLSEXT_ERR_NOACK);
 }
 
 /// An SSL/TLS alert.
@@ -560,52 +535,54 @@ impl SniError {
 pub struct SslAlert(c_int);
 
 impl SslAlert {
-    pub const CLOSE_NOTIFY: Self = Self(ffi::SSL_AD_CLOSE_NOTIFY);
-    pub const UNEXPECTED_MESSAGE: Self = Self(ffi::SSL_AD_UNEXPECTED_MESSAGE);
-    pub const BAD_RECORD_MAC: Self = Self(ffi::SSL_AD_BAD_RECORD_MAC);
-    pub const DECRYPTION_FAILED: Self = Self(ffi::SSL_AD_DECRYPTION_FAILED);
-    pub const RECORD_OVERFLOW: Self = Self(ffi::SSL_AD_RECORD_OVERFLOW);
-    pub const DECOMPRESSION_FAILURE: Self = Self(ffi::SSL_AD_DECOMPRESSION_FAILURE);
-    pub const HANDSHAKE_FAILURE: Self = Self(ffi::SSL_AD_HANDSHAKE_FAILURE);
-    pub const NO_CERTIFICATE: Self = Self(ffi::SSL_AD_NO_CERTIFICATE);
-    pub const BAD_CERTIFICATE: Self = Self(ffi::SSL_AD_BAD_CERTIFICATE);
-    pub const UNSUPPORTED_CERTIFICATE: Self = Self(ffi::SSL_AD_UNSUPPORTED_CERTIFICATE);
-    pub const CERTIFICATE_REVOKED: Self = Self(ffi::SSL_AD_CERTIFICATE_REVOKED);
-    pub const CERTIFICATE_EXPIRED: Self = Self(ffi::SSL_AD_CERTIFICATE_EXPIRED);
-    pub const CERTIFICATE_UNKNOWN: Self = Self(ffi::SSL_AD_CERTIFICATE_UNKNOWN);
-    pub const ILLEGAL_PARAMETER: Self = Self(ffi::SSL_AD_ILLEGAL_PARAMETER);
-    pub const UNKNOWN_CA: Self = Self(ffi::SSL_AD_UNKNOWN_CA);
-    pub const ACCESS_DENIED: Self = Self(ffi::SSL_AD_ACCESS_DENIED);
-    pub const DECODE_ERROR: Self = Self(ffi::SSL_AD_DECODE_ERROR);
-    pub const DECRYPT_ERROR: Self = Self(ffi::SSL_AD_DECRYPT_ERROR);
-    pub const EXPORT_RESTRICTION: Self = Self(ffi::SSL_AD_EXPORT_RESTRICTION);
-    pub const PROTOCOL_VERSION: Self = Self(ffi::SSL_AD_PROTOCOL_VERSION);
-    pub const INSUFFICIENT_SECURITY: Self = Self(ffi::SSL_AD_INSUFFICIENT_SECURITY);
-    pub const INTERNAL_ERROR: Self = Self(ffi::SSL_AD_INTERNAL_ERROR);
-    pub const INAPPROPRIATE_FALLBACK: Self = Self(ffi::SSL_AD_INAPPROPRIATE_FALLBACK);
-    pub const USER_CANCELLED: Self = Self(ffi::SSL_AD_USER_CANCELLED);
-    pub const NO_RENEGOTIATION: Self = Self(ffi::SSL_AD_NO_RENEGOTIATION);
-    pub const MISSING_EXTENSION: Self = Self(ffi::SSL_AD_MISSING_EXTENSION);
-    pub const UNSUPPORTED_EXTENSION: Self = Self(ffi::SSL_AD_UNSUPPORTED_EXTENSION);
-    pub const CERTIFICATE_UNOBTAINABLE: Self = Self(ffi::SSL_AD_CERTIFICATE_UNOBTAINABLE);
-    pub const UNRECOGNIZED_NAME: Self = Self(ffi::SSL_AD_UNRECOGNIZED_NAME);
-    pub const BAD_CERTIFICATE_STATUS_RESPONSE: Self =
-        Self(ffi::SSL_AD_BAD_CERTIFICATE_STATUS_RESPONSE);
-    pub const BAD_CERTIFICATE_HASH_VALUE: Self = Self(ffi::SSL_AD_BAD_CERTIFICATE_HASH_VALUE);
-    pub const UNKNOWN_PSK_IDENTITY: Self = Self(ffi::SSL_AD_UNKNOWN_PSK_IDENTITY);
-    pub const CERTIFICATE_REQUIRED: Self = Self(ffi::SSL_AD_CERTIFICATE_REQUIRED);
-    pub const NO_APPLICATION_PROTOCOL: Self = Self(ffi::SSL_AD_NO_APPLICATION_PROTOCOL);
+    native_constants! {
+        CLOSE_NOTIFY = ffi::SSL_AD_CLOSE_NOTIFY;
+        UNEXPECTED_MESSAGE = ffi::SSL_AD_UNEXPECTED_MESSAGE;
+        BAD_RECORD_MAC = ffi::SSL_AD_BAD_RECORD_MAC;
+        DECRYPTION_FAILED = ffi::SSL_AD_DECRYPTION_FAILED;
+        RECORD_OVERFLOW = ffi::SSL_AD_RECORD_OVERFLOW;
+        DECOMPRESSION_FAILURE = ffi::SSL_AD_DECOMPRESSION_FAILURE;
+        HANDSHAKE_FAILURE = ffi::SSL_AD_HANDSHAKE_FAILURE;
+        NO_CERTIFICATE = ffi::SSL_AD_NO_CERTIFICATE;
+        BAD_CERTIFICATE = ffi::SSL_AD_BAD_CERTIFICATE;
+        UNSUPPORTED_CERTIFICATE = ffi::SSL_AD_UNSUPPORTED_CERTIFICATE;
+        CERTIFICATE_REVOKED = ffi::SSL_AD_CERTIFICATE_REVOKED;
+        CERTIFICATE_EXPIRED = ffi::SSL_AD_CERTIFICATE_EXPIRED;
+        CERTIFICATE_UNKNOWN = ffi::SSL_AD_CERTIFICATE_UNKNOWN;
+        ILLEGAL_PARAMETER = ffi::SSL_AD_ILLEGAL_PARAMETER;
+        UNKNOWN_CA = ffi::SSL_AD_UNKNOWN_CA;
+        ACCESS_DENIED = ffi::SSL_AD_ACCESS_DENIED;
+        DECODE_ERROR = ffi::SSL_AD_DECODE_ERROR;
+        DECRYPT_ERROR = ffi::SSL_AD_DECRYPT_ERROR;
+        EXPORT_RESTRICTION = ffi::SSL_AD_EXPORT_RESTRICTION;
+        PROTOCOL_VERSION = ffi::SSL_AD_PROTOCOL_VERSION;
+        INSUFFICIENT_SECURITY = ffi::SSL_AD_INSUFFICIENT_SECURITY;
+        INTERNAL_ERROR = ffi::SSL_AD_INTERNAL_ERROR;
+        INAPPROPRIATE_FALLBACK = ffi::SSL_AD_INAPPROPRIATE_FALLBACK;
+        USER_CANCELLED = ffi::SSL_AD_USER_CANCELLED;
+        NO_RENEGOTIATION = ffi::SSL_AD_NO_RENEGOTIATION;
+        MISSING_EXTENSION = ffi::SSL_AD_MISSING_EXTENSION;
+        UNSUPPORTED_EXTENSION = ffi::SSL_AD_UNSUPPORTED_EXTENSION;
+        CERTIFICATE_UNOBTAINABLE = ffi::SSL_AD_CERTIFICATE_UNOBTAINABLE;
+        UNRECOGNIZED_NAME = ffi::SSL_AD_UNRECOGNIZED_NAME;
+        BAD_CERTIFICATE_STATUS_RESPONSE = ffi::SSL_AD_BAD_CERTIFICATE_STATUS_RESPONSE;
+        BAD_CERTIFICATE_HASH_VALUE = ffi::SSL_AD_BAD_CERTIFICATE_HASH_VALUE;
+        UNKNOWN_PSK_IDENTITY = ffi::SSL_AD_UNKNOWN_PSK_IDENTITY;
+        CERTIFICATE_REQUIRED = ffi::SSL_AD_CERTIFICATE_REQUIRED;
+        NO_APPLICATION_PROTOCOL = ffi::SSL_AD_NO_APPLICATION_PROTOCOL;
+    }
 
     /// Returns the alert's description code.
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 
     /// Returns a readable name of the alert, or "unknown".
     #[corresponds(SSL_alert_desc_string_long)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(&self) -> &'static str {
+        // SAFETY: The alert description lookup returns a static NUL-terminated native string.
         unsafe {
             CStr::from_ptr(ffi::SSL_alert_desc_string_long(self.0))
                 .to_str()
@@ -620,10 +597,10 @@ pub struct AlpnError(c_int);
 
 impl AlpnError {
     /// Terminate the handshake with a fatal alert.
-    pub const ALERT_FATAL: AlpnError = AlpnError(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
+    pub const ALERT_FATAL: Self = Self(ffi::SSL_TLSEXT_ERR_ALERT_FATAL);
 
     /// Do not select a protocol, but continue the handshake.
-    pub const NOACK: AlpnError = AlpnError(ffi::SSL_TLSEXT_ERR_NOACK);
+    pub const NOACK: Self = Self(ffi::SSL_TLSEXT_ERR_NOACK);
 }
 
 /// An error returned from a certificate selection callback.
@@ -644,67 +621,62 @@ impl SelectCertError {
 pub enum SelectCertAction {
     /// Complete certificate selection normally.
     Success,
-    /// Discard ClientHelloInner and continue with ClientHelloOuter.
+    /// Discard `ClientHelloInner` and continue with `ClientHelloOuter`.
     ///
-    /// BoringSSL calls the callback again with ClientHelloOuter and continues the handshake
+    /// `BoringSSL` calls the callback again with `ClientHelloOuter` and continues the handshake
     /// without retry configs. This action is only valid when [`SslRef::ech_accepted`] is true;
     /// otherwise the handshake fails.
-    /// Changes made to the connection while processing ClientHelloInner carry over to the outer
-    /// ClientHello.
+    /// Changes made to the connection while processing `ClientHelloInner` carry over to the outer
+    /// `ClientHello`.
     DisableEch,
 }
 
 /// Extension types, to be used with `ClientHello::get_extension`.
 ///
-/// **WARNING**: The current implementation of `From` is unsound, as it's possible to create an
-/// ExtensionType that is not defined by the impl. `From` will be deprecated in favor of `TryFrom`
-/// in the next major bump of the library.
+/// Unrecognized wire identifiers are represented without loss.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
 pub struct ExtensionType(u16);
 
 impl ExtensionType {
-    pub const SERVER_NAME: Self = Self(ffi::TLSEXT_TYPE_server_name as u16);
-    pub const STATUS_REQUEST: Self = Self(ffi::TLSEXT_TYPE_status_request as u16);
-    pub const EC_POINT_FORMATS: Self = Self(ffi::TLSEXT_TYPE_ec_point_formats as u16);
-    pub const SIGNATURE_ALGORITHMS: Self = Self(ffi::TLSEXT_TYPE_signature_algorithms as u16);
-    pub const TRUST_ANCHORS: Self = Self(ffi::TLSEXT_TYPE_trust_anchors as u16);
-    pub const SRTP: Self = Self(ffi::TLSEXT_TYPE_srtp as u16);
-    pub const APPLICATION_LAYER_PROTOCOL_NEGOTIATION: Self =
-        Self(ffi::TLSEXT_TYPE_application_layer_protocol_negotiation as u16);
-    pub const PADDING: Self = Self(ffi::TLSEXT_TYPE_padding as u16);
-    pub const EXTENDED_MASTER_SECRET: Self = Self(ffi::TLSEXT_TYPE_extended_master_secret as u16);
-    pub const QUIC_TRANSPORT_PARAMETERS_LEGACY: Self =
-        Self(ffi::TLSEXT_TYPE_quic_transport_parameters_legacy as u16);
-    pub const QUIC_TRANSPORT_PARAMETERS_STANDARD: Self =
-        Self(ffi::TLSEXT_TYPE_quic_transport_parameters_standard as u16);
-    pub const CERT_COMPRESSION: Self = Self(ffi::TLSEXT_TYPE_cert_compression as u16);
-    pub const SESSION_TICKET: Self = Self(ffi::TLSEXT_TYPE_session_ticket as u16);
-    pub const SUPPORTED_GROUPS: Self = Self(ffi::TLSEXT_TYPE_supported_groups as u16);
-    pub const PRE_SHARED_KEY: Self = Self(ffi::TLSEXT_TYPE_pre_shared_key as u16);
-    pub const EARLY_DATA: Self = Self(ffi::TLSEXT_TYPE_early_data as u16);
-    pub const SUPPORTED_VERSIONS: Self = Self(ffi::TLSEXT_TYPE_supported_versions as u16);
-    pub const COOKIE: Self = Self(ffi::TLSEXT_TYPE_cookie as u16);
-    pub const PSK_KEY_EXCHANGE_MODES: Self = Self(ffi::TLSEXT_TYPE_psk_key_exchange_modes as u16);
-    pub const CERTIFICATE_AUTHORITIES: Self = Self(ffi::TLSEXT_TYPE_certificate_authorities as u16);
-    pub const SIGNATURE_ALGORITHMS_CERT: Self =
-        Self(ffi::TLSEXT_TYPE_signature_algorithms_cert as u16);
-    pub const KEY_SHARE: Self = Self(ffi::TLSEXT_TYPE_key_share as u16);
-    pub const RENEGOTIATE: Self = Self(ffi::TLSEXT_TYPE_renegotiate as u16);
-    pub const DELEGATED_CREDENTIAL: Self = Self(ffi::TLSEXT_TYPE_delegated_credential as u16);
-    pub const APPLICATION_SETTINGS: Self = Self(ffi::TLSEXT_TYPE_application_settings as u16);
-    pub const APPLICATION_SETTINGS_OLD: Self =
-        Self(ffi::TLSEXT_TYPE_application_settings_old as u16);
-    pub const ENCRYPTED_CLIENT_HELLO: Self = Self(ffi::TLSEXT_TYPE_encrypted_client_hello as u16);
-    pub const CERTIFICATE_TIMESTAMP: Self = Self(ffi::TLSEXT_TYPE_certificate_timestamp as u16);
-    pub const NEXT_PROTO_NEG: Self = Self(ffi::TLSEXT_TYPE_next_proto_neg as u16);
-    pub const CHANNEL_ID: Self = Self(ffi::TLSEXT_TYPE_channel_id as u16);
-    #[cfg(not(feature = "fips"))]
-    pub const RECORD_SIZE_LIMIT: Self = Self(ffi::TLSEXT_TYPE_record_size_limit as u16);
-    pub const SERVER_PADDING: Self = Self(ffi::TLSEXT_TYPE_server_padding as u16);
+    native_constants! {
+        SERVER_NAME = crate::native_u16(ffi::TLSEXT_TYPE_server_name);
+        STATUS_REQUEST = crate::native_u16(ffi::TLSEXT_TYPE_status_request);
+        EC_POINT_FORMATS = crate::native_u16(ffi::TLSEXT_TYPE_ec_point_formats);
+        SIGNATURE_ALGORITHMS = crate::native_u16(ffi::TLSEXT_TYPE_signature_algorithms);
+        TRUST_ANCHORS = crate::native_u16(ffi::TLSEXT_TYPE_trust_anchors);
+        SRTP = crate::native_u16(ffi::TLSEXT_TYPE_srtp);
+        APPLICATION_LAYER_PROTOCOL_NEGOTIATION = crate::native_u16(ffi::TLSEXT_TYPE_application_layer_protocol_negotiation);
+        PADDING = crate::native_u16(ffi::TLSEXT_TYPE_padding);
+        EXTENDED_MASTER_SECRET = crate::native_u16(ffi::TLSEXT_TYPE_extended_master_secret);
+        QUIC_TRANSPORT_PARAMETERS_LEGACY = crate::native_u16(ffi::TLSEXT_TYPE_quic_transport_parameters_legacy);
+        QUIC_TRANSPORT_PARAMETERS_STANDARD = crate::native_u16(ffi::TLSEXT_TYPE_quic_transport_parameters_standard);
+        CERT_COMPRESSION = crate::native_u16(ffi::TLSEXT_TYPE_cert_compression);
+        SESSION_TICKET = crate::native_u16(ffi::TLSEXT_TYPE_session_ticket);
+        SUPPORTED_GROUPS = crate::native_u16(ffi::TLSEXT_TYPE_supported_groups);
+        PRE_SHARED_KEY = crate::native_u16(ffi::TLSEXT_TYPE_pre_shared_key);
+        EARLY_DATA = crate::native_u16(ffi::TLSEXT_TYPE_early_data);
+        SUPPORTED_VERSIONS = crate::native_u16(ffi::TLSEXT_TYPE_supported_versions);
+        COOKIE = crate::native_u16(ffi::TLSEXT_TYPE_cookie);
+        PSK_KEY_EXCHANGE_MODES = crate::native_u16(ffi::TLSEXT_TYPE_psk_key_exchange_modes);
+        CERTIFICATE_AUTHORITIES = crate::native_u16(ffi::TLSEXT_TYPE_certificate_authorities);
+        SIGNATURE_ALGORITHMS_CERT = crate::native_u16(ffi::TLSEXT_TYPE_signature_algorithms_cert);
+        KEY_SHARE = crate::native_u16(ffi::TLSEXT_TYPE_key_share);
+        RENEGOTIATE = crate::native_u16(ffi::TLSEXT_TYPE_renegotiate);
+        DELEGATED_CREDENTIAL = crate::native_u16(ffi::TLSEXT_TYPE_delegated_credential);
+        APPLICATION_SETTINGS = crate::native_u16(ffi::TLSEXT_TYPE_application_settings);
+        APPLICATION_SETTINGS_OLD = crate::native_u16(ffi::TLSEXT_TYPE_application_settings_old);
+        ENCRYPTED_CLIENT_HELLO = crate::native_u16(ffi::TLSEXT_TYPE_encrypted_client_hello);
+        CERTIFICATE_TIMESTAMP = crate::native_u16(ffi::TLSEXT_TYPE_certificate_timestamp);
+        NEXT_PROTO_NEG = crate::native_u16(ffi::TLSEXT_TYPE_next_proto_neg);
+        CHANNEL_ID = crate::native_u16(ffi::TLSEXT_TYPE_channel_id);
+        #[cfg(not(feature = "fips"))]
+        RECORD_SIZE_LIMIT = crate::native_u16(ffi::TLSEXT_TYPE_record_size_limit);
+        SERVER_PADDING = crate::native_u16(ffi::TLSEXT_TYPE_server_padding);
+    }
 
     /// Returns the wire extension type.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub const fn as_raw(self) -> u16 {
         self.0
     }
@@ -712,7 +684,7 @@ impl ExtensionType {
     /// Whether this is an [RFC 8701] GREASE value.
     ///
     /// [RFC 8701]: https://www.rfc-editor.org/rfc/rfc8701.html
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub const fn is_grease(self) -> bool {
         self.0 & 0x0f0f == 0x0a0a && self.0 >> 8 == self.0 & 0xff
     }
@@ -729,29 +701,31 @@ impl From<u16> for ExtensionType {
 pub struct SslVersion(u16);
 
 impl SslVersion {
-    /// SSLv3
-    pub const SSL3: SslVersion = SslVersion(ffi::SSL3_VERSION as _);
+    native_constants! {
+        /// `SSLv3`
+        SSL3 = crate::native_u16(ffi::SSL3_VERSION);
 
-    /// TLSv1.0
-    pub const TLS1: SslVersion = SslVersion(ffi::TLS1_VERSION as _);
+        /// TLSv1.0
+        TLS1 = crate::native_u16(ffi::TLS1_VERSION);
 
-    /// TLSv1.1
-    pub const TLS1_1: SslVersion = SslVersion(ffi::TLS1_1_VERSION as _);
+        /// TLSv1.1
+        TLS1_1 = crate::native_u16(ffi::TLS1_1_VERSION);
 
-    /// TLSv1.2
-    pub const TLS1_2: SslVersion = SslVersion(ffi::TLS1_2_VERSION as _);
+        /// TLSv1.2
+        TLS1_2 = crate::native_u16(ffi::TLS1_2_VERSION);
 
-    /// TLSv1.3
-    pub const TLS1_3: SslVersion = SslVersion(ffi::TLS1_3_VERSION as _);
+        /// TLSv1.3
+        TLS1_3 = crate::native_u16(ffi::TLS1_3_VERSION);
 
-    /// DTLSv1.0
-    pub const DTLS1: SslVersion = SslVersion(ffi::DTLS1_VERSION as _);
+        /// DTLSv1.0
+        DTLS1 = crate::native_u16(ffi::DTLS1_VERSION);
 
-    /// DTLSv1.2
-    pub const DTLS1_2: SslVersion = SslVersion(ffi::DTLS1_2_VERSION as _);
+        /// DTLSv1.2
+        DTLS1_2 = crate::native_u16(ffi::DTLS1_2_VERSION);
 
-    /// DTLSv1.3
-    pub const DTLS1_3: SslVersion = SslVersion(ffi::DTLS1_3_VERSION as _);
+        /// DTLSv1.3
+        DTLS1_3 = crate::native_u16(ffi::DTLS1_3_VERSION);
+    }
 }
 
 impl TryFrom<u16> for SslVersion {
@@ -806,68 +780,54 @@ impl fmt::Display for SslVersion {
 
 /// A signature verification algorithm.
 ///
-/// **WARNING**: The current implementation of `From` is unsound, as it's possible to create an
-/// SslSignatureAlgorithm that is not defined by the impl. `From` will be deprecated in favor of
-/// `TryFrom` in the next major bump of the library.
+/// Unrecognized wire identifiers are represented without loss.
 #[repr(transparent)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct SslSignatureAlgorithm(u16);
 
 impl SslSignatureAlgorithm {
-    pub const RSA_PKCS1_SHA1: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA1 as _);
+    native_constants! {
+        RSA_PKCS1_SHA1 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA1);
 
-    pub const RSA_PKCS1_SHA256: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA256 as _);
+        RSA_PKCS1_SHA256 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA256);
 
-    pub const RSA_PKCS1_SHA384: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA384 as _);
+        RSA_PKCS1_SHA384 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA384);
 
-    pub const RSA_PKCS1_SHA512: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_SHA512 as _);
+        RSA_PKCS1_SHA512 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_SHA512);
 
-    pub const RSA_PKCS1_MD5_SHA1: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PKCS1_MD5_SHA1 as _);
+        RSA_PKCS1_MD5_SHA1 = crate::native_u16(ffi::SSL_SIGN_RSA_PKCS1_MD5_SHA1);
 
-    pub const ECDSA_SHA1: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SHA1 as _);
+        ECDSA_SHA1 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SHA1);
 
-    pub const ECDSA_SECP256R1_SHA256: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256 as _);
+        ECDSA_SECP256R1_SHA256 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256);
 
-    pub const ECDSA_SECP384R1_SHA384: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SECP384R1_SHA384 as _);
+        ECDSA_SECP384R1_SHA384 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SECP384R1_SHA384);
 
-    pub const ECDSA_SECP521R1_SHA512: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ECDSA_SECP521R1_SHA512 as _);
+        ECDSA_SECP521R1_SHA512 = crate::native_u16(ffi::SSL_SIGN_ECDSA_SECP521R1_SHA512);
 
-    pub const RSA_PSS_RSAE_SHA256: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256 as _);
+        RSA_PSS_RSAE_SHA256 = crate::native_u16(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256);
 
-    pub const RSA_PSS_RSAE_SHA384: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA384 as _);
+        RSA_PSS_RSAE_SHA384 = crate::native_u16(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA384);
 
-    pub const RSA_PSS_RSAE_SHA512: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA512 as _);
+        RSA_PSS_RSAE_SHA512 = crate::native_u16(ffi::SSL_SIGN_RSA_PSS_RSAE_SHA512);
 
-    pub const ED25519: SslSignatureAlgorithm = SslSignatureAlgorithm(ffi::SSL_SIGN_ED25519 as _);
+        ED25519 = crate::native_u16(ffi::SSL_SIGN_ED25519);
 
-    pub const ML_DSA_44: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ML_DSA_44 as _);
+        ML_DSA_44 = crate::native_u16(ffi::SSL_SIGN_ML_DSA_44);
 
-    pub const ML_DSA_65: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ML_DSA_65 as _);
+        ML_DSA_65 = crate::native_u16(ffi::SSL_SIGN_ML_DSA_65);
 
-    pub const ML_DSA_87: SslSignatureAlgorithm =
-        SslSignatureAlgorithm(ffi::SSL_SIGN_ML_DSA_87 as _);
+        ML_DSA_87 = crate::native_u16(ffi::SSL_SIGN_ML_DSA_87);
+    }
 
     /// Returns the name of this signature algorithm, or `None` if unknown.
     ///
     /// For ECDSA algorithms the TLS 1.3 form is returned
     /// (e.g. `ecdsa_secp256r1_sha256`), not the TLS 1.2 form (`ecdsa_sha256`).
     #[corresponds(SSL_get_signature_algorithm_name)]
-    #[must_use]
+    #[must_use = "Use the returned name for reporting or selecting the native identifier."]
     pub fn name(&self) -> Option<&'static str> {
+        // SAFETY: The signature-algorithm name is either null or a static NUL-terminated native string.
         unsafe {
             // Pass `include_curve = 1` to get the TLS 1.3 form for ECDSA algorithms
             // (e.g. `ecdsa_secp256r1_sha256` rather than the TLS 1.2 `ecdsa_sha256`).
@@ -902,28 +862,29 @@ impl From<u16> for SslSignatureAlgorithm {
 pub struct KeyShare(u16);
 
 impl KeyShare {
-    pub const P256: KeyShare = KeyShare(ffi::SSL_GROUP_SECP256R1 as _);
+    native_constants! {
+        P256 = crate::native_u16(ffi::SSL_GROUP_SECP256R1);
 
-    pub const P384: KeyShare = KeyShare(ffi::SSL_GROUP_SECP384R1 as _);
+        P384 = crate::native_u16(ffi::SSL_GROUP_SECP384R1);
 
-    pub const P521: KeyShare = KeyShare(ffi::SSL_GROUP_SECP521R1 as _);
+        P521 = crate::native_u16(ffi::SSL_GROUP_SECP521R1);
 
-    pub const X25519: KeyShare = KeyShare(ffi::SSL_GROUP_X25519 as _);
+        X25519 = crate::native_u16(ffi::SSL_GROUP_X25519);
 
-    pub const X25519_MLKEM768: KeyShare = KeyShare(ffi::SSL_GROUP_X25519_MLKEM768 as _);
+        X25519_MLKEM768 = crate::native_u16(ffi::SSL_GROUP_X25519_MLKEM768);
 
-    pub const X25519_KYBER768_DRAFT00: KeyShare =
-        KeyShare(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00 as _);
+        X25519_KYBER768_DRAFT00 = crate::native_u16(ffi::SSL_GROUP_X25519_KYBER768_DRAFT00);
 
-    pub const P256_KYBER768_DRAFT00: KeyShare = KeyShare(ffi::SSL_GROUP_P256_KYBER768_DRAFT00 as _);
+        P256_KYBER768_DRAFT00 = crate::native_u16(ffi::SSL_GROUP_P256_KYBER768_DRAFT00);
 
-    pub const MLKEM1024: KeyShare = KeyShare(ffi::SSL_GROUP_MLKEM1024 as _);
+        MLKEM1024 = crate::native_u16(ffi::SSL_GROUP_MLKEM1024);
 
-    #[cfg(not(feature = "fips"))]
-    pub const FFDHE2048: KeyShare = KeyShare(ffi::SSL_GROUP_FFDHE2048 as _);
+        #[cfg(not(feature = "fips"))]
+        FFDHE2048 = crate::native_u16(ffi::SSL_GROUP_FFDHE2048);
 
-    #[cfg(not(feature = "fips"))]
-    pub const FFDHE3072: KeyShare = KeyShare(ffi::SSL_GROUP_FFDHE3072 as _);
+        #[cfg(not(feature = "fips"))]
+        FFDHE3072 = crate::native_u16(ffi::SSL_GROUP_FFDHE3072);
+    }
 }
 
 /// A TLS 1.3 cipher suite.
@@ -932,14 +893,13 @@ impl KeyShare {
 pub struct Tls13Cipher(u16);
 
 impl Tls13Cipher {
-    pub const AES_128_GCM_SHA256: Tls13Cipher =
-        Tls13Cipher(ffi::SSL_CIPHER_AES_128_GCM_SHA256 as _);
+    native_constants! {
+        AES_128_GCM_SHA256 = crate::native_u16(ffi::SSL_CIPHER_AES_128_GCM_SHA256);
 
-    pub const AES_256_GCM_SHA384: Tls13Cipher =
-        Tls13Cipher(ffi::SSL_CIPHER_AES_256_GCM_SHA384 as _);
+        AES_256_GCM_SHA384 = crate::native_u16(ffi::SSL_CIPHER_AES_256_GCM_SHA384);
 
-    pub const CHACHA20_POLY1305_SHA256: Tls13Cipher =
-        Tls13Cipher(ffi::SSL_CIPHER_CHACHA20_POLY1305_SHA256 as _);
+        CHACHA20_POLY1305_SHA256 = crate::native_u16(ffi::SSL_CIPHER_CHACHA20_POLY1305_SHA256);
+    }
 }
 
 /// A compliance policy.
@@ -968,12 +928,14 @@ impl CompliancePolicy {
 pub struct CertificateCompressionAlgorithm(u16);
 
 impl CertificateCompressionAlgorithm {
-    pub const ZLIB: Self = Self(ffi::TLSEXT_cert_compression_zlib as u16);
+    native_constants! {
+        ZLIB = crate::native_u16(ffi::TLSEXT_cert_compression_zlib);
 
-    pub const BROTLI: Self = Self(ffi::TLSEXT_cert_compression_brotli as u16);
+        BROTLI = crate::native_u16(ffi::TLSEXT_cert_compression_brotli);
 
-    #[cfg(not(feature = "fips"))]
-    pub const ZSTD: Self = Self(ffi::TLSEXT_cert_compression_zstd as u16);
+        #[cfg(not(feature = "fips"))]
+        ZSTD = crate::native_u16(ffi::TLSEXT_cert_compression_zstd);
+    }
 }
 
 /// A standard implementation of protocol selection for Application Layer Protocol Negotiation
@@ -987,18 +949,19 @@ impl CertificateCompressionAlgorithm {
 ///
 /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos
 #[corresponds(SSL_select_next_proto)]
-#[must_use]
+#[must_use = "Use the negotiated protocol to dispatch the application connection."]
 pub fn select_next_proto<'a>(server: &'a [u8], client: &'a [u8]) -> Option<&'a [u8]> {
     if server.is_empty() || client.is_empty() {
         return None;
     }
 
+    // SAFETY: The input protocol lists remain live; output pointer/length slots are writable and point into the inputs.
     unsafe {
         let mut out = ptr::null_mut();
         let mut outlen = 0;
         let r = ffi::SSL_select_next_proto(
-            &mut out,
-            &mut outlen,
+            &raw mut out,
+            &raw mut outlen,
             server.as_ptr(),
             try_int(server.len()).ok()?,
             client.as_ptr(),
@@ -1047,7 +1010,7 @@ impl SslInfoCallbackMode {
 /// the least significant byte is the alert itself.
 #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
 pub enum SslInfoCallbackValue {
-    /// The unit value (1). Some BoringSSL info callback modes, like ACCEPT_LOOP, always call the
+    /// The unit value (1). Some `BoringSSL` info callback modes, like `ACCEPT_LOOP`, always call the
     /// callback with `value` set to the unit value. If the [`SslInfoCallbackValue`] is a
     /// `Unit`, it can safely be disregarded.
     Unit,
@@ -1055,6 +1018,20 @@ pub enum SslInfoCallbackValue {
     /// variant should only be present if the info callback was called with a `READ_ALERT` or
     /// `WRITE_ALERT` mode.
     Alert(SslInfoCallbackAlert),
+}
+
+/// Session-ticket key callback mode and the corresponding ticket header buffers.
+pub enum TicketKeyMode<'a> {
+    /// Populate the key name and IV for a new ticket.
+    Encrypt {
+        key_name: &'a mut [u8; 16],
+        iv: &'a mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    },
+    /// Inspect the immutable key name and IV supplied by the peer.
+    Decrypt {
+        key_name: &'a [u8; 16],
+        iv: &'a [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    },
 }
 
 /// Ticket key callback status.
@@ -1070,7 +1047,7 @@ pub enum TicketKeyCallbackResult {
     ///
     /// # Note
     ///
-    /// This is a decryption specific status code when using the submoduled BoringSSL.
+    /// This is a decryption specific status code when using the submoduled `BoringSSL`.
     Noop,
 
     /// Resumption callback was successful.
@@ -1109,15 +1086,15 @@ pub struct SslInfoCallbackAlert(c_int);
 
 impl SslInfoCallbackAlert {
     /// The level of the SSL alert.
-    #[must_use]
-    pub fn alert_level(&self) -> Ssl3AlertLevel {
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub const fn alert_level(self) -> Ssl3AlertLevel {
         let value = self.0 >> 8;
         Ssl3AlertLevel(value)
     }
 
     /// The value of the SSL alert.
-    #[must_use]
-    pub fn alert(&self) -> SslAlert {
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub fn alert(self) -> SslAlert {
         let value = self.0 & i32::from(u8::MAX);
         SslAlert(value)
     }
@@ -1127,8 +1104,8 @@ impl SslInfoCallbackAlert {
 pub struct Ssl3AlertLevel(c_int);
 
 impl Ssl3AlertLevel {
-    pub const WARNING: Ssl3AlertLevel = Self(ffi::SSL3_AL_WARNING);
-    pub const FATAL: Ssl3AlertLevel = Self(ffi::SSL3_AL_FATAL);
+    pub const WARNING: Self = Self(ffi::SSL3_AL_WARNING);
+    pub const FATAL: Self = Self(ffi::SSL3_AL_FATAL);
 }
 
 /// A builder for `SslContext`s.
@@ -1141,14 +1118,15 @@ pub struct SslContextBuilder {
 impl SslContextBuilder {
     /// Creates a new `SslContextBuilder`.
     #[corresponds(SSL_CTX_new)]
-    pub fn new(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
+    pub fn new(method: SslMethod) -> Result<Self, ErrorStack> {
+        // SAFETY: The returned context pointer is checked for null and then transferred to its exclusive builder.
         unsafe {
             init();
             let ctx = cvt_p(ffi::SSL_CTX_new(method.as_ptr()))?;
-            let mut builder = SslContextBuilder::from_ptr(ctx);
+            let mut builder = Self::from_ptr(ctx);
 
             if method.is_x509_method {
-                builder.ctx.assume_x509();
+                builder.ctx.assume_x509()?;
             }
 
             Ok(builder)
@@ -1168,6 +1146,7 @@ impl SslContextBuilder {
     /// The context must own its cert store exclusively.
     pub unsafe fn from_ptr(ctx: *mut ffi::SSL_CTX) -> Self {
         Self {
+            // SAFETY: The caller provides an owned, initialized native SSL context and transfers ownership once.
             ctx: unsafe { SslContext::from_ptr(ctx) },
             has_shared_cert_store: false,
         }
@@ -1177,17 +1156,19 @@ impl SslContextBuilder {
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
-    pub unsafe fn assume_x509(&mut self) {
-        unsafe {
-            self.ctx.assume_x509();
-        }
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
+    ///
+    /// # Errors
+    ///
+    /// Registration or replacement of the native X.509 marker fails.
+    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: The caller established that this uniquely owned context really uses the X509 method.
+        unsafe { self.ctx.assume_x509() }
     }
 
     /// Returns a pointer to the raw OpenSSL value.
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub fn as_ptr(&self) -> *mut ffi::SSL_CTX {
         self.ctx.as_ptr()
     }
@@ -1211,21 +1192,24 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `SslContext` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_cert_verify_callback)]
-    pub fn set_cert_verify_callback<F>(&mut self, callback: F)
+    pub fn set_cert_verify_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
         self.ctx.check_x509();
 
-        // NOTE(jlarisch): Q: Why don't we wrap the callback in an Arc, since
-        // `set_verify_callback` does?
-        // A: I don't think that Arc is necessary, and I don't think one is necessary here.
-        // There's no way to get a mutable reference to the `Ssl` or `SslContext`, which
-        // is what you need to register a new callback.
-        // See the NOTE in `ssl_raw_verify` for confirmation.
-        self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
-        self.replace_ex_data(*CERT_VERIFY_INDEX, raw_cert_verify::<F> as CertVerifyFn);
+        let target = self.ensure_slot(&CERT_VERIFY_INDEX)?;
+        self.set_ex_data(
+            SslContext::register_callback::<F>(CallbackRole::CertVerify)?,
+            callback,
+        )?;
+        self.set_ex_data(target, Some(raw_cert_verify::<F> as CertVerifyFn))?;
+        // SAFETY: both registered native callback slots are initialized.
         unsafe {
             ffi::SSL_CTX_set_cert_verify_callback(
                 self.as_ptr(),
@@ -1233,6 +1217,7 @@ impl SslContextBuilder {
                 ptr::null_mut(),
             );
         }
+        Ok(())
     }
 
     /// Configures the certificate verification method for new connections.
@@ -1240,6 +1225,7 @@ impl SslContextBuilder {
     pub fn set_verify(&mut self, mode: SslVerifyMode) {
         self.ctx.check_x509();
 
+        // SAFETY: The builder exclusively owns a live native context and the verification mode is a scalar bitset.
         unsafe {
             ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), None);
         }
@@ -1250,7 +1236,7 @@ impl SslContextBuilder {
     /// An explicit [`SslVerifyMode::NONE`] reads the same as the default. Panics if the context
     /// is not configured for X.509 certificates.
     #[corresponds(SSL_CTX_get_verify_mode)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn verify_mode(&self) -> SslVerifyMode {
         self.ctx.verify_mode()
     }
@@ -1271,21 +1257,34 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_verify)]
-    pub fn set_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
         self.ctx.check_x509();
 
+        // SAFETY: The builder exclusively owns its context; the registered typed callback slot remains live until context teardown.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Verify)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(raw_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Configures certificate verification.
@@ -1302,19 +1301,32 @@ impl SslContextBuilder {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_custom_verify)]
-    pub fn set_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_custom_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
+        // SAFETY: The registered custom verifier is owned by context extra data before the native callback pointer is installed.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::CustomVerify)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_custom_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(raw_custom_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Configures whether resumed client sessions use the custom verification callback.
@@ -1324,7 +1336,8 @@ impl SslContextBuilder {
     /// with [`SslVerifyMode::NONE`], including a mode set on one connection.
     #[corresponds(SSL_CTX_set_reverify_on_resume)]
     pub fn set_reverify_on_resume(&mut self, enabled: bool) {
-        unsafe { ffi::SSL_CTX_set_reverify_on_resume(self.as_ptr(), enabled as _) }
+        // SAFETY: The context is live and exclusively borrowed; the reverify flag is a native scalar setting.
+        unsafe { ffi::SSL_CTX_set_reverify_on_resume(self.as_ptr(), c_int::from(enabled)) }
     }
 
     /// Configures the server name indication (SNI) callback for new connections.
@@ -1336,11 +1349,16 @@ impl SslContextBuilder {
     /// with `set_ssl_context`
     ///
     // FIXME tlsext prefix?
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_tlsext_servername_callback)]
-    pub fn set_servername_callback<F>(&mut self, callback: F)
+    pub fn set_servername_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + 'static + Sync + Send,
     {
+        // SAFETY: The callback pointer refers to an allocation owned by the context extra-data registry, which outlives native callbacks.
         unsafe {
             // The SNI callback is somewhat unique in that the callback associated with the original
             // context associated with an SSL can be used even if the SSL's context has been swapped
@@ -1348,15 +1366,22 @@ impl SslContextBuilder {
             // context's ex data. Instead, pass the pointer directly as the servername arg. It's
             // still stored in ex data to manage the lifetime.
 
-            let callback_index = SslContext::cached_ex_index::<F>();
+            let callback_index = SslContext::register_callback::<F>(CallbackRole::ServerName)?;
 
-            self.ctx.replace_ex_data(callback_index, callback);
-            let callback = self.ctx.ex_data(callback_index).unwrap();
+            self.ctx.replace_ex_data(callback_index, callback)?;
+            let callback = self
+                .ctx
+                .ex_data(callback_index)
+                .ok_or_else(|| ErrorStack::internal_error_str("missing SNI callback"))?;
 
             let arg = ptr::from_ref(callback).cast_mut().cast();
-            ffi::SSL_CTX_set_tlsext_servername_arg(self.as_ptr(), arg);
-            ffi::SSL_CTX_set_tlsext_servername_callback(self.as_ptr(), Some(raw_sni::<F>));
+            cvt(ffi::SSL_CTX_set_tlsext_servername_arg(self.as_ptr(), arg))?;
+            cvt(ffi::SSL_CTX_set_tlsext_servername_callback(
+                self.as_ptr(),
+                Some(raw_sni::<F>),
+            ))?;
         }
+        Ok(())
     }
 
     /// Configures a custom session ticket key callback for session resumption.
@@ -1381,16 +1406,18 @@ impl SslContextBuilder {
     /// and hmac context. See the [`SSL_CTX_set_tlsext_ticket_key_cb`] docs for additional info.
     ///
     /// [`SSL_CTX_set_tlsext_ticket_key_cb`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_set_tlsext_ticket_key_cb
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_tlsext_ticket_key_cb)]
-    pub unsafe fn set_ticket_key_callback<F>(&mut self, callback: F)
+    pub unsafe fn set_ticket_key_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(
                 &SslRef,
-                &mut [u8; 16],
-                &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+                TicketKeyMode<'_>,
                 &mut CipherCtxRef,
                 &mut HmacCtxRef,
-                bool,
             ) -> TicketKeyCallbackResult
             + 'static
             + Sync
@@ -1398,37 +1425,51 @@ impl SslContextBuilder {
     {
         self.ctx.check_x509();
 
+        // SAFETY: The registered ticket callback is owned in context extra data before the native callback hooks are installed.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
-            ffi::SSL_CTX_set_tlsext_ticket_key_cb(self.as_ptr(), Some(raw_ticket_key::<F>))
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::TicketKey)?,
+                callback,
+            )?;
+            cvt(ffi::SSL_CTX_set_tlsext_ticket_key_cb(
+                self.as_ptr(),
+                Some(raw_ticket_key::<F>),
+            ))?;
         };
+        Ok(())
     }
 
     /// Sets the certificate verification depth.
     ///
     /// If the peer's certificate chain is longer than this value, verification will fail.
+    ///
+    /// # Errors
+    ///
+    /// The depth exceeds the signed native integer range.
     #[corresponds(SSL_CTX_set_verify_depth)]
-    pub fn set_verify_depth(&mut self, depth: u32) {
+    pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
+        let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ctx.check_x509();
 
-        unsafe {
-            ffi::SSL_CTX_set_verify_depth(self.as_ptr(), depth as c_int);
-        }
+        // SAFETY: the live context is exclusively borrowed, and the depth is
+        // checked against the full native signed integer range.
+        unsafe { ffi::SSL_CTX_set_verify_depth(self.as_ptr(), depth) };
+        Ok(())
     }
 
     /// Sets a custom certificate store for verifying peer certificates.
     #[corresponds(SSL_CTX_set1_verify_cert_store)]
     pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
-
+        let index = self.ensure_slot(&VERIFY_STORE_INDEX)?;
+        // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
             cvt(ffi::SSL_CTX_set1_verify_cert_store(
                 self.as_ptr(),
                 cert_store.as_ptr(),
             ))?;
-        }
-        self.replace_ex_data(*VERIFY_STORE_INDEX, cert_store);
-        Ok(())
+        };
+        self.set_ex_data(index, Some(cert_store))
     }
 
     /// Replaces the context's certificate store, and keeps it immutable.
@@ -1442,6 +1483,7 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         self.has_shared_cert_store = true;
+        // SAFETY: The builder transfers ownership of this certificate store to its live native context exactly once.
         unsafe {
             ffi::SSL_CTX_set_cert_store(self.as_ptr(), cert_store.into_ptr());
         }
@@ -1453,6 +1495,7 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         self.has_shared_cert_store = false;
+        // SAFETY: The builder transfers ownership of the replacement store to its native context exactly once.
         unsafe {
             ffi::SSL_CTX_set_cert_store(self.as_ptr(), cert_store.into_ptr());
         }
@@ -1474,6 +1517,7 @@ impl SslContextBuilder {
     /// It has no effect when used with DTLS.
     #[corresponds(SSL_CTX_set_read_ahead)]
     pub fn set_read_ahead(&mut self, read_ahead: bool) {
+        // SAFETY: The exclusively borrowed context receives a scalar native read-ahead flag.
         unsafe {
             ffi::SSL_CTX_set_read_ahead(self.as_ptr(), c_int::from(read_ahead));
         }
@@ -1482,6 +1526,7 @@ impl SslContextBuilder {
     /// Sets the mode used by the context, returning the new bit-mask after adding mode.
     #[corresponds(SSL_CTX_set_mode)]
     pub fn set_mode(&mut self, mode: SslMode) -> SslMode {
+        // SAFETY: The mutable context is live while the native mode bitmask is updated and returned.
         let bits = unsafe { ffi::SSL_CTX_set_mode(self.as_ptr(), mode.bits()) };
         SslMode::from_bits_retain(bits)
     }
@@ -1489,12 +1534,14 @@ impl SslContextBuilder {
     /// Sets the parameters to be used during ephemeral Diffie-Hellman key exchange.
     #[corresponds(SSL_CTX_set_tmp_dh)]
     pub fn set_tmp_dh(&mut self, dh: &DhRef<Params>) -> Result<(), ErrorStack> {
+        // SAFETY: The DH parameters are borrowed for a synchronous native setter that retains its own reference.
         unsafe { cvt(ffi::SSL_CTX_set_tmp_dh(self.as_ptr(), dh.as_ptr())) }
     }
 
     /// Sets the parameters to be used during ephemeral elliptic curve Diffie-Hellman key exchange.
     #[corresponds(SSL_CTX_set_tmp_ecdh)]
     pub fn set_tmp_ecdh(&mut self, key: &EcKeyRef<Params>) -> Result<(), ErrorStack> {
+        // SAFETY: The ECDH key is borrowed for the native context setter while both handles remain live.
         unsafe { cvt(ffi::SSL_CTX_set_tmp_ecdh(self.as_ptr(), key.as_ptr())) }
     }
 
@@ -1506,6 +1553,7 @@ impl SslContextBuilder {
     pub fn set_default_verify_paths(&mut self) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
 
+        // SAFETY: The live X509-capable context is exclusively borrowed while native default verification paths are configured.
         unsafe { cvt(ffi::SSL_CTX_set_default_verify_paths(self.as_ptr())) }
     }
 
@@ -1529,6 +1577,7 @@ impl SslContextBuilder {
         let ca_file = ca_file.map(path_to_cstring).transpose()?;
         let ca_path = ca_path.map(path_to_cstring).transpose()?;
 
+        // SAFETY: Both optional C strings remain live through the native call and null pointers represent missing paths.
         unsafe {
             cvt(ffi::SSL_CTX_load_verify_locations(
                 self.as_ptr(),
@@ -1546,6 +1595,7 @@ impl SslContextBuilder {
     pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) {
         self.ctx.check_x509();
 
+        // SAFETY: The native context takes ownership of the client CA stack; `mem::forget` prevents double-free.
         unsafe {
             ffi::SSL_CTX_set_client_CA_list(self.as_ptr(), list.as_ptr());
             mem::forget(list);
@@ -1558,6 +1608,7 @@ impl SslContextBuilder {
     pub fn add_client_ca(&mut self, cacert: &X509Ref) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
 
+        // SAFETY: The CA certificate is borrowed while the live context adds its own retained reference.
         unsafe { cvt(ffi::SSL_CTX_add_client_CA(self.as_ptr(), cacert.as_ptr())) }
     }
 
@@ -1568,10 +1619,16 @@ impl SslContextBuilder {
     /// verification is enabled. A [`ClientSession`] is offered to any context sharing a non-empty
     /// identifier, so share one only between contexts with the same trust, verification, client
     /// identity, protocol, and cipher configuration.
+    ///
+    /// # Errors
+    ///
+    /// The session context is too large, or the native setter rejects it.
     #[corresponds(SSL_CTX_set_session_id_context)]
     pub fn set_session_id_context(&mut self, sid_ctx: &[u8]) -> Result<(), ErrorStack> {
+        c_uint::try_from(sid_ctx.len()).map_err(ErrorStack::internal_error)?;
+        // SAFETY: the session ID bytes are borrowed for synchronous copying;
+        // its length fits the native unsigned integer parameter.
         unsafe {
-            assert!(sid_ctx.len() <= c_uint::MAX as usize);
             cvt(ffi::SSL_CTX_set_session_id_context(
                 self.as_ptr(),
                 sid_ctx.as_ptr(),
@@ -1594,6 +1651,7 @@ impl SslContextBuilder {
         self.ctx.check_x509();
 
         let file = path_to_cstring(file.as_ref())?;
+        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
         unsafe {
             cvt(ffi::SSL_CTX_use_certificate_file(
                 self.as_ptr(),
@@ -1614,6 +1672,7 @@ impl SslContextBuilder {
         file: P,
     ) -> Result<(), ErrorStack> {
         let file = path_to_cstring(file.as_ref())?;
+        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
         unsafe {
             cvt(ffi::SSL_CTX_use_certificate_chain_file(
                 self.as_ptr(),
@@ -1627,6 +1686,7 @@ impl SslContextBuilder {
     /// Use `add_extra_chain_cert` to add the remainder of the certificate chain.
     #[corresponds(SSL_CTX_use_certificate)]
     pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
+        // SAFETY: The borrowed certificate remains live while the context installs its own reference.
         unsafe { cvt(ffi::SSL_CTX_use_certificate(self.as_ptr(), cert.as_ptr())) }
     }
 
@@ -1638,6 +1698,7 @@ impl SslContextBuilder {
     pub fn add_extra_chain_cert(&mut self, cert: X509) -> Result<(), ErrorStack> {
         self.ctx.check_x509();
 
+        // SAFETY: The owned certificate pointer is consumed by the native context, with no second Rust owner.
         unsafe {
             cvt(ffi::SSL_CTX_add_extra_chain_cert(
                 self.as_ptr(),
@@ -1654,6 +1715,8 @@ impl SslContextBuilder {
         file_type: SslFiletype,
     ) -> Result<(), ErrorStack> {
         let file = path_to_cstring(file.as_ref())?;
+        // SAFETY: The path is an owned NUL-terminated string that remains live
+        // during the synchronous key import into the uniquely borrowed context.
         unsafe {
             cvt(ffi::SSL_CTX_use_PrivateKey_file(
                 self.as_ptr(),
@@ -1669,6 +1732,8 @@ impl SslContextBuilder {
     where
         T: HasPrivate,
     {
+        // SAFETY: The referenced private key remains live during this call; BoringSSL
+        // retains its own key reference in the exclusively borrowed context.
         unsafe { cvt(ffi::SSL_CTX_use_PrivateKey(self.as_ptr(), key.as_ptr())) }
     }
 
@@ -1686,6 +1751,8 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_set_cipher_list)]
     pub fn set_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
         let cipher_list = CString::new(cipher_list).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The validated NUL-terminated cipher rule is borrowed for a
+        // synchronous native configuration of this exclusively borrowed context.
         unsafe {
             cvt(ffi::SSL_CTX_set_cipher_list(
                 self.as_ptr(),
@@ -1707,6 +1774,8 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_set_strict_cipher_list)]
     pub fn set_strict_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
         let cipher_list = CString::new(cipher_list).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The NUL-terminated cipher rule remains valid for the
+        // synchronous setter, which updates this uniquely borrowed context.
         unsafe {
             cvt(ffi::SSL_CTX_set_strict_cipher_list(
                 self.as_ptr(),
@@ -1721,7 +1790,7 @@ impl SslContextBuilder {
     ///
     /// [`ciphers`]: https://www.openssl.org/docs/manmaster/man1/ciphers.html
     #[corresponds(SSL_CTX_get_ciphers)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ciphers(&self) -> Option<&StackRef<SslCipher>> {
         self.ctx.ciphers()
     }
@@ -1734,14 +1803,17 @@ impl SslContextBuilder {
     /// `clear_options` for that.
     #[corresponds(SSL_CTX_set_options)]
     pub fn set_options(&mut self, option: SslOptions) -> SslOptions {
+        // SAFETY: The live context is borrowed mutably and receives only a native
+        // option bitset; no Rust storage is passed to BoringSSL.
         let bits = unsafe { ffi::SSL_CTX_set_options(self.as_ptr(), option.bits()) };
         SslOptions::from_bits_retain(bits)
     }
 
     /// Returns the options used by the context.
     #[corresponds(SSL_CTX_get_options)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn options(&self) -> SslOptions {
+        // SAFETY: The native getter only reads an option bitset from the live context.
         let bits = unsafe { ffi::SSL_CTX_get_options(self.as_ptr()) };
         SslOptions::from_bits_retain(bits)
     }
@@ -1749,6 +1821,8 @@ impl SslContextBuilder {
     /// Clears the options used by the context, returning the old set.
     #[corresponds(SSL_CTX_clear_options)]
     pub fn clear_options(&mut self, option: SslOptions) -> SslOptions {
+        // SAFETY: The live context is borrowed mutably and the native function
+        // updates only its option bitset.
         let bits = unsafe { ffi::SSL_CTX_clear_options(self.as_ptr(), option.bits()) };
         SslOptions::from_bits_retain(bits)
     }
@@ -1759,6 +1833,8 @@ impl SslContextBuilder {
     /// TLS 1.0.
     #[corresponds(SSL_CTX_set_min_proto_version)]
     pub fn set_min_proto_version(&mut self, version: Option<SslVersion>) -> Result<(), ErrorStack> {
+        // SAFETY: The live context is exclusively borrowed and the protocol
+        // version is a scalar value (zero selects the native default).
         unsafe {
             cvt(ffi::SSL_CTX_set_min_proto_version(
                 self.as_ptr(),
@@ -1772,6 +1848,8 @@ impl SslContextBuilder {
     /// If version is `None`, the default maximum version is used. For BoringSSL this is TLS 1.3.
     #[corresponds(SSL_CTX_set_max_proto_version)]
     pub fn set_max_proto_version(&mut self, version: Option<SslVersion>) -> Result<(), ErrorStack> {
+        // SAFETY: The live context is exclusively borrowed and the protocol
+        // version is a scalar value (zero selects the native default).
         unsafe {
             cvt(ffi::SSL_CTX_set_max_proto_version(
                 self.as_ptr(),
@@ -1783,6 +1861,7 @@ impl SslContextBuilder {
     /// Gets the minimum supported protocol version.
     #[corresponds(SSL_CTX_get_min_proto_version)]
     pub fn min_proto_version(&mut self) -> Option<SslVersion> {
+        // SAFETY: The getter reads a native scalar from the live context.
         unsafe {
             let r = ffi::SSL_CTX_get_min_proto_version(self.as_ptr());
             if r == 0 {
@@ -1796,6 +1875,7 @@ impl SslContextBuilder {
     /// Gets the maximum supported protocol version.
     #[corresponds(SSL_CTX_get_max_proto_version)]
     pub fn max_proto_version(&mut self) -> Option<SslVersion> {
+        // SAFETY: The getter reads a native scalar from the live context.
         unsafe {
             let r = ffi::SSL_CTX_get_max_proto_version(self.as_ptr());
             if r == 0 {
@@ -1814,6 +1894,8 @@ impl SslContextBuilder {
     /// preference.
     #[corresponds(SSL_CTX_set_alpn_protos)]
     pub fn set_alpn_protos(&mut self, protocols: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: The ALPN wire-format bytes are borrowed for the duration of the
+        // native call. Its length is checked before narrowing to a native integer.
         unsafe {
             let r = ffi::SSL_CTX_set_alpn_protos(
                 self.as_ptr(),
@@ -1832,6 +1914,8 @@ impl SslContextBuilder {
     /// Enables the DTLS extension "use_srtp" as defined in RFC5764.
     #[corresponds(SSL_CTX_set_tlsext_use_srtp)]
     pub fn set_tlsext_use_srtp(&mut self, protocols: &str) -> Result<(), ErrorStack> {
+        // SAFETY: The NUL-terminated SRTP profile list remains valid during the
+        // native setter; the context is exclusively borrowed for this update.
         unsafe {
             let cstr = CString::new(protocols).map_err(ErrorStack::internal_error)?;
 
@@ -1855,19 +1939,29 @@ impl SslContextBuilder {
     ///
     /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos
     /// [`select_next_proto`]: fn.select_next_proto.html
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_alpn_select_cb)]
-    pub fn set_alpn_select_callback<F>(&mut self, callback: F)
+    pub fn set_alpn_select_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + 'static + Sync + Send,
     {
+        // SAFETY: The closure is stored in typed context extra-data before the
+        // static callback entrypoint is registered. No temporary pointer escapes.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Alpn)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_alpn_select_cb(
                 self.as_ptr(),
                 Some(callbacks::raw_alpn_select::<F>),
                 ptr::null_mut(),
             );
         }
+        Ok(())
     }
 
     /// Sets a callback that is called before most ClientHello processing and before the decision whether
@@ -1879,14 +1973,18 @@ impl SslContextBuilder {
     /// [`SslContextBuilder::set_select_certificate_callback_with_action`],
     /// [`SslContextBuilder::set_async_select_certificate_callback`], or
     /// [`SslContextBuilder::set_async_select_certificate_callback_with_action`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_select_certificate_cb)]
-    pub fn set_select_certificate_callback<F>(&mut self, callback: F)
+    pub fn set_select_certificate_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(ClientHello<'_>) -> Result<(), SelectCertError> + Sync + Send + 'static,
     {
         self.set_select_certificate_callback_with_action(move |client_hello| {
             callback(client_hello).map(|()| SelectCertAction::Success)
-        });
+        })
     }
 
     /// Sets an action-aware callback that is called before most ClientHello processing and before
@@ -1902,23 +2000,40 @@ impl SslContextBuilder {
     /// [`SslContextBuilder::set_select_certificate_callback_with_action`],
     /// [`SslContextBuilder::set_async_select_certificate_callback`], or
     /// [`SslContextBuilder::set_async_select_certificate_callback_with_action`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_select_certificate_cb)]
-    pub fn set_select_certificate_callback_with_action<F>(&mut self, callback: F)
+    pub fn set_select_certificate_callback_with_action<F>(
+        &mut self,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(ClientHello<'_>) -> Result<SelectCertAction, SelectCertError> + Sync + Send + 'static,
     {
+        // SAFETY: The callback is registered only after its typed extra-data
+        // slot is populated; the native function stores the static entrypoint.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::SelectCert)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_select_certificate_cb(
                 self.as_ptr(),
                 Some(callbacks::raw_select_cert::<F>),
             );
         }
+        Ok(())
     }
 
     /// Registers a certificate compression algorithm.
     ///
     /// [`SSL_CTX_add_cert_compression_alg`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_add_cert_compression_alg
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if callback storage cannot be allocated or the algorithm cannot be registered.
     #[corresponds(SSL_CTX_add_cert_compression_alg)]
     pub fn add_certificate_compression_algorithm<C>(
         &mut self,
@@ -1930,6 +2045,15 @@ impl SslContextBuilder {
         const {
             assert!(C::CAN_COMPRESS || C::CAN_DECOMPRESS, "Either compression or decompression must be supported for algorithm to be registered");
         };
+        let index = SslContext::register_callback::<Option<C>>(CallbackRole::Compression)?;
+        if self.ctx.ex_data(index).is_some_and(Option::is_some) {
+            return Err(ErrorStack::internal_error_str(
+                "compression algorithm already registered",
+            ));
+        }
+        self.set_ex_data(index, None)?;
+        // SAFETY: The native context is exclusively borrowed and receives
+        // static monomorphized callbacks. Callback state is held in its typed slot.
         let success = unsafe {
             ffi::SSL_CTX_add_cert_compression_alg(
                 self.as_ptr(),
@@ -1953,44 +2077,53 @@ impl SslContextBuilder {
         if !success {
             return Err(ErrorStack::get());
         }
-        self.replace_ex_data(SslContext::cached_ex_index::<C>(), compressor);
-        Ok(())
+        self.set_ex_data(index, Some(compressor))
     }
 
     /// Configures a custom private key method on the context.
     ///
     /// See [`PrivateKeyMethod`] for more details.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_private_key_method)]
-    pub fn set_private_key_method<M>(&mut self, method: M)
+    pub fn set_private_key_method<M>(&mut self, method: M) -> Result<(), ErrorStack>
     where
         M: PrivateKeyMethod,
     {
+        // SAFETY: The context retains a static method table associated with
+        // the callback type, while its Rust callback state lives in extra-data.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<M>(), method);
+            self.replace_ex_data(
+                SslContext::register_callback::<Arc<M>>(CallbackRole::PrivateKey)?,
+                Arc::new(method),
+            )?;
 
             ffi::SSL_CTX_set_private_key_method(
                 self.as_ptr(),
-                &ffi::SSL_PRIVATE_KEY_METHOD {
-                    sign: Some(callbacks::raw_sign::<M>),
-                    decrypt: Some(callbacks::raw_decrypt::<M>),
-                    complete: Some(callbacks::raw_complete::<M>),
-                },
+                callbacks::PrivateKeyMethodDescriptor::<M, false>::descriptor(),
             );
         }
+        Ok(())
     }
 
     /// Checks for consistency between the private key and certificate.
     #[corresponds(SSL_CTX_check_private_key)]
     pub fn check_private_key(&self) -> Result<(), ErrorStack> {
+        // SAFETY: The native checker borrows the live context, installed
+        // certificate, and private key without transferring any Rust ownership.
         unsafe { cvt(ffi::SSL_CTX_check_private_key(self.as_ptr())) }
     }
 
     /// Returns a shared reference to the context's certificate store.
     #[corresponds(SSL_CTX_get_cert_store)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn cert_store(&self) -> &X509StoreBuilderRef {
         self.ctx.check_x509();
 
+        // SAFETY: The builder exclusively owns a live X.509 context with an initialized
+        // certificate store; the getter returns only a borrowed store pointer.
         unsafe { X509StoreBuilderRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
@@ -2014,6 +2147,8 @@ impl SslContextBuilder {
         );
         // OTOH, it's not safe to return a shared &X509Store when the builder owns it exclusively
 
+        // SAFETY: The builder owns the only mutable certificate store, checked above
+        // against an installed shared store; the native pointer stays live.
         unsafe { X509StoreBuilderRef::from_ptr_mut(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
@@ -2034,8 +2169,13 @@ impl SslContextBuilder {
     where
         F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
     {
+        // SAFETY: The callback state is stored in typed context extra-data
+        // before the native context retains its static function pointer.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Status)?,
+                callback,
+            )?;
             cvt(ffi::SSL_CTX_set_tlsext_status_cb(
                 self.as_ptr(),
                 Some(raw_tlsext_status::<F>),
@@ -2048,29 +2188,28 @@ impl SslContextBuilder {
     /// The callback will be called with the SSL context, an identity hint if one was provided
     /// by the server, a mutable slice for each of the identity and pre-shared key bytes. The
     /// identity must be written as a null-terminated C string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_psk_client_callback)]
-    pub fn set_psk_client_callback<F>(&mut self, callback: F)
+    pub fn set_psk_client_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
             + 'static
             + Sync
             + Send,
     {
+        // SAFETY: The native context retains the monomorphized callback
+        // entrypoint, whose closure remains owned by its registered extra-data slot.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::PskClient)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_psk_client_callback(self.as_ptr(), Some(raw_client_psk::<F>));
         }
-    }
-
-    #[deprecated(since = "0.10.10", note = "renamed to `set_psk_client_callback`")]
-    pub fn set_psk_callback<F>(&mut self, callback: F)
-    where
-        F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
-            + 'static
-            + Sync
-            + Send,
-    {
-        self.set_psk_client_callback(callback);
+        Ok(())
     }
 
     /// Sets the callback for providing an identity and pre-shared key for a TLS-PSK server.
@@ -2078,18 +2217,28 @@ impl SslContextBuilder {
     /// The callback will be called with the SSL context, an identity provided by the client,
     /// and, a mutable slice for the pre-shared key bytes. The callback returns the number of
     /// bytes in the pre-shared key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_psk_server_callback)]
-    pub fn set_psk_server_callback<F>(&mut self, callback: F)
+    pub fn set_psk_server_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8]) -> Result<usize, ErrorStack>
             + 'static
             + Sync
             + Send,
     {
+        // SAFETY: The native context retains the monomorphized callback
+        // entrypoint, whose closure remains owned by its registered extra-data slot.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::PskServer)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_psk_server_callback(self.as_ptr(), Some(raw_server_psk::<F>));
         }
+        Ok(())
     }
 
     /// Sets the callback which is called when new sessions are negotiated.
@@ -2106,32 +2255,52 @@ impl SslContextBuilder {
     ///
     /// [`SslRef::session`]: struct.SslRef.html#method.session
     /// [`set_session_cache_mode`]: #method.set_session_cache_mode
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_new_cb)]
-    pub fn set_new_session_callback<F>(&mut self, callback: F)
+    pub fn set_new_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, SslSession) + 'static + Sync + Send,
     {
+        // SAFETY: The native context retains a static callback entrypoint; its
+        // concrete state has already been installed in typed context extra-data.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::NewSession)?,
+                callback,
+            )?;
             ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(callbacks::raw_new_session::<F>));
         }
+        Ok(())
     }
 
     /// Sets the callback which is called when sessions are removed from the context.
     ///
     /// Sessions can be removed because they have timed out or because they are considered faulty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_remove_cb)]
-    pub fn set_remove_session_callback<F>(&mut self, callback: F)
+    pub fn set_remove_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslContextRef, &SslSessionRef) + 'static + Sync + Send,
     {
+        // SAFETY: The native context retains a static callback entrypoint; its
+        // concrete state has already been installed in typed context extra-data.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::RemoveSession)?,
+                callback,
+            )?;
             ffi::SSL_CTX_sess_set_remove_cb(
                 self.as_ptr(),
                 Some(callbacks::raw_remove_session::<F>),
             );
         }
+        Ok(())
     }
 
     /// Sets the callback which is called when a client proposed to resume a session but it was not
@@ -2144,18 +2313,28 @@ impl SslContextBuilder {
     /// # Safety
     ///
     /// The returned [`SslSession`] must not be associated with a different [`SslContext`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_get_cb)]
-    pub unsafe fn set_get_session_callback<F>(&mut self, callback: F)
+    pub unsafe fn set_get_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError>
             + 'static
             + Sync
             + Send,
     {
-        self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+        self.replace_ex_data(
+            SslContext::register_callback::<F>(CallbackRole::GetSession)?,
+            callback,
+        )?;
+        // SAFETY: The native context stores a static callback; its concrete state
+        // is owned by the typed context extra-data slot populated above.
         unsafe {
             ffi::SSL_CTX_sess_set_get_cb(self.as_ptr(), Some(callbacks::raw_get_session::<F>));
         }
+        Ok(())
     }
 
     /// Sets the TLS key logging callback.
@@ -2163,15 +2342,25 @@ impl SslContextBuilder {
     /// The callback is invoked whenever TLS key material is generated, and is passed a line of NSS
     /// SSLKEYLOGFILE-formatted text. This can be used by tools like Wireshark to decrypt message
     /// traffic. The line does not contain a trailing newline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_keylog_callback)]
-    pub fn set_keylog_callback<F>(&mut self, callback: F)
+    pub fn set_keylog_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslRef, &str) + 'static + Sync + Send,
     {
+        // SAFETY: The context retains a monomorphized callback entrypoint, while
+        // typed extra-data owns the Rust closure for the context lifetime.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Keylog)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_keylog_callback(self.as_ptr(), Some(callbacks::raw_keylog::<F>));
         }
+        Ok(())
     }
 
     /// Sets the session caching mode use for connections made with the context.
@@ -2179,6 +2368,8 @@ impl SslContextBuilder {
     /// Returns the previous session caching mode.
     #[corresponds(SSL_CTX_set_session_cache_mode)]
     pub fn set_session_cache_mode(&mut self, mode: SslSessionCacheMode) -> SslSessionCacheMode {
+        // SAFETY: The exclusive context borrow permits the native cache-mode
+        // bitset update; its return value is copied back into a Rust bitset.
         unsafe {
             let bits = ffi::SSL_CTX_set_session_cache_mode(self.as_ptr(), mode.bits());
             SslSessionCacheMode::from_bits_retain(bits)
@@ -2191,38 +2382,59 @@ impl SslContextBuilder {
     /// separately by BoringSSL.
     #[corresponds(SSL_CTX_set_timeout)]
     pub fn set_session_timeout(&mut self, timeout: u32) -> u32 {
+        // SAFETY: The live context receives a scalar timeout; no Rust pointer is
+        // retained or aliased by the native implementation.
         unsafe { ffi::SSL_CTX_set_timeout(self.as_ptr(), timeout) }
     }
 
-    /// Sets the extra data at the specified index.
+    /// Sets or overwrites the extra data at the specified registered index.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `SslContext::new_ex_index` method to create an `Index`.
-    #[corresponds(SSL_CTX_set_ex_data)]
-    pub fn set_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) {
-        unsafe {
-            self.ctx.replace_ex_data(index, data);
-        }
+    /// # Errors
+    ///
+    /// The native context cannot allocate storage for this index.
+    pub fn set_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<SslContext, T>,
+        data: T,
+    ) -> Result<(), ErrorStack> {
+        drop(self.replace_ex_data(index, data)?);
+        Ok(())
     }
 
-    /// Sets or overwrites the extra data at the specified index.
+    /// Replaces the extra data, returning the previous owned value if any.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `SslContext::new_ex_index` method to create an `Index`.
+    /// # Errors
     ///
-    /// Any previous value will be returned and replaced by the new one.
+    /// The native context cannot allocate storage for this index.
     #[corresponds(SSL_CTX_set_ex_data)]
-    pub fn replace_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) -> Option<T> {
+    pub fn replace_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<SslContext, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        // SAFETY: the unpublished builder guarantees a uniquely owned context.
         unsafe { self.ctx.replace_ex_data(index, data) }
+    }
+
+    fn ensure_slot<T: 'static + Send + Sync>(
+        &mut self,
+        slot: &IndexSlot<SslContext, Option<T>>,
+    ) -> Result<Index<SslContext, Option<T>>, ErrorStack> {
+        let index = slot.register()?;
+        if self.ctx.ex_data(index).is_none() {
+            self.set_ex_data(index, None)?;
+        }
+        Ok(index)
     }
 
     /// Sets the context's session cache size limit, returning the previous limit.
     ///
     /// A value of 0 means that the cache size is unbounded.
     #[corresponds(SSL_CTX_sess_set_cache_size)]
-    #[allow(clippy::useless_conversion)]
-    pub fn set_session_cache_size(&mut self, size: u32) -> u64 {
-        unsafe { ffi::SSL_CTX_sess_set_cache_size(self.as_ptr(), size.into()).into() }
+    pub fn set_session_cache_size(&mut self, size: c_ulong) -> c_ulong {
+        // SAFETY: The live context receives a scalar capacity, without passing
+        // or retaining any borrowed Rust memory.
+        unsafe { ffi::SSL_CTX_sess_set_cache_size(self.as_ptr(), size) }
     }
 
     /// Sets the context's supported signature algorithms.
@@ -2235,6 +2447,8 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_set1_sigalgs_list)]
     pub fn set_sigalgs_list(&mut self, sigalgs: &str) -> Result<(), ErrorStack> {
         let sigalgs = CString::new(sigalgs).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The NUL-terminated signature-algorithm list is borrowed during
+        // this synchronous native configuration of the context.
         unsafe {
             cvt(ffi::SSL_CTX_set1_sigalgs_list(
                 self.as_ptr(),
@@ -2246,7 +2460,9 @@ impl SslContextBuilder {
     /// Set's whether the context should enable GREASE.
     #[corresponds(SSL_CTX_set_grease_enabled)]
     pub fn set_grease_enabled(&mut self, enabled: bool) {
-        unsafe { ffi::SSL_CTX_set_grease_enabled(self.as_ptr(), enabled as _) }
+        // SAFETY: The exclusively borrowed context receives an integer flag,
+        // converted without a lossy cast from the Rust boolean.
+        unsafe { ffi::SSL_CTX_set_grease_enabled(self.as_ptr(), c_int::from(enabled)) }
     }
 
     /// Sets whether the context should include a GREASE value in `signature_algorithms`
@@ -2257,7 +2473,9 @@ impl SslContextBuilder {
     /// [RFC 8701]: https://www.rfc-editor.org/rfc/rfc8701.html
     #[corresponds(SSL_CTX_set_grease_sigalgs_enabled)]
     pub fn set_grease_sigalgs_enabled(&mut self, enabled: bool) {
-        unsafe { ffi::SSL_CTX_set_grease_sigalgs_enabled(self.as_ptr(), enabled as _) }
+        // SAFETY: The exclusively borrowed context receives an integer flag,
+        // converted without a lossy cast from the Rust boolean.
+        unsafe { ffi::SSL_CTX_set_grease_sigalgs_enabled(self.as_ptr(), c_int::from(enabled)) }
     }
 
     /// Advertises, with the [RFC 8449] `record_size_limit` extension, the largest
@@ -2278,6 +2496,8 @@ impl SslContextBuilder {
     #[cfg(not(feature = "fips"))]
     #[corresponds(SSL_CTX_set_record_size_limit)]
     pub fn set_record_size_limit(&mut self, limit: u16) {
+        // SAFETY: The exclusively borrowed context receives the native scalar
+        // record-size limit, with no borrowed Rust pointer.
         unsafe { ffi::SSL_CTX_set_record_size_limit(self.as_ptr(), limit as _) }
     }
 
@@ -2303,9 +2523,13 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_set_delegated_credentials)]
     pub fn set_delegated_credentials(&mut self, sigalgs: &str) -> Result<(), ErrorStack> {
         let sigalgs = CString::new(sigalgs).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The NUL-terminated algorithm list stays live until the
+        // native setter finishes copying or validating it.
         unsafe {
-            cvt(ffi::SSL_CTX_set_delegated_credentials(self.as_ptr(), sigalgs.as_ptr()) as c_int)
-                .map(|_| ())
+            cvt(ffi::SSL_CTX_set_delegated_credentials(
+                self.as_ptr(),
+                sigalgs.as_ptr(),
+            ))
         }
     }
 
@@ -2338,20 +2562,23 @@ impl SslContextBuilder {
         &mut self,
         indices: &[ExtensionType],
     ) -> Result<(), ErrorStack> {
+        // SAFETY: ExtensionType is represented as a native u16 and the borrowed
+        // slice stays live until the native setter returns.
         unsafe {
             cvt(ffi::SSL_CTX_set_extension_order(
                 self.as_ptr(),
-                indices.as_ptr() as *const _,
+                indices.as_ptr().cast::<u16>(),
                 try_int(indices.len())?,
             ))
-            .map(|_| ())
         }
     }
 
     /// Configures whether ClientHello extensions should be permuted.
     #[corresponds(SSL_CTX_set_permute_extensions)]
     pub fn set_permute_extensions(&mut self, enabled: bool) {
-        unsafe { ffi::SSL_CTX_set_permute_extensions(self.as_ptr(), enabled as _) }
+        // SAFETY: The live context is exclusively borrowed for its scalar
+        // extension-permutation setting.
+        unsafe { ffi::SSL_CTX_set_permute_extensions(self.as_ptr(), c_int::from(enabled)) }
     }
 
     /// Sets the context's supported signature verification algorithms.
@@ -2360,6 +2587,8 @@ impl SslContextBuilder {
         &mut self,
         prefs: &[SslSignatureAlgorithm],
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The borrowed list of transparent native codepoints stays
+        // alive until the context copies its verification preferences.
         unsafe {
             cvt_0i(ffi::SSL_CTX_set_verify_algorithm_prefs(
                 self.as_ptr(),
@@ -2373,12 +2602,16 @@ impl SslContextBuilder {
     /// Enables SCT requests on all client SSL handshakes.
     #[corresponds(SSL_CTX_enable_signed_cert_timestamps)]
     pub fn enable_signed_cert_timestamps(&mut self) {
+        // SAFETY: This setter updates a boolean state on the live
+        // exclusively borrowed context, without retaining Rust memory.
         unsafe { ffi::SSL_CTX_enable_signed_cert_timestamps(self.as_ptr()) }
     }
 
     /// Enables OCSP stapling on all client SSL handshakes.
     #[corresponds(SSL_CTX_enable_ocsp_stapling)]
     pub fn enable_ocsp_stapling(&mut self) {
+        // SAFETY: This setter updates a boolean state on the live
+        // exclusively borrowed context, without retaining Rust memory.
         unsafe { ffi::SSL_CTX_enable_ocsp_stapling(self.as_ptr()) }
     }
 
@@ -2386,6 +2619,8 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_set1_curves_list)]
     pub fn set_curves_list(&mut self, curves: &str) -> Result<(), ErrorStack> {
         let curves = CString::new(curves).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The checked NUL-terminated curve-list string stays live during
+        // the native configuration of this exclusively borrowed context.
         unsafe {
             cvt_0i(ffi::SSL_CTX_set1_curves_list(
                 self.as_ptr(),
@@ -2400,6 +2635,8 @@ impl SslContextBuilder {
     /// This feature isn't available in the certified version of BoringSSL.
     #[corresponds(SSL_CTX_set_compliance_policy)]
     pub fn set_compliance_policy(&mut self, policy: CompliancePolicy) -> Result<(), ErrorStack> {
+        // SAFETY: The live context receives a native scalar policy; no
+        // borrowed memory crosses the call boundary.
         unsafe { cvt_0i(ffi::SSL_CTX_set_compliance_policy(self.as_ptr(), policy.0)).map(|_| ()) }
     }
 
@@ -2449,15 +2686,25 @@ impl SslContextBuilder {
     }
 
     /// Sets the context's info callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_info_callback)]
-    pub fn set_info_callback<F>(&mut self, callback: F)
+    pub fn set_info_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&SslRef, SslInfoCallbackMode, SslInfoCallbackValue) + Send + Sync + 'static,
     {
+        // SAFETY: The typed context extra-data holds the Rust closure before
+        // BoringSSL retains a static monomorphized function pointer.
         unsafe {
-            self.replace_ex_data(SslContext::cached_ex_index::<F>(), callback);
+            self.replace_ex_data(
+                SslContext::register_callback::<F>(CallbackRole::Info)?,
+                callback,
+            )?;
             ffi::SSL_CTX_set_info_callback(self.as_ptr(), Some(callbacks::raw_info_callback::<F>));
         }
+        Ok(())
     }
 
     /// Registers a list of ECH keys on the context. This list should contain new and old
@@ -2466,6 +2713,9 @@ impl SslContextBuilder {
     /// threads.
     #[corresponds(SSL_CTX_set1_ech_keys)]
     pub fn set_ech_keys(&self, keys: &SslEchKeys) -> Result<(), ErrorStack> {
+        // SAFETY: the live native context accepts this borrowed, reference-
+        // counted key collection and retains its own ownership. BoringSSL
+        // synchronizes this operation even on contexts shared across threads.
         unsafe { cvt(ffi::SSL_CTX_set1_ech_keys(self.as_ptr(), keys.as_ptr())) }
     }
 
@@ -2473,6 +2723,8 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_add1_credential)]
     #[cfg(feature = "credential")]
     pub fn add_credential(&mut self, credential: &SslCredentialRef) -> Result<(), ErrorStack> {
+        // SAFETY: The credential is borrowed while the live context acquires its
+        // own reference, so the Rust owner is not consumed.
         unsafe {
             cvt_0i(ffi::SSL_CTX_add1_credential(
                 self.as_ptr(),
@@ -2490,6 +2742,8 @@ impl SslContextBuilder {
         &mut self,
         types: &[CertificateType],
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The slice of transparent one-byte certificate-type
+        // values remains live while BoringSSL copies the configuration.
         unsafe {
             cvt_0i(ffi::SSL_CTX_set1_accepted_peer_cert_types(
                 self.as_ptr(),
@@ -2501,7 +2755,7 @@ impl SslContextBuilder {
     }
 
     /// Consumes the builder, returning a new `SslContext`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslContext {
         self.ctx
     }
@@ -2528,6 +2782,9 @@ impl ToOwned for SslContextRef {
     type Owned = SslContext;
 
     fn to_owned(&self) -> Self::Owned {
+        // SAFETY: A valid borrowed context has a nonnull native pointer. BoringSSL
+        // increments its native reference count unconditionally before
+        // the second Rust owner takes responsibility for releasing it.
         unsafe {
             SSL_CTX_up_ref(self.as_ptr());
             SslContext::from_ptr(self.as_ptr())
@@ -2542,42 +2799,44 @@ impl fmt::Debug for SslContext {
     }
 }
 
+// Allocate a native index for the exact wrapper and payload type. The native
+// class-specific allocator installs the matching destructor.
+macro_rules! callback_indices {
+    ($native:ident, $allocate:ident, $registry:ident) => {
+        /// Allocates a distinct typed extra-data index.
+        ///
+        /// # Errors
+        ///
+        /// Returns an error if the native index allocation fails.
+        #[corresponds($native)]
+        pub fn new_ex_index<T: 'static + Sync + Send>() -> Result<Index<Self, T>, ErrorStack> {
+            // SAFETY: the class-specific allocator registers the destructor for T.
+            unsafe {
+                ffi::init();
+                let idx = cvt_n($allocate(Some(free_data_box::<T>)))?;
+                Ok(Index::from_raw(idx))
+            }
+        }
+
+        fn register_callback<T: 'static + Send + Sync>(
+            role: CallbackRole,
+        ) -> Result<Index<Self, T>, ErrorStack> {
+            $registry.register(role, Self::new_ex_index)
+        }
+    };
+}
+
 impl SslContext {
     /// Creates a new builder object for an `SslContext`.
+    ///
+    /// # Errors
+    ///
+    /// Native context allocation or the X.509 marker registration fails.
     pub fn builder(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
         SslContextBuilder::new(method)
     }
 
-    /// Returns a new extra data index.
-    ///
-    /// Each invocation of this function is guaranteed to return a distinct index. These can be used
-    /// to store data in the context that can be retrieved later by callbacks, for example.
-    #[corresponds(SSL_CTX_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<SslContext, T>, ErrorStack>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            ffi::init();
-            let idx = cvt_n(get_new_idx(Some(free_data_box::<T>)))?;
-            Ok(Index::from_raw(idx))
-        }
-    }
-
-    // FIXME should return a result?
-    fn cached_ex_index<T>() -> Index<SslContext, T>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            let idx = *INDEXES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| SslContext::new_ex_index::<T>().unwrap().as_raw());
-            Index::from_raw(idx)
-        }
-    }
+    callback_indices!(SSL_CTX_get_ex_new_index, get_new_idx, CONTEXT_CALLBACKS);
 
     /// Gets the list of supported ciphers for protocols before TLSv1.3.
     ///
@@ -2585,8 +2844,10 @@ impl SslContext {
     ///
     /// [`ciphers`]: https://www.openssl.org/docs/manmaster/man1/ciphers.html
     #[corresponds(SSL_CTX_get_ciphers)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ciphers(&self) -> Option<&StackRef<SslCipher>> {
+        // SAFETY: The live context owns this optional cipher stack; the getter only
+        // borrows it, and null is checked before creating a Rust reference.
         unsafe {
             let ciphers = ffi::SSL_CTX_get_ciphers(self.as_ptr());
             if ciphers.is_null() {
@@ -2601,10 +2862,12 @@ impl SslContext {
 impl SslContextRef {
     /// Returns the certificate associated with this `SslContext`, if present.
     #[corresponds(SSL_CTX_get0_certificate)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn certificate(&self) -> Option<&X509Ref> {
         self.check_x509();
 
+        // SAFETY: The live X.509 context owns its optional certificate; the
+        // getter returns a borrowed pointer checked for null before dereference.
         unsafe {
             let ptr = ffi::SSL_CTX_get0_certificate(self.as_ptr());
             if ptr.is_null() {
@@ -2617,8 +2880,10 @@ impl SslContextRef {
 
     /// Returns the private key associated with this `SslContext`, if present.
     #[corresponds(SSL_CTX_get0_privatekey)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn private_key(&self) -> Option<&PKeyRef<Private>> {
+        // SAFETY: The live context retains its configured key and the getter
+        // returns only a nullable borrowed pointer, checked before access.
         unsafe {
             let ptr = ffi::SSL_CTX_get0_privatekey(self.as_ptr());
             if ptr.is_null() {
@@ -2631,72 +2896,72 @@ impl SslContextRef {
 
     /// Returns a shared reference to the certificate store used for verification.
     #[corresponds(SSL_CTX_get_cert_store)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn cert_store(&self) -> &X509StoreRef {
         self.check_x509();
 
+        // SAFETY: The live X.509 context holds its initialized certificate store,
+        // and this native getter returns only a borrowed reference.
         unsafe { X509StoreRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
     }
 
-    /// Returns a shared reference to the stack of certificates making up the chain from the leaf.
+    /// Returns any extra certificate chain attached to this context.
+    ///
+    /// An empty or unavailable chain is represented as `None`. The native
+    /// getter can succeed without populating the chain pointer.
     #[corresponds(SSL_CTX_get_extra_chain_certs)]
-    #[must_use]
-    pub fn extra_chain_certs(&self) -> &StackRef<X509> {
+    #[must_use = "Inspect the borrowed chain or handle its absence."]
+    pub fn extra_chain_certs(&self) -> Option<&StackRef<X509>> {
+        self.check_x509();
+        // SAFETY: the native getter writes a nullable, borrowed stack pointer
+        // owned by this live context. It may return success with a null chain.
+        // Only a non-null successful result is exposed as a shared reference.
         unsafe {
             let mut chain = ptr::null_mut();
-            ffi::SSL_CTX_get_extra_chain_certs(self.as_ptr(), &mut chain);
-            assert!(!chain.is_null());
-            StackRef::from_ptr(chain)
-        }
-    }
-
-    /// Returns a reference to the extra data at the specified index.
-    #[corresponds(SSL_CTX_get_ex_data)]
-    #[must_use]
-    pub fn ex_data<T>(&self, index: Index<SslContext, T>) -> Option<&T> {
-        unsafe {
-            let data = ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw());
-            if data.is_null() {
+            if ffi::SSL_CTX_get_extra_chain_certs(self.as_ptr(), &raw mut chain) == 0 {
+                return None;
+            }
+            if chain.is_null() {
                 None
             } else {
-                Some(&*(data as *const T))
+                Some(StackRef::from_ptr(chain))
             }
         }
     }
 
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslContextBuilder.
+    /// Returns a reference to the extra data at the registered index.
     #[corresponds(SSL_CTX_get_ex_data)]
-    unsafe fn ex_data_mut<T>(&mut self, index: Index<SslContext, T>) -> Option<&mut T> {
+    #[must_use = "Use the returned application data, or handle an empty slot."]
+    pub fn ex_data<T: 'static + Send + Sync>(&self, index: Index<SslContext, T>) -> Option<&T> {
+        // SAFETY: the typed index identifies a live boxed T owned by this context.
         unsafe {
             ffi::SSL_CTX_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
-                .as_mut()
+                .as_ref()
         }
     }
 
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslContextBuilder.
-    #[corresponds(SSL_CTX_set_ex_data)]
-    unsafe fn set_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) {
-        unsafe {
-            let data = Box::into_raw(Box::new(data));
-            ffi::SSL_CTX_set_ex_data(self.as_ptr(), index.as_raw(), data.cast());
-        }
+    fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<SslContext, T>) -> Option<&T> {
+        self.ex_data(slot.get()?)
     }
 
-    // Unsafe because SSL contexts are not guaranteed to be unique, we call
-    // this only from SslContextBuilder.
-    #[corresponds(SSL_CTX_set_ex_data)]
-    unsafe fn replace_ex_data<T>(&mut self, index: Index<SslContext, T>, data: T) -> Option<T> {
+    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
+        self.ex_data(CONTEXT_CALLBACKS.get(role)?)
+    }
+
+    // The caller must establish exclusive context ownership, as on a builder.
+    unsafe fn replace_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<SslContext, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        let ctx = self.as_ptr();
+        // SAFETY: the caller establishes exclusive ownership and the matching
+        // typed slot; native storage accepts the pointer only on success.
         unsafe {
-            if let Some(old) = self.ex_data_mut(index) {
-                return Some(mem::replace(old, data));
-            }
-
-            self.set_ex_data(index, data);
-
-            None
+            replace_boxed(ffi::SSL_CTX_get_ex_data(ctx, index.as_raw()), data, |ptr| {
+                cvt(ffi::SSL_CTX_set_ex_data(ctx, index.as_raw(), ptr))
+            })
         }
     }
 
@@ -2709,8 +2974,10 @@ impl SslContextRef {
     /// The caller of this method is responsible for ensuring that the session has never been used with another
     /// `SslContext` than this one.
     #[corresponds(SSL_CTX_add_session)]
-    #[must_use]
+    #[must_use = "Check whether the session was actually accepted into the native cache."]
     pub unsafe fn add_session(&self, session: &SslSessionRef) -> bool {
+        // SAFETY: The caller guarantees this session belongs to the context;
+        // the live context and session reference remain valid for native caching.
         unsafe { ffi::SSL_CTX_add_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
 
@@ -2723,8 +2990,10 @@ impl SslContextRef {
     /// The caller of this method is responsible for ensuring that the session has never been used with another
     /// `SslContext` than this one.
     #[corresponds(SSL_CTX_remove_session)]
-    #[must_use]
+    #[must_use = "Check whether the session was actually removed from the native cache."]
     pub unsafe fn remove_session(&self, session: &SslSessionRef) -> bool {
+        // SAFETY: The caller guarantees the session is associated with
+        // this context, which remains live during native cache removal.
         unsafe { ffi::SSL_CTX_remove_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
 
@@ -2732,41 +3001,51 @@ impl SslContextRef {
     ///
     /// A value of 0 means that the cache size is unbounded.
     #[corresponds(SSL_CTX_sess_get_cache_size)]
-    #[allow(clippy::useless_conversion)]
-    #[must_use]
-    pub fn session_cache_size(&self) -> u64 {
-        unsafe { ffi::SSL_CTX_sess_get_cache_size(self.as_ptr()).into() }
+    #[must_use = "The configured cache capacity is the result of this query."]
+    pub fn session_cache_size(&self) -> c_ulong {
+        // SAFETY: The getter reads a scalar cache limit from a live
+        // native context; no borrowed Rust memory escapes.
+        unsafe { ffi::SSL_CTX_sess_get_cache_size(self.as_ptr()) }
     }
 
     /// Returns the verify mode that was set on this context from [`SslContextBuilder::set_verify`].
     ///
     /// [`SslContextBuilder::set_verify`]: struct.SslContextBuilder.html#method.set_verify
     #[corresponds(SSL_CTX_get_verify_mode)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn verify_mode(&self) -> SslVerifyMode {
         self.check_x509();
 
+        // SAFETY: The context has been checked for X.509 support and
+        // remains live while the getter reads its native mode bits.
         let mode = unsafe { ffi::SSL_CTX_get_verify_mode(self.as_ptr()) };
-        SslVerifyMode::from_bits(mode).expect("SSL_CTX_get_verify_mode returned invalid mode")
+        SslVerifyMode::from_bits_retain(mode)
     }
 
     /// Assumes that this `SslContext` is configured for X.509 certificates.
     ///
     /// # Safety
     ///
-    /// BoringSSL will crash if the user calls a function that involves
-    /// X.509 certificates with an object configured with this method.
-    /// You most probably don't need it.
-    pub unsafe fn assume_x509(&mut self) {
-        unsafe {
-            self.replace_ex_data(*X509_FLAG_INDEX, true);
-        }
+    /// The native context must use the X.509 certificate method and be exclusively owned.
+    /// No other reference may access its extra-data slots during this operation.
+    ///
+    /// # Errors
+    ///
+    /// Registration or replacement of the native X.509 marker fails.
+    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: the caller guarantees this native SSL context really uses
+        // X.509 and owns its native extra-data slots exclusively. The newly
+        // registered typed index therefore matches the stored marker.
+        unsafe { self.replace_ex_data(X509_FLAG_INDEX.register()?, true)? };
+        Ok(())
     }
 
     /// Returns `true` if context is configured for X.509 certificates.
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn has_x509_support(&self) -> bool {
-        self.ex_data(*X509_FLAG_INDEX).copied().unwrap_or_default()
+        self.slot_data(&X509_FLAG_INDEX)
+            .copied()
+            .unwrap_or_default()
     }
 
     #[track_caller]
@@ -2783,18 +3062,28 @@ impl SslContextRef {
     /// threads.
     #[corresponds(SSL_CTX_set1_ech_keys)]
     pub fn set_ech_keys(&self, keys: &SslEchKeys) -> Result<(), ErrorStack> {
+        // SAFETY: the live native context accepts this borrowed, reference-
+        // counted key collection and retains its own ownership. BoringSSL
+        // synchronizes this operation even on contexts shared across threads.
         unsafe { cvt(ffi::SSL_CTX_set1_ech_keys(self.as_ptr(), keys.as_ptr())) }
     }
 
     /// Returns the list of server certificate types.
     #[corresponds(SSL_CTX_get0_server_certificate_types)]
     #[cfg(feature = "rpk")]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn server_certificate_types(&self) -> Option<&[CertificateType]> {
         let mut types = ptr::null();
         let mut types_len = 0;
+        // SAFETY: The live context owns the optional
+        // certificate-type buffer; an empty native length is handled before
+        // constructing a borrowed Rust slice of transparent u8 values.
         unsafe {
-            ffi::SSL_CTX_get0_accepted_peer_cert_types(self.as_ptr(), &mut types, &mut types_len);
+            ffi::SSL_CTX_get0_accepted_peer_cert_types(
+                self.as_ptr(),
+                &raw mut types,
+                &raw mut types_len,
+            );
 
             if types_len == 0 {
                 return None;
@@ -2830,63 +3119,88 @@ pub struct ClientHello<'ssl>(&'ssl ffi::SSL_CLIENT_HELLO);
 impl ClientHello<'_> {
     /// Returns the data of a given extension, if present.
     #[corresponds(SSL_early_callback_ctx_extension_get)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn get_extension(&self, ext_type: ExtensionType) -> Option<&[u8]> {
+        // SAFETY: The ClientHello is live for the native callback and the
+        // output slots are writable; the returned borrowed bytes are checked before slicing.
         unsafe {
             let mut ptr = ptr::null();
             let mut len = 0;
-            let result =
-                ffi::SSL_early_callback_ctx_extension_get(self.0, ext_type.0, &mut ptr, &mut len);
+            let result = ffi::SSL_early_callback_ctx_extension_get(
+                self.0,
+                ext_type.0,
+                &raw mut ptr,
+                &raw mut len,
+            );
             if result == 0 {
                 return None;
             }
-            Some(slice::from_raw_parts(ptr, len))
+            // SAFETY: successful BoringSSL extension lookup borrows the input
+            // ClientHello buffer for the duration of this callback.
+            native_input(ptr, len)
         }
     }
 
     pub fn ssl_mut(&mut self) -> &mut SslRef {
+        // SAFETY: The ClientHello is live for the certificate-selection callback;
+        // the exclusive Rust borrow allows a mutable reference to its SSL.
         unsafe { SslRef::from_ptr_mut(self.0.ssl) }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
+        // SAFETY: The ClientHello is live for the certificate-selection callback;
+        // the native SSL pointer remains valid for the shared borrow.
         unsafe { SslRef::from_ptr(self.0.ssl) }
     }
 
     /// Returns the servername sent by the client via Server Name Indication (SNI).
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn servername(&self, type_: NameType) -> Option<&str> {
         self.ssl().servername(type_)
     }
 
     /// Returns the version sent by the client in its Client Hello record.
-    #[must_use]
-    pub fn client_version(&self) -> SslVersion {
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
+    pub const fn client_version(&self) -> SslVersion {
         SslVersion(self.0.version)
     }
 
-    /// Returns a string describing the protocol version of the connection.
-    #[must_use]
-    pub fn version_str(&self) -> &'static str {
+    /// Returns the protocol version string, if its native representation is valid UTF-8.
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
+    pub fn version_str(&self) -> Option<&'static str> {
         self.ssl().version_str()
     }
 
     /// Returns the raw data of the client hello message
-    #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.0.client_hello, self.0.client_hello_len) }
+    #[must_use = "The returned byte representation is the result of serialization or borrowing."]
+    pub const fn as_bytes(&self) -> &[u8] {
+        // SAFETY: BoringSSL owns the ClientHello bytes until callback return.
+        // Any empty/null or oversized pair is handled before making a slice.
+        match unsafe { native_input(self.0.client_hello, self.0.client_hello_len) } {
+            Some(data) => data,
+            None => &[],
+        }
     }
 
     /// Returns the client random data
-    #[must_use]
-    pub fn random(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.0.random, self.0.random_len) }
+    #[must_use = "Use the returned handshake random bytes for the intended protocol inspection."]
+    pub const fn random(&self) -> &[u8] {
+        // SAFETY: the random bytes belong to the live native ClientHello.
+        match unsafe { native_input(self.0.random, self.0.random_len) } {
+            Some(data) => data,
+            None => &[],
+        }
     }
 
     /// Returns the raw list of ciphers supported by the client in its Client Hello record.
-    #[must_use]
-    pub fn ciphers(&self) -> &[u8] {
-        unsafe { slice::from_raw_parts(self.0.cipher_suites, self.0.cipher_suites_len) }
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
+    pub const fn ciphers(&self) -> &[u8] {
+        // SAFETY: the cipher-suite bytes belong to the live native ClientHello.
+        match unsafe { native_input(self.0.cipher_suites, self.0.cipher_suites_len) } {
+            Some(data) => data,
+            None => &[],
+        }
     }
 }
 
@@ -2896,8 +3210,10 @@ pub struct SslCipher(&'static SslCipherRef);
 
 impl SslCipher {
     #[corresponds(SSL_get_cipher_by_value)]
-    #[must_use]
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
     pub fn from_value(value: u16) -> Option<Self> {
+        // SAFETY: BoringSSL returns a null or a process-lifetime static
+        // cipher descriptor; null is checked before exposing the borrowed ref.
         unsafe {
             let ptr = ffi::SSL_get_cipher_by_value(value);
             if ptr.is_null() {
@@ -2909,17 +3225,22 @@ impl SslCipher {
     }
 }
 
-impl Stackable for SslCipher {
+// SAFETY: the native stack type matches static native SSL_CIPHER descriptors; ownership release is a no-op.
+unsafe impl Stackable for SslCipher {
     type StackType = ffi::stack_st_SSL_CIPHER;
 }
 
+// SAFETY: SSL_CIPHER descriptors are immutable process-lifetime native objects;
+// the wrapper retains a shared reference and does not own or free the pointer.
 unsafe impl ForeignType for SslCipher {
     type CType = ffi::SSL_CIPHER;
     type Ref = SslCipherRef;
 
     #[inline]
-    unsafe fn from_ptr(ptr: *mut ffi::SSL_CIPHER) -> SslCipher {
-        SslCipher(unsafe { SslCipherRef::from_ptr(ptr) })
+    unsafe fn from_ptr(ptr: *mut ffi::SSL_CIPHER) -> Self {
+        // SAFETY: The unsafe ForeignType caller supplies a valid static cipher
+        // descriptor; converting it to a shared native reference cannot free it.
+        Self(unsafe { SslCipherRef::from_ptr(ptr) })
     }
 
     #[inline]
@@ -2941,9 +3262,19 @@ impl Deref for SslCipher {
 /// [`SslCipher`]: struct.SslCipher.html
 pub struct SslCipherRef(Opaque);
 
+// SAFETY: native SSL_CIPHER descriptors are immutable static data. The
+// `Opaque` field intentionally blocks derived auto-traits, not this contract.
+#[expect(
+    clippy::non_send_fields_in_send_ty,
+    reason = "SSL_CIPHER descriptors are immutable and global; Opaque deliberately blocks auto-Send"
+)]
+// SAFETY: native cipher descriptors are immutable static storage shared by
+// all TLS connections; moving a borrowed descriptor does not permit mutation.
 unsafe impl Send for SslCipherRef {}
+// SAFETY: all public accessors query immutable native cipher metadata.
 unsafe impl Sync for SslCipherRef {}
 
+// SAFETY: foreign references borrow a valid native SSL_CIPHER descriptor.
 unsafe impl ForeignTypeRef for SslCipherRef {
     type CType = ffi::SSL_CIPHER;
 }
@@ -2951,78 +3282,101 @@ unsafe impl ForeignTypeRef for SslCipherRef {
 impl SslCipherRef {
     /// Returns the IANA number of the cipher.
     #[corresponds(SSL_CIPHER_get_protocol_id)]
-    #[must_use]
+    #[must_use = "Use the returned native representation when crossing the native API boundary."]
     pub fn protocol_id(&self) -> u16 {
+        // SAFETY: The borrowed cipher is a live immutable native
+        // descriptor; its protocol ID is returned by value.
         unsafe { ffi::SSL_CIPHER_get_protocol_id(self.as_ptr()) }
     }
 
-    /// Returns the name of the cipher.
+    /// Returns the cipher name, or `None` for absent or invalid native metadata.
     #[corresponds(SSL_CIPHER_get_name)]
-    #[must_use]
-    pub fn name(&self) -> &'static str {
+    #[must_use = "Use the returned name for reporting or selecting the native identifier."]
+    pub fn name(&self) -> Option<&'static str> {
+        // SAFETY: the native name is a static NUL-terminated string when
+        // non-null. Its UTF-8 validity is checked before returning to Rust.
         unsafe {
             let ptr = ffi::SSL_CIPHER_get_name(self.as_ptr());
-            CStr::from_ptr(ptr).to_str().unwrap()
+            if ptr.is_null() {
+                return None;
+            }
+            CStr::from_ptr(ptr).to_str().ok()
         }
     }
 
     /// Returns the RFC-standard name of the cipher, if one exists.
     #[corresponds(SSL_CIPHER_standard_name)]
-    #[must_use]
+    #[must_use = "Use the standardized cipher suite name for protocol diagnostics."]
     pub fn standard_name(&self) -> Option<&'static str> {
+        // SAFETY: a non-null result points to static NUL-terminated native
+        // metadata. The RFC name is omitted if the bytes are not UTF-8.
         unsafe {
             let ptr = ffi::SSL_CIPHER_standard_name(self.as_ptr());
             if ptr.is_null() {
                 None
             } else {
-                Some(CStr::from_ptr(ptr).to_str().unwrap())
+                CStr::from_ptr(ptr).to_str().ok()
             }
         }
     }
 
-    /// Returns the SSL/TLS protocol version that first defined the cipher.
+    /// Returns the protocol version that introduced the cipher, or `None` if
+    /// native metadata is absent or not valid UTF-8.
     #[corresponds(SSL_CIPHER_get_version)]
-    #[must_use]
-    pub fn version(&self) -> &'static str {
-        let version = unsafe {
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
+    pub fn version(&self) -> Option<&'static str> {
+        // SAFETY: non-null native version strings have static storage and are
+        // NUL terminated; invalid UTF-8 is represented as `None`.
+        unsafe {
             let ptr = ffi::SSL_CIPHER_get_version(self.as_ptr());
-            CStr::from_ptr(ptr)
-        };
-
-        version.to_str().unwrap()
+            if ptr.is_null() {
+                None
+            } else {
+                CStr::from_ptr(ptr).to_str().ok()
+            }
+        }
     }
 
     /// Returns the number of bits used for the cipher.
     #[corresponds(SSL_CIPHER_get_bits)]
-    #[allow(clippy::useless_conversion)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn bits(&self) -> CipherBits {
+        // SAFETY: The immutable native cipher is live; the local algorithm
+        // bit-count output slot is writable until the call returns.
         unsafe {
             let mut algo_bits = 0;
-            let secret_bits = ffi::SSL_CIPHER_get_bits(self.as_ptr(), &mut algo_bits);
+            let secret_bits = ffi::SSL_CIPHER_get_bits(self.as_ptr(), &raw mut algo_bits);
             CipherBits {
-                secret: secret_bits.into(),
-                algorithm: algo_bits.into(),
+                secret: secret_bits,
+                algorithm: algo_bits,
             }
         }
     }
 
     /// Returns a textual description of the cipher.
     #[corresponds(SSL_CIPHER_description)]
-    #[must_use]
-    pub fn description(&self) -> String {
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub fn description(&self) -> Option<String> {
+        // SAFETY: the native API writes into this 128-byte stack buffer and
+        // returns the buffer or null on error. Check null before reading its
+        // NUL-terminated output; no native allocation escapes this call.
         unsafe {
-            // SSL_CIPHER_description requires a buffer of at least 128 bytes.
             let mut buf = [0; 128];
             let ptr = ffi::SSL_CIPHER_description(self.as_ptr(), buf.as_mut_ptr(), 128);
-            CStr::from_ptr(ptr).to_string_lossy().into_owned()
+            if ptr.is_null() {
+                None
+            } else {
+                Some(CStr::from_ptr(ptr).to_string_lossy().into_owned())
+            }
         }
     }
 
     /// Returns one if the cipher uses an AEAD cipher.
     #[corresponds(SSL_CIPHER_is_aead)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn cipher_is_aead(&self) -> bool {
+        // SAFETY: The borrowed cipher is an immutable native descriptor;
+        // the getter returns only a scalar flag.
         unsafe { ffi::SSL_CIPHER_is_aead(self.as_ptr()) != 0 }
     }
 
@@ -3030,8 +3384,10 @@ impl SslCipherRef {
     ///
     /// TLS 1.3 ciphers report [`Nid::KX_ANY`].
     #[corresponds(SSL_CIPHER_get_kx_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn cipher_kx_nid(&self) -> Option<Nid> {
+        // SAFETY: The borrowed cipher is an immutable native descriptor;
+        // a zero native NID is represented as absence.
         let n = unsafe { ffi::SSL_CIPHER_get_kx_nid(self.as_ptr()) };
         if n == 0 {
             None
@@ -3042,8 +3398,10 @@ impl SslCipherRef {
 
     /// Returns the NID corresponding to the cipher's authentication type.
     #[corresponds(SSL_CIPHER_get_auth_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn cipher_auth_nid(&self) -> Option<Nid> {
+        // SAFETY: The borrowed cipher is an immutable native descriptor;
+        // a zero native NID is represented as absence.
         let n = unsafe { ffi::SSL_CIPHER_get_auth_nid(self.as_ptr()) };
         if n == 0 {
             None
@@ -3054,8 +3412,10 @@ impl SslCipherRef {
 
     /// Returns the NID corresponding to the cipher.
     #[corresponds(SSL_CIPHER_get_cipher_nid)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn cipher_nid(&self) -> Option<Nid> {
+        // SAFETY: The borrowed cipher is an immutable native descriptor;
+        // a zero native NID is represented as absence.
         let n = unsafe { ffi::SSL_CIPHER_get_cipher_nid(self.as_ptr()) };
         if n == 0 {
             None
@@ -3076,7 +3436,7 @@ foreign_type_and_impl_send_sync! {
 }
 
 impl Clone for SslSession {
-    fn clone(&self) -> SslSession {
+    fn clone(&self) -> Self {
         SslSessionRef::to_owned(self)
     }
 }
@@ -3096,6 +3456,9 @@ impl ToOwned for SslSessionRef {
     type Owned = SslSession;
 
     fn to_owned(&self) -> SslSession {
+        // SAFETY: The borrowed session has a valid nonnull native pointer. BoringSSL
+        // always increments its reference count; Rust then owns the extra
+        // session reference until it is dropped.
         unsafe {
             SSL_SESSION_up_ref(self.as_ptr());
             SslSession(NonNull::new_unchecked(self.as_ptr()))
@@ -3106,19 +3469,25 @@ impl ToOwned for SslSessionRef {
 impl SslSessionRef {
     /// Returns the SSL session ID.
     #[corresponds(SSL_SESSION_get_id)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn id(&self) -> &[u8] {
+        // SAFETY: The live session owns the ID bytes; the out-length is writable,
+        // and the validated native slice handles an empty/null ID safely.
         unsafe {
             let mut len = 0;
-            let p = ffi::SSL_SESSION_get_id(self.as_ptr(), &mut len);
-            slice::from_raw_parts(p, len as usize)
+            let p = ffi::SSL_SESSION_get_id(self.as_ptr(), &raw mut len);
+            // SAFETY: BoringSSL keeps the ID storage live for this session;
+            // empty native IDs may be represented by null pointers.
+            native_input(p, usize::try_from(len).unwrap_or(0)).unwrap_or(&[])
         }
     }
 
     /// Returns the length of the master key.
     #[corresponds(SSL_SESSION_get_master_key)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn master_key_len(&self) -> usize {
+        // SAFETY: The live session may be queried for the key size using a null
+        // output buffer and zero capacity, as required by this native API.
         unsafe { SSL_SESSION_get_master_key(self.as_ptr(), ptr::null_mut(), 0) }
     }
 
@@ -3127,14 +3496,17 @@ impl SslSessionRef {
     /// Returns the number of bytes written, or the size of the master key if the buffer is empty.
     #[corresponds(SSL_SESSION_get_master_key)]
     pub fn master_key(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: The output buffer is writable for its full native length and the
+        // live session borrows it synchronously without retaining it.
         unsafe { SSL_SESSION_get_master_key(self.as_ptr(), buf.as_mut_ptr(), buf.len()) }
     }
 
     /// Returns the time at which the session was established, in seconds since the Unix epoch.
     #[corresponds(SSL_SESSION_get_time)]
-    #[allow(clippy::useless_conversion)]
-    #[must_use]
+    #[must_use = "Use the returned timestamp or lifetime when determining session validity."]
     pub fn time(&self) -> u64 {
+        // SAFETY: The live borrowed session contains this scalar timestamp
+        // and no raw buffer is exposed by the native getter.
         unsafe { ffi::SSL_SESSION_get_time(self.as_ptr()) }
     }
 
@@ -3142,9 +3514,10 @@ impl SslSessionRef {
     ///
     /// A session older than this time should not be used for session resumption.
     #[corresponds(SSL_SESSION_get_timeout)]
-    #[allow(clippy::useless_conversion)]
-    #[must_use]
+    #[must_use = "Use the returned timestamp or lifetime when determining session validity."]
     pub fn timeout(&self) -> u32 {
+        // SAFETY: The live borrowed session contains this scalar
+        // timeout and no raw buffer is exposed by the native getter.
         unsafe { ffi::SSL_SESSION_get_timeout(self.as_ptr()) }
     }
 
@@ -3153,8 +3526,10 @@ impl SslSessionRef {
     /// Single-use TLS 1.3 tickets prevent connection correlation; see
     /// [RFC 8446 Appendix C.4](https://datatracker.ietf.org/doc/html/rfc8446#appendix-C.4).
     #[corresponds(SSL_SESSION_should_be_single_use)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn should_be_single_use(&self) -> bool {
+        // SAFETY: The live session supplies a scalar reuse
+        // policy flag through a synchronous native getter.
         unsafe { ffi::SSL_SESSION_should_be_single_use(self.as_ptr()) != 0 }
     }
 
@@ -3164,6 +3539,9 @@ impl SslSessionRef {
     /// already disabled.
     #[corresponds(SSL_SESSION_copy_without_early_data)]
     pub fn copy_without_early_data(&self) -> Result<SslSession, ErrorStack> {
+        // SAFETY: BoringSSL returns an owned reference
+        // (or null on failure) to a session. cvt_p checks null before Rust
+        // takes ownership, including if the native session was retained.
         unsafe {
             cvt_p(ffi::SSL_SESSION_copy_without_early_data(self.as_ptr()))
                 .map(|session| SslSession::from_ptr(session))
@@ -3174,7 +3552,7 @@ impl SslSessionRef {
     ///
     /// Returns `None` when the session holds no peer certificates.
     #[corresponds(SSL_SESSION_get0_peer_certificates)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_chain_not_after(&self) -> Option<i64> {
         // SAFETY: the session owns the stack and its buffers for the duration of this call, and
         // each parsed certificate holds its own reference to its buffer.
@@ -3196,8 +3574,10 @@ impl SslSessionRef {
     ///
     /// TLS 1.3 resumptions may use a different cipher.
     #[corresponds(SSL_SESSION_get0_cipher)]
-    #[must_use]
+    #[must_use = "Use the negotiated cipher description to inspect the connection."]
     pub fn cipher(&self) -> Option<&SslCipherRef> {
+        // SAFETY: The live session owns or references the negotiated
+        // cipher, which is immutable. Null is checked before borrowing.
         unsafe {
             let ptr = ffi::SSL_SESSION_get0_cipher(self.as_ptr());
             if ptr.is_null() {
@@ -3210,8 +3590,10 @@ impl SslSessionRef {
 
     /// Returns the session's TLS protocol version.
     #[corresponds(SSL_SESSION_get_protocol_version)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn protocol_version(&self) -> SslVersion {
+        // SAFETY: The live native session returns its
+        // negotiated protocol version as a scalar.
         unsafe {
             let version = ffi::SSL_SESSION_get_protocol_version(self.as_ptr());
             SslVersion(version)
@@ -3221,14 +3603,14 @@ impl SslSessionRef {
     /// Returns the session ID context recorded when the session was created.
     #[corresponds(SSL_SESSION_get0_id_context)]
     fn id_context(&self) -> &[u8] {
+        // SAFETY: The live session owns its optional ID-context bytes and the local
+        // output-length slot is writable; native_input validates the pair.
         unsafe {
             let mut len = 0;
-            let p = ffi::SSL_SESSION_get0_id_context(self.as_ptr(), &mut len);
-            if p.is_null() {
-                &[]
-            } else {
-                slice::from_raw_parts(p, len as usize)
-            }
+            let p = ffi::SSL_SESSION_get0_id_context(self.as_ptr(), &raw mut len);
+            // SAFETY: the ID-context buffer is owned by this session; null
+            // pointers with zero length are treated as the empty ID context.
+            native_input(p, usize::try_from(len).unwrap_or(0)).unwrap_or(&[])
         }
     }
 
@@ -3260,44 +3642,17 @@ impl fmt::Debug for Ssl {
 }
 
 impl Ssl {
-    /// Returns a new extra data index.
-    ///
-    /// Each invocation of this function is guaranteed to return a distinct index. These can be used
-    /// to store data in the context that can be retrieved later by callbacks, for example.
-    #[corresponds(SSL_get_ex_new_index)]
-    pub fn new_ex_index<T>() -> Result<Index<Ssl, T>, ErrorStack>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            ffi::init();
-            let idx = cvt_n(get_new_ssl_idx(Some(free_data_box::<T>)))?;
-            Ok(Index::from_raw(idx))
-        }
-    }
-
-    // FIXME should return a result?
-    fn cached_ex_index<T>() -> Index<Ssl, T>
-    where
-        T: 'static + Sync + Send,
-    {
-        unsafe {
-            let idx = *SSL_INDEXES
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .entry(TypeId::of::<T>())
-                .or_insert_with(|| Ssl::new_ex_index::<T>().unwrap().as_raw());
-            Index::from_raw(idx)
-        }
-    }
+    callback_indices!(SSL_get_ex_new_index, get_new_ssl_idx, SSL_CALLBACKS);
 
     /// Creates a new [`Ssl`].
     #[corresponds(SSL_new)]
-    pub fn new(ctx: &SslContextRef) -> Result<Ssl, ErrorStack> {
+    pub fn new(ctx: &SslContextRef) -> Result<Self, ErrorStack> {
+        // SAFETY: The borrowed live context stays valid through allocation and the
+        // native SSL handle is checked for null before Rust takes ownership.
         unsafe {
             let ptr = cvt_p(ffi::SSL_new(ctx.as_ptr()))?;
-            let mut ssl = Ssl::from_ptr(ptr);
-            ssl.set_ex_data(*SESSION_CTX_INDEX, ctx.to_owned());
+            let mut ssl = Self::from_ptr(ptr);
+            ssl.set_ex_data(SESSION_CTX_INDEX.register()?, ctx.to_owned())?;
 
             Ok(ssl)
         }
@@ -3312,13 +3667,17 @@ impl Ssl {
     ///
     /// # Warning
     ///
-    /// BoringSSL's default configuration is insecure. It is highly recommended to use
+    /// `BoringSSL`'s default configuration is insecure. It is highly recommended to use
     /// [`SslConnector`] rather than [`Ssl`] directly, as it manages that configuration.
-    pub fn setup_connect<S>(self, stream: S) -> MidHandshakeSslStream<S>
+    ///
+    /// # Errors
+    ///
+    /// Allocating the stream's native BIO transport fails before the handshake.
+    pub fn setup_connect<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
-        SslStreamBuilder::new(self, stream).setup_connect()
+        Ok(SslStreamBuilder::new(self, stream)?.setup_connect())
     }
 
     /// Attempts a client-side TLS handshake.
@@ -3330,11 +3689,15 @@ impl Ssl {
     ///
     /// OpenSSL's default configuration is insecure. It is highly recommended to use
     /// [`SslConnector`] rather than `Ssl` directly, as it manages that configuration.
+    ///
+    /// # Errors
+    ///
+    /// Transport setup or the TLS handshake fails or needs additional I/O.
     pub fn connect<S>(self, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
     {
-        self.setup_connect(stream).handshake()
+        self.setup_connect(stream)?.handshake()
     }
 
     /// Initiates a server-side TLS handshake.
@@ -3346,13 +3709,17 @@ impl Ssl {
     ///
     /// # Warning
     ///
-    /// BoringSSL's default configuration is insecure. It is highly recommended to use
+    /// `BoringSSL`'s default configuration is insecure. It is highly recommended to use
     /// [`SslAcceptor`] rather than [`Ssl`] directly, as it manages that configuration.
-    pub fn setup_accept<S>(self, stream: S) -> MidHandshakeSslStream<S>
+    ///
+    /// # Errors
+    ///
+    /// Allocating the stream's native BIO transport fails before the handshake.
+    pub fn setup_accept<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
-        SslStreamBuilder::new(self, stream).setup_accept()
+        Ok(SslStreamBuilder::new(self, stream)?.setup_accept())
     }
 
     /// Attempts a server-side TLS handshake.
@@ -3366,11 +3733,15 @@ impl Ssl {
     /// `SslAcceptor` rather than `Ssl` directly, as it manages that configuration.
     ///
     /// [`SSL_accept`]: https://www.openssl.org/docs/manmaster/man3/SSL_accept.html
+    ///
+    /// # Errors
+    ///
+    /// Transport setup or the TLS handshake fails or needs additional I/O.
     pub fn accept<S>(self, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
     {
-        self.setup_accept(stream).handshake()
+        self.setup_accept(stream)?.handshake()
     }
 }
 
@@ -3392,6 +3763,8 @@ impl fmt::Debug for SslRef {
 
 impl SslRef {
     fn get_raw_rbio(&self) -> *mut ffi::BIO {
+        // SAFETY: This live connection holds its owned BIO, and the getter only
+        // returns its borrowed pointer for internal use.
         unsafe { ffi::SSL_get_rbio(self.as_ptr()) }
     }
 
@@ -3403,6 +3776,8 @@ impl SslRef {
     /// `clear_options` for that.
     #[corresponds(SSL_set_options)]
     pub fn set_options(&mut self, option: SslOptions) -> SslOptions {
+        // SAFETY: The live SSL connection is uniquely borrowed while the
+        // native function applies and returns an option bitset.
         let bits = unsafe { ffi::SSL_set_options(self.as_ptr(), option.bits()) };
         SslOptions::from_bits_retain(bits)
     }
@@ -3410,6 +3785,8 @@ impl SslRef {
     /// Clears the options used by the ongoing session, returning the old set.
     #[corresponds(SSL_clear_options)]
     pub fn clear_options(&mut self, option: SslOptions) -> SslOptions {
+        // SAFETY: The live SSL connection is uniquely borrowed while the
+        // native function clears and returns an option bitset.
         let bits = unsafe { ffi::SSL_clear_options(self.as_ptr(), option.bits()) };
         SslOptions::from_bits_retain(bits)
     }
@@ -3417,6 +3794,8 @@ impl SslRef {
     #[corresponds(SSL_set1_curves_list)]
     pub fn set_curves_list(&mut self, curves: &str) -> Result<(), ErrorStack> {
         let curves = CString::new(curves).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The NUL-terminated curve list stays alive during
+        // synchronous configuration of the uniquely borrowed connection.
         unsafe { cvt_0i(ffi::SSL_set1_curves_list(self.as_ptr(), curves.as_ptr())).map(|_| ()) }
     }
 
@@ -3425,6 +3804,8 @@ impl SslRef {
         &mut self,
         prefs: &[SslSignatureAlgorithm],
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The transparent u16 preference slice
+        // remains live while BoringSSL copies its requested algorithms.
         unsafe {
             cvt_0i(ffi::SSL_set_verify_algorithm_prefs(
                 self.as_ptr(),
@@ -3437,8 +3818,10 @@ impl SslRef {
 
     /// Returns the curve ID (aka group ID) used for this `SslRef`.
     #[corresponds(SSL_get_curve_id)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn curve(&self) -> Option<u16> {
+        // SAFETY: The live SSL connection reports a scalar curve ID;
+        // unsupported or unselected curves are handled by the Rust wrapper.
         let curve_id = unsafe { ffi::SSL_get_curve_id(self.as_ptr()) };
         if curve_id == 0 {
             return None;
@@ -3448,10 +3831,12 @@ impl SslRef {
 
     /// Returns the curve name used for this `SslRef`.
     #[corresponds(SSL_get_curve_name)]
-    #[must_use]
+    #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
     pub fn curve_name(&self) -> Option<&'static str> {
         let curve_id = self.curve()?;
 
+        // SAFETY: The native curve name is a static string or null,
+        // which is checked before converting the borrowed bytes to UTF-8.
         unsafe {
             let ptr = ffi::SSL_get_curve_name(curve_id);
             if ptr.is_null() {
@@ -3462,16 +3847,20 @@ impl SslRef {
         }
     }
 
-    /// Returns whether the TLS 1.3 HelloRetryRequest was used
-    #[must_use]
+    /// Returns whether the TLS 1.3 `HelloRetryRequest` was used
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn used_hello_retry_request(&self) -> bool {
+        // SAFETY: The native getter reads a scalar flag
+        // from the live SSL handshake state.
         unsafe { ffi::SSL_used_hello_retry_request(self.as_ptr()) == 1 }
     }
 
     /// Returns an `ErrorCode` value for the most recent operation on this `SslRef`.
     #[corresponds(SSL_get_error)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn error_code(&self, ret: c_int) -> ErrorCode {
+        // SAFETY: The live SSL connection supplies a native error code
+        // describing the immediately preceding operation result.
         unsafe { ErrorCode::from_raw(ffi::SSL_get_error(self.as_ptr(), ret)) }
     }
 
@@ -3482,29 +3871,39 @@ impl SslRef {
     pub fn set_verify(&mut self, mode: SslVerifyMode) {
         self.ssl_context().check_x509();
 
+        // SAFETY: The uniquely borrowed connection accepts the scalar verify mode
+        // and null callback; no borrowed application state is retained.
         unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) }
     }
 
     /// Sets the certificate verification depth.
     ///
     /// If the peer's certificate chain is longer than this value, verification will fail.
+    ///
+    /// # Errors
+    ///
+    /// The depth exceeds the signed native integer range.
     #[corresponds(SSL_set_verify_depth)]
-    pub fn set_verify_depth(&mut self, depth: u32) {
+    pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
+        let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ssl_context().check_x509();
 
-        unsafe {
-            ffi::SSL_set_verify_depth(self.as_ptr(), depth as c_int);
-        }
+        // SAFETY: the live SSL connection is exclusively borrowed and depth
+        // has been checked against the native signed integer range.
+        unsafe { ffi::SSL_set_verify_depth(self.as_ptr(), depth) };
+        Ok(())
     }
 
     /// Returns the verify mode that was set using `set_verify`.
     #[corresponds(SSL_get_verify_mode)]
-    #[must_use]
+    #[must_use = "Use the returned flags to inspect current configuration."]
     pub fn verify_mode(&self) -> SslVerifyMode {
         self.ssl_context().check_x509();
 
+        // SAFETY: The live SSL connection returns its native verify
+        // bitset; the wrapper preserves any recognized or future bits.
         let mode = unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) };
-        SslVerifyMode::from_bits(mode).expect("SSL_get_verify_mode returned invalid mode")
+        SslVerifyMode::from_bits_retain(mode)
     }
 
     /// Like [`SslContextBuilder::set_verify_callback`].
@@ -3523,37 +3922,54 @@ impl SslRef {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_set_verify)]
-    pub fn set_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
         F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
         self.ssl_context().check_x509();
 
+        // SAFETY: The closure is installed in typed native extra-data as an Arc
+        // before the live SSL connection receives its static trampoline.
         unsafe {
             // this needs to be in an Arc since the callback can register a new callback!
-            self.replace_ex_data(Ssl::cached_ex_index(), Arc::new(callback));
+            self.replace_ex_data(
+                Ssl::register_callback(CallbackRole::Verify)?,
+                Arc::new(callback),
+            )?;
             ffi::SSL_set_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(ssl_raw_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Sets a custom certificate store for verifying peer certificates.
     #[corresponds(SSL_set1_verify_cert_store)]
     pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509();
-
+        let index = SSL_VERIFY_STORE_INDEX.register()?;
+        if self.ex_data(index).is_none() {
+            self.set_ex_data(index, None)?;
+        }
+        // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
             cvt(ffi::SSL_set1_verify_cert_store(
                 self.as_ptr(),
                 cert_store.as_ptr(),
             ))?;
-        }
-        self.set_ex_data(*SSL_VERIFY_STORE_INDEX, Some(cert_store));
-        Ok(())
+        };
+        self.set_ex_data(index, Some(cert_store))
     }
 
     /// Like [`SslContextBuilder::set_custom_verify_callback`].
@@ -3561,22 +3977,34 @@ impl SslRef {
     /// # Panics
     ///
     /// This method panics if this `Ssl` is associated with a RPK context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_set_custom_verify)]
-    pub fn set_custom_verify_callback<F>(&mut self, mode: SslVerifyMode, callback: F)
+    pub fn set_custom_verify_callback<F>(
+        &mut self,
+        mode: SslVerifyMode,
+        callback: F,
+    ) -> Result<(), ErrorStack>
     where
-        F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
+        F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
-        self.ssl_context().check_x509();
-
+        // SAFETY: The typed extra-data slot holds an Arc of the callback before
+        // BoringSSL retains the static custom-verification trampoline.
         unsafe {
             // this needs to be in an Arc since the callback can register a new callback!
-            self.replace_ex_data(Ssl::cached_ex_index(), Arc::new(callback));
+            self.replace_ex_data(
+                Ssl::register_callback(CallbackRole::CustomVerify)?,
+                Arc::new(callback),
+            )?;
             ffi::SSL_set_custom_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(ssl_raw_custom_verify::<F>),
             );
         }
+        Ok(())
     }
 
     /// Like [`SslContextBuilder::set_tmp_dh`].
@@ -3584,6 +4012,8 @@ impl SslRef {
     /// [`SslContextBuilder::set_tmp_dh`]: struct.SslContextBuilder.html#method.set_tmp_dh
     #[corresponds(SSL_set_tmp_dh)]
     pub fn set_tmp_dh(&mut self, dh: &DhRef<Params>) -> Result<(), ErrorStack> {
+        // SAFETY: The DH parameter handle remains live during the native
+        // setter, and the uniquely borrowed connection holds any needed state.
         unsafe { cvt(ffi::SSL_set_tmp_dh(self.as_ptr(), dh.as_ptr())) }
     }
 
@@ -3592,13 +4022,17 @@ impl SslRef {
     /// [`SslContextBuilder::set_tmp_ecdh`]: struct.SslContextBuilder.html#method.set_tmp_ecdh
     #[corresponds(SSL_set_tmp_ecdh)]
     pub fn set_tmp_ecdh(&mut self, key: &EcKeyRef<Params>) -> Result<(), ErrorStack> {
+        // SAFETY: The ECDH parameter handle remains live during the native
+        // setter, and the uniquely borrowed connection holds any needed state.
         unsafe { cvt(ffi::SSL_set_tmp_ecdh(self.as_ptr(), key.as_ptr())) }
     }
 
     /// Configures whether ClientHello extensions should be permuted.
     #[corresponds(SSL_set_permute_extensions)]
     pub fn set_permute_extensions(&mut self, enabled: bool) {
-        unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), enabled as _) }
+        // SAFETY: The uniquely borrowed SSL connection receives
+        // a scalar extension-permutation flag.
+        unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), c_int::from(enabled)) }
     }
 
     /// Sets the [RFC 8449] record size limit for this connection only.
@@ -3612,6 +4046,8 @@ impl SslRef {
     #[cfg(not(feature = "fips"))]
     #[corresponds(SSL_set_record_size_limit)]
     pub fn set_record_size_limit(&mut self, limit: u16) {
+        // SAFETY: The native connection is exclusively borrowed
+        // while BoringSSL installs its scalar record-size setting.
         unsafe { ffi::SSL_set_record_size_limit(self.as_ptr(), limit as _) }
     }
 
@@ -3620,6 +4056,8 @@ impl SslRef {
     /// [`SslContextBuilder::set_alpn_protos`]: struct.SslContextBuilder.html#method.set_alpn_protos
     #[corresponds(SSL_set_alpn_protos)]
     pub fn set_alpn_protos(&mut self, protocols: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: The native setter borrows the wire-format ALPN bytes
+        // only for this synchronous call; the length is checked before conversion.
         unsafe {
             let r = ffi::SSL_set_alpn_protos(
                 self.as_ptr(),
@@ -3637,8 +4075,10 @@ impl SslRef {
 
     /// Returns the stack of available SslCiphers for `SSL`, sorted by preference.
     #[corresponds(SSL_get_ciphers)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ciphers(&self) -> &StackRef<SslCipher> {
+        // SAFETY: The live connection owns the returned cipher stack;
+        // the wrapper only borrows it while that connection remains live.
         unsafe {
             let cipher_list = ffi::SSL_get_ciphers(self.as_ptr());
             StackRef::from_ptr(cipher_list)
@@ -3647,8 +4087,10 @@ impl SslRef {
 
     /// Returns the current cipher if the session is active.
     #[corresponds(SSL_get_current_cipher)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn current_cipher(&self) -> Option<&SslCipherRef> {
+        // SAFETY: The live connection owns the optional negotiated
+        // cipher pointer, and null is checked before returning a shared ref.
         unsafe {
             let ptr = ffi::SSL_get_current_cipher(self.as_ptr());
 
@@ -3663,8 +4105,10 @@ impl SslRef {
     /// Returns the signature algorithm used by the peer in the most recent TLS handshake,
     /// or `None` if no signature was produced (e.g. session resumption).
     #[corresponds(SSL_get_peer_signature_algorithm)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn peer_signature_algorithm(&self) -> Option<SslSignatureAlgorithm> {
+        // SAFETY: The live SSL connection writes the
+        // peer signature-algorithm code to an initialized local output slot.
         let sigalg = unsafe { ffi::SSL_get_peer_signature_algorithm(self.as_ptr()) };
         if sigalg == 0 {
             None
@@ -3686,8 +4130,10 @@ impl SslRef {
     /// [RFC 9345]: https://www.rfc-editor.org/rfc/rfc9345
     #[cfg(not(feature = "fips"))]
     #[corresponds(SSL_used_delegated_credential)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn used_delegated_credential(&self) -> bool {
+        // SAFETY: The live SSL connection returns a scalar
+        // negotiated-credential flag; no pointer is retained.
         unsafe { ffi::SSL_used_delegated_credential(self.as_ptr()) != 0 }
     }
 
@@ -3698,8 +4144,10 @@ impl SslRef {
     /// capture it from an [`SslContextBuilder::set_info_callback`] handler at
     /// [`SslInfoCallbackMode::HANDSHAKE_DONE`].
     #[corresponds(SSL_get_signature_algorithm_used)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn signature_algorithm_used(&self) -> Option<SslSignatureAlgorithm> {
+        // SAFETY: The live SSL connection writes an
+        // optional signature code to a local output slot for this handshake.
         let sigalg = unsafe { ffi::SSL_get_signature_algorithm_used(self.as_ptr()) };
         if sigalg == 0 {
             None
@@ -3712,8 +4160,10 @@ impl SslRef {
     ///
     /// Returns empty string if the state wasn't valid UTF-8.
     #[corresponds(SSL_state_string)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn state_string(&self) -> &'static str {
+        // SAFETY: The live SSL object provides a static native state string;
+        // the Rust wrapper handles its native C-string representation.
         let state = unsafe {
             let ptr = ffi::SSL_state_string(self.as_ptr());
             CStr::from_ptr(ptr)
@@ -3726,8 +4176,10 @@ impl SslRef {
     ///
     /// Returns empty string if the state wasn't valid UTF-8.
     #[corresponds(SSL_state_string_long)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn state_string_long(&self) -> &'static str {
+        // SAFETY: The live SSL object provides a static native state
+        // string; the wrapper handles its native C-string representation.
         let state = unsafe {
             let ptr = ffi::SSL_state_string_long(self.as_ptr());
             CStr::from_ptr(ptr)
@@ -3742,15 +4194,19 @@ impl SslRef {
     #[corresponds(SSL_set_tlsext_host_name)]
     pub fn set_hostname(&mut self, hostname: &str) -> Result<(), ErrorStack> {
         let cstr = CString::new(hostname).map_err(ErrorStack::internal_error)?;
+        // SAFETY: The checked NUL-terminated SNI value stays live
+        // while the uniquely borrowed SSL connection copies its hostname.
         unsafe { cvt(ffi::SSL_set_tlsext_host_name(self.as_ptr(), cstr.as_ptr())) }
     }
 
     /// Returns the peer's certificate, if present.
     #[corresponds(SSL_get_peer_certificate)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_certificate(&self) -> Option<X509> {
         self.ssl_context().check_x509();
 
+        // SAFETY: The live connection returns an owned certificate
+        // reference or null; null is checked before Rust assumes ownership.
         unsafe {
             let ptr = ffi::SSL_get_peer_certificate(self.as_ptr());
             if ptr.is_null() {
@@ -3766,10 +4222,12 @@ impl SslRef {
     /// On the client side, the chain includes the leaf certificate, but on the server side it does
     /// not. Fun!
     #[corresponds(SSL_get_peer_cert_chain)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_cert_chain(&self) -> Option<&StackRef<X509>> {
         self.ssl_context().check_x509();
 
+        // SAFETY: The live connection owns the peer chain; the
+        // borrowed stack pointer is checked for null before use.
         unsafe {
             let ptr = ffi::SSL_get_peer_cert_chain(self.as_ptr());
             if ptr.is_null() {
@@ -3782,10 +4240,12 @@ impl SslRef {
 
     /// Like [`SslContext::certificate`].
     #[corresponds(SSL_get_certificate)]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn certificate(&self) -> Option<&X509Ref> {
         self.ssl_context().check_x509();
 
+        // SAFETY: The live SSL connection owns the installed
+        // certificate; a nullable borrowed pointer is checked before dereference.
         unsafe {
             let ptr = ffi::SSL_get_certificate(self.as_ptr());
             if ptr.is_null() {
@@ -3798,8 +4258,10 @@ impl SslRef {
 
     /// Like [`SslContext::private_key`].
     #[corresponds(SSL_get_privatekey)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn private_key(&self) -> Option<&PKeyRef<Private>> {
+        // SAFETY: The live SSL connection owns the installed key;
+        // a nullable borrowed pointer is checked before dereference.
         unsafe {
             let ptr = ffi::SSL_get_privatekey(self.as_ptr());
             if ptr.is_null() {
@@ -3811,14 +4273,16 @@ impl SslRef {
     }
 
     #[deprecated(since = "0.10.5", note = "renamed to `version_str`")]
-    #[must_use]
-    pub fn version(&self) -> &str {
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
+    pub fn version(&self) -> Option<&str> {
         self.version_str()
     }
 
     /// Returns the protocol version of the session.
     #[corresponds(SSL_version)]
     pub fn version2(&self) -> Option<SslVersion> {
+        // SAFETY: The native getter reports a negotiated scalar version
+        // from the live SSL connection; unsupported values are rejected.
         unsafe {
             let r = ffi::SSL_version(self.as_ptr());
             if r == 0 {
@@ -3829,18 +4293,21 @@ impl SslRef {
         }
     }
 
-    /// Returns a string describing the protocol version of the session.
-    ///
-    /// This may panic if the string isn't valid UTF-8 for some reason. Use [`Self::version2`] instead.
+    /// Returns the negotiated protocol version name, if native metadata is
+    /// present and valid UTF-8. Use [`Self::version2`] for its numeric form.
     #[corresponds(SSL_get_version)]
-    #[must_use]
-    pub fn version_str(&self) -> &'static str {
-        let version = unsafe {
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
+    pub fn version_str(&self) -> Option<&'static str> {
+        // SAFETY: a non-null native string has static storage while BoringSSL
+        // is initialized; it is checked for UTF-8 validity before returning.
+        unsafe {
             let ptr = ffi::SSL_get_version(self.as_ptr());
-            CStr::from_ptr(ptr)
-        };
-
-        version.to_str().unwrap()
+            if ptr.is_null() {
+                None
+            } else {
+                CStr::from_ptr(ptr).to_str().ok()
+            }
+        }
     }
 
     /// Sets the minimum supported protocol version.
@@ -3849,6 +4316,8 @@ impl SslRef {
     /// TLS 1.0.
     #[corresponds(SSL_set_min_proto_version)]
     pub fn set_min_proto_version(&mut self, version: Option<SslVersion>) -> Result<(), ErrorStack> {
+        // SAFETY: The uniquely borrowed native connection accepts
+        // a scalar protocol version, zero for the native default.
         unsafe {
             cvt(ffi::SSL_set_min_proto_version(
                 self.as_ptr(),
@@ -3862,6 +4331,8 @@ impl SslRef {
     /// If version is `None`, the default maximum version is used. For BoringSSL this is TLS 1.3.
     #[corresponds(SSL_set_max_proto_version)]
     pub fn set_max_proto_version(&mut self, version: Option<SslVersion>) -> Result<(), ErrorStack> {
+        // SAFETY: The uniquely borrowed native connection accepts
+        // a scalar protocol version, zero for the native default.
         unsafe {
             cvt(ffi::SSL_set_max_proto_version(
                 self.as_ptr(),
@@ -3873,6 +4344,8 @@ impl SslRef {
     /// Gets the minimum supported protocol version.
     #[corresponds(SSL_get_min_proto_version)]
     pub fn min_proto_version(&mut self) -> Option<SslVersion> {
+        // SAFETY: The getter reads a scalar protocol version
+        // from the live SSL connection; zero means native default.
         unsafe {
             let r = ffi::SSL_get_min_proto_version(self.as_ptr());
             if r == 0 {
@@ -3885,8 +4358,10 @@ impl SslRef {
 
     /// Gets the maximum supported protocol version.
     #[corresponds(SSL_get_max_proto_version)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn max_proto_version(&self) -> Option<SslVersion> {
+        // SAFETY: The getter reads a scalar protocol version
+        // from the live SSL connection; zero means native default.
         let r = unsafe { ffi::SSL_get_max_proto_version(self.as_ptr()) };
         if r == 0 {
             None
@@ -3900,19 +4375,22 @@ impl SslRef {
     /// The protocol's name is returned is an opaque sequence of bytes. It is up to the client
     /// to interpret it.
     #[corresponds(SSL_get0_alpn_selected)]
-    #[must_use]
+    #[must_use = "Use the negotiated protocol to dispatch the application connection."]
     pub fn selected_alpn_protocol(&self) -> Option<&[u8]> {
+        // SAFETY: The live SSL connection owns the selected ALPN
+        // bytes, with writable local output slots and a nullable pointer.
         unsafe {
             let mut data: *const c_uchar = ptr::null();
             let mut len: c_uint = 0;
             // Get the negotiated protocol from the SSL instance.
             // `data` will point at a `c_uchar` array; `len` will contain the length of this array.
-            ffi::SSL_get0_alpn_selected(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_alpn_selected(self.as_ptr(), &raw mut data, &raw mut len);
 
             if data.is_null() {
                 None
             } else {
-                Some(slice::from_raw_parts(data, len as usize))
+                // SAFETY: ALPN output is borrowed from the live handshake.
+                native_input(data, len as usize)
             }
         }
     }
@@ -3922,25 +4400,28 @@ impl SslRef {
     ///
     /// The value may be empty. It is available once the handshake has negotiated ALPS.
     #[corresponds(SSL_get0_peer_application_settings)]
+    #[must_use = "Inspect any application settings negotiated by the peer."]
     pub fn peer_application_settings(&self) -> Option<&[u8]> {
+        // SAFETY: The native query reads an ALPS negotiation
+        // flag from this live SSL connection before fetching its data.
         unsafe {
             if ffi::SSL_has_application_settings(self.as_ptr()) == 0 {
                 return None;
             }
             let mut data = ptr::null();
             let mut len = 0;
-            ffi::SSL_get0_peer_application_settings(self.as_ptr(), &mut data, &mut len);
-            if data.is_null() {
-                Some(&[])
-            } else {
-                Some(slice::from_raw_parts(data, len))
-            }
+            ffi::SSL_get0_peer_application_settings(self.as_ptr(), &raw mut data, &raw mut len);
+            // SAFETY: negotiated ALPS output is borrowed from this live SSL
+            // connection. An empty negotiated value may have a null pointer.
+            native_input(data, len)
         }
     }
 
     /// Enables the DTLS extension "use_srtp" as defined in RFC5764.
     #[corresponds(SSL_set_tlsext_use_srtp)]
     pub fn set_tlsext_use_srtp(&mut self, protocols: &str) -> Result<(), ErrorStack> {
+        // SAFETY: The NUL-terminated SRTP profile list stays live
+        // while this uniquely borrowed connection installs its configuration.
         unsafe {
             let cstr = CString::new(protocols).map_err(ErrorStack::internal_error)?;
 
@@ -3958,8 +4439,10 @@ impl SslRef {
     ///
     /// DTLS extension "use_srtp" as defined in RFC5764 has to be enabled.
     #[corresponds(SSL_get_strp_profiles)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn srtp_profiles(&self) -> Option<&StackRef<SrtpProtectionProfile>> {
+        // SAFETY: The SSL connection owns the optional native
+        // SRTP profile stack, checked for null before exposing a reference.
         unsafe {
             let chain = ffi::SSL_get_srtp_profiles(self.as_ptr());
 
@@ -3975,8 +4458,10 @@ impl SslRef {
     ///
     /// DTLS extension "use_srtp" as defined in RFC5764 has to be enabled.
     #[corresponds(SSL_get_selected_srtp_profile)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn selected_srtp_profile(&self) -> Option<&SrtpProtectionProfileRef> {
+        // SAFETY: The live SSL connection owns the optional
+        // negotiated SRTP descriptor, checked for null before borrowing.
         unsafe {
             let profile = ffi::SSL_get_selected_srtp_profile(self.as_ptr());
 
@@ -3993,9 +4478,11 @@ impl SslRef {
     /// If this is greater than 0, the next call to `read` will not call down to the underlying
     /// stream.
     #[corresponds(SSL_pending)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn pending(&self) -> usize {
-        unsafe { ffi::SSL_pending(self.as_ptr()) as usize }
+        // SAFETY: the native getter reads pending plaintext bytes from a live
+        // SSL connection. Negative values cannot represent pending bytes.
+        usize::try_from(unsafe { ffi::SSL_pending(self.as_ptr()) }).unwrap_or(0)
     }
 
     /// Returns the servername sent by the client via Server Name Indication (SNI).
@@ -4011,7 +4498,7 @@ impl SslRef {
     ///
     // FIXME maybe rethink in 0.11?
     #[corresponds(SSL_get_servername)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn servername(&self, type_: NameType) -> Option<&str> {
         self.servername_raw(type_)
             .and_then(|b| str::from_utf8(b).ok())
@@ -4025,8 +4512,10 @@ impl SslRef {
     ///
     /// Unlike `servername`, this method does not require the name be valid UTF-8.
     #[corresponds(SSL_get_servername)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn servername_raw(&self, type_: NameType) -> Option<&[u8]> {
+        // SAFETY: The live connection owns its optional
+        // NUL-terminated SNI buffer, checked for null before reading.
         unsafe {
             let name = ffi::SSL_get_servername(self.as_ptr(), type_.0);
             if name.is_null() {
@@ -4042,17 +4531,23 @@ impl SslRef {
     /// It is most commonly used in the Server Name Indication (SNI) callback.
     #[corresponds(SSL_set_SSL_CTX)]
     pub fn set_ssl_context(&mut self, ctx: &SslContextRef) -> Result<(), ErrorStack> {
-        assert_eq!(
-            self.ssl_context().has_x509_support(),
-            ctx.has_x509_support(),
-            "X.509 certificate support in old and new contexts doesn't match",
-        );
+        if self.ssl_context().has_x509_support() != ctx.has_x509_support() {
+            return Err(ErrorStack::internal_error_str(
+                "X.509 certificate support in old and new contexts doesn't match",
+            ));
+        }
 
         let changed = self.ssl_context().as_ptr() != ctx.as_ptr();
+        // SAFETY: The borrowed new context is live during the
+        // reconfiguration; native code retains its context reference and
+        // the caller clears stale per-connection verification state.
         unsafe { cvt_p(ffi::SSL_set_SSL_CTX(self.as_ptr(), ctx.as_ptr()))? };
         // BoringSSL copied the new context's certificate settings, dropping a per-connection store.
         if changed {
-            if let Some(store) = self.ex_data_mut(*SSL_VERIFY_STORE_INDEX) {
+            if let Some(store) = SSL_VERIFY_STORE_INDEX
+                .get()
+                .and_then(|index| self.ex_data_mut(index))
+            {
                 *store = None;
             }
         }
@@ -4061,8 +4556,10 @@ impl SslRef {
 
     /// Returns the context corresponding to the current connection.
     #[corresponds(SSL_get_SSL_CTX)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl_context(&self) -> &SslContextRef {
+        // SAFETY: Every live SSL connection retains its current context;
+        // this native getter returns the borrowed context pointer.
         unsafe {
             let ssl_ctx = ffi::SSL_get_SSL_CTX(self.as_ptr());
             SslContextRef::from_ptr(ssl_ctx)
@@ -4074,6 +4571,8 @@ impl SslRef {
     pub fn verify_param_mut(&mut self) -> &mut X509VerifyParamRef {
         self.ssl_context().check_x509();
 
+        // SAFETY: The X.509-enabled SSL object owns this native verification
+        // parameter; the exclusive Rust borrow permits mutable access.
         unsafe { X509VerifyParamRef::from_ptr_mut(ffi::SSL_get0_param(self.as_ptr())) }
     }
 
@@ -4087,7 +4586,13 @@ impl SslRef {
     pub fn verify_result(&self) -> X509VerifyResult {
         self.ssl_context().check_x509();
 
-        unsafe { X509VerifyError::from_raw(ffi::SSL_get_verify_result(self.as_ptr()) as c_int) }
+        // SAFETY: the live X.509 connection supplies a native verification
+        // result. Reject out-of-range codes instead of truncating them.
+        let raw = unsafe { ffi::SSL_get_verify_result(self.as_ptr()) };
+        let code = c_int::try_from(raw).map_err(|_| X509VerifyError::UNSPECIFIED)?;
+        // SAFETY: from_raw maps a checked scalar native result to the Rust
+        // verification enum without retaining or dereferencing pointers.
+        unsafe { X509VerifyError::from_raw(code) }
     }
 
     /// Verifies the peer certificate chain as BoringSSL's built-in X.509 verifier does.
@@ -4113,16 +4618,18 @@ impl SslRef {
         if chain.is_null() {
             return Err(X509VerifyError::INVALID_CALL);
         }
+        // SAFETY: The peer certificate-chain pointer was checked nonnull above;
+        // the live SSL connection owns the borrowed native X.509 stack.
         let chain = unsafe { StackRef::<X509>::from_ptr(chain) };
         let Some(leaf) = chain.get(0) else {
             return Err(X509VerifyError::INVALID_CALL);
         };
 
         let store: &X509StoreRef = match (
-            self.ex_data(*SSL_VERIFY_STORE_INDEX),
-            context.ex_data(*VERIFY_STORE_INDEX),
+            self.slot_data(&SSL_VERIFY_STORE_INDEX),
+            context.slot_data(&VERIFY_STORE_INDEX),
         ) {
-            (Some(Some(store)), _) | (_, Some(store)) => store,
+            (Some(Some(store)), _) | (_, Some(Some(store))) => store,
             _ => context.cert_store(),
         };
 
@@ -4162,14 +4669,19 @@ impl SslRef {
                     if let Some(callback) = ffi::SSL_get_verify_callback(self.as_ptr()) {
                         ffi::X509_STORE_CTX_set_verify_cb(ctx, Some(callback));
                     }
-                    match context.ex_data(*CERT_VERIFY_INDEX) {
-                        Some(&callback) => callback(ctx, ptr::null_mut()),
-                        None => ffi::X509_verify_cert(ctx),
-                    }
+                    context
+                        .slot_data(&CERT_VERIFY_INDEX)
+                        .and_then(|callback| *callback)
+                        .map_or_else(
+                            || ffi::X509_verify_cert(ctx),
+                            |callback| callback(ctx, ptr::null_mut()),
+                        )
                 };
 
                 // A verify callback may accept a chain with a recorded error; the return decides.
                 Ok(if ret > 0 {
+                    // SAFETY: Clearing the current thread native error queue only affects
+                    // errors from this verification operation, after its result is saved.
                     unsafe { ffi::ERR_clear_error() };
                     Ok(())
                 } else {
@@ -4184,8 +4696,10 @@ impl SslRef {
 
     /// Returns a shared reference to the SSL session.
     #[corresponds(SSL_get_session)]
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn session(&self) -> Option<&SslSessionRef> {
+        // SAFETY: The live SSL connection owns an optional session;
+        // the getter returns a borrowed pointer checked for null.
         unsafe {
             let p = ffi::SSL_get_session(self.as_ptr());
             if p.is_null() {
@@ -4202,6 +4716,8 @@ impl SslRef {
     /// value.
     #[corresponds(SSL_get_client_random)]
     pub fn client_random(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: The caller supplies a writable buffer and its full
+        // native size_t length; the live SSL connection copies its random bytes.
         unsafe { ffi::SSL_get_client_random(self.as_ptr(), buf.as_mut_ptr(), buf.len()) }
     }
 
@@ -4211,6 +4727,8 @@ impl SslRef {
     /// value.
     #[corresponds(SSL_get_server_random)]
     pub fn server_random(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: The caller supplies a writable buffer and its full
+        // native size_t length; the live SSL connection copies its random bytes.
         unsafe { ffi::SSL_get_server_random(self.as_ptr(), buf.as_mut_ptr(), buf.len()) }
     }
 
@@ -4222,11 +4740,14 @@ impl SslRef {
         label: &str,
         context: Option<&[u8]>,
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The output and optional context buffers
+        // stay valid for their supplied native lengths; the live connection
+        // only borrows them during derivation.
         unsafe {
-            let (context, contextlen, use_context) = match context {
-                Some(context) => (context.as_ptr(), context.len(), 1),
-                None => (ptr::null(), 0, 0),
-            };
+            let (context, contextlen, use_context) = context
+                .map_or((ptr::null(), 0, 0), |context| {
+                    (context.as_ptr(), context.len(), 1)
+                });
             cvt(ffi::SSL_export_keying_material(
                 self.as_ptr(),
                 out.as_mut_ptr(),
@@ -4259,29 +4780,44 @@ impl SslRef {
     /// [`SslConnectorBuilder::set_client_session_callback`].
     #[corresponds(SSL_set_session)]
     pub unsafe fn set_session(&mut self, session: &SslSessionRef) -> Result<(), ErrorStack> {
+        // SAFETY: The unsafe caller establishes the session identity
+        // and handshake preconditions; both native handles remain valid
+        // while the connection acquires its session reference.
         unsafe { cvt(ffi::SSL_set_session(self.as_ptr(), session.as_ptr())) }
     }
 
     /// Returns the session ID context new sessions on this connection will record.
     #[corresponds(SSL_get0_session_id_context)]
     fn session_id_context(&self) -> Option<&[u8]> {
+        // SAFETY: The native SSL owns its optional ID-context
+        // bytes, and local length and pointer slots remain writable until return.
         unsafe {
             let mut len = 0;
-            let p = ffi::SSL_get0_session_id_context(self.as_ptr(), &mut len);
-            (!p.is_null()).then(|| slice::from_raw_parts(p, len))
+            let p = ffi::SSL_get0_session_id_context(self.as_ptr(), &raw mut len);
+            if p.is_null() {
+                None
+            } else {
+                // SAFETY: this ID context is owned by the live native SSL
+                // object and is borrowed only for the connection lifetime.
+                native_input(p, len)
+            }
         }
     }
 
     /// Determines if the session provided to `set_session` was successfully reused.
     #[corresponds(SSL_session_reused)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn session_reused(&self) -> bool {
+        // SAFETY: The native getter reads a scalar resumption status
+        // from the live SSL connection.
         unsafe { ffi::SSL_session_reused(self.as_ptr()) != 0 }
     }
 
     /// Sets the status response a client wishes the server to reply with.
     #[corresponds(SSL_set_tlsext_status_type)]
     pub fn set_status_type(&mut self, type_: StatusType) -> Result<(), ErrorStack> {
+        // SAFETY: The uniquely borrowed connection receives
+        // an integer OCSP status-request setting.
         unsafe {
             cvt(ffi::SSL_set_tlsext_status_type(
                 self.as_ptr(),
@@ -4292,25 +4828,34 @@ impl SslRef {
 
     /// Returns the server's OCSP response, if present.
     #[corresponds(SSL_get_tlsext_status_ocsp_resp)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn ocsp_status(&self) -> Option<&[u8]> {
+        // SAFETY: The native getter supplies an optional
+        // connection-owned OCSP buffer and writes its pointer into a local slot.
         unsafe {
             let mut p = ptr::null();
-            let len = ffi::SSL_get_tlsext_status_ocsp_resp(self.as_ptr(), &mut p);
+            let len = ffi::SSL_get_tlsext_status_ocsp_resp(self.as_ptr(), &raw mut p);
 
             if len == 0 {
                 None
             } else {
-                Some(slice::from_raw_parts(p, len))
+                // SAFETY: positive-length OCSP output belongs to this SSL
+                // connection; a malformed null/length pair is rejected.
+                native_input(p, len)
             }
         }
     }
 
     /// Sets the OCSP response to be returned to the client.
+    ///
+    /// # Errors
+    ///
+    /// The native connection cannot copy the supplied response.
     #[corresponds(SSL_set_ocsp_response)]
     pub fn set_ocsp_status(&mut self, response: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: BoringSSL takes a borrowed `size_t`-length byte slice and
+        // copies it synchronously; the live SSL connection is uniquely borrowed.
         unsafe {
-            assert!(response.len() <= c_int::MAX as usize);
             cvt(ffi::SSL_set_ocsp_response(
                 self.as_ptr(),
                 response.as_ptr(),
@@ -4321,70 +4866,89 @@ impl SslRef {
 
     /// Determines if this `Ssl` is configured for server-side or client-side use.
     #[corresponds(SSL_is_server)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_server(&self) -> bool {
+        // SAFETY: The live connection exposes its client/server role as a native
+        // scalar and no memory is borrowed beyond this synchronous call.
         unsafe { SSL_is_server(self.as_ptr()) != 0 }
     }
 
-    /// Sets the extra data at the specified index.
+    /// Sets or overwrites the extra data at a registered index.
     ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `Ssl::new_ex_index` method to create an `Index`.
+    /// # Errors
     ///
-    /// Note that if this method is called multiple times with the same index, any previous
-    /// value stored in the `SslContextBuilder` will be leaked.
+    /// The native SSL cannot allocate storage for the index.
+    pub fn set_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<Ssl, T>,
+        data: T,
+    ) -> Result<(), ErrorStack> {
+        drop(self.replace_ex_data(index, data)?);
+        Ok(())
+    }
+
+    /// Replaces the extra data and returns the previous owned value, if any.
+    ///
+    /// # Errors
+    ///
+    /// The native SSL cannot allocate storage for the index.
     #[corresponds(SSL_set_ex_data)]
-    pub fn set_ex_data<T>(&mut self, index: Index<Ssl, T>, data: T) {
-        if let Some(old) = self.ex_data_mut(index) {
-            *old = data;
-            return;
-        }
-
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "native ex-data replacement mutates the uniquely borrowed SSL object"
+    )]
+    pub fn replace_ex_data<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<Ssl, T>,
+        data: T,
+    ) -> Result<Option<T>, ErrorStack> {
+        let ssl = self.as_ptr();
+        // SAFETY: self establishes exclusive SSL access and the registered
+        // index establishes the type of its boxed allocation.
         unsafe {
-            let data = Box::into_raw(Box::new(data));
-            ffi::SSL_set_ex_data(self.as_ptr(), index.as_raw(), data.cast());
+            replace_boxed(ffi::SSL_get_ex_data(ssl, index.as_raw()), data, |ptr| {
+                cvt(ffi::SSL_set_ex_data(ssl, index.as_raw(), ptr))
+            })
         }
     }
 
-    /// Sets or overwrites the extra data at the specified index.
-    ///
-    /// This can be used to provide data to callbacks registered with the context. Use the
-    /// `Ssl::new_ex_index` method to create an `Index`.
-    ///
-    /// The previous value, if any, will be returned.
-    #[corresponds(SSL_set_ex_data)]
-    pub fn replace_ex_data<T>(&mut self, index: Index<Ssl, T>, data: T) -> Option<T> {
-        if let Some(old) = self.ex_data_mut(index) {
-            return Some(mem::replace(old, data));
-        }
-
-        self.set_ex_data(index, data);
-
-        None
-    }
-
-    /// Returns a reference to the extra data at the specified index.
+    /// Returns a reference to registered application data.
     #[corresponds(SSL_get_ex_data)]
-    #[must_use]
-    pub fn ex_data<T>(&self, index: Index<Ssl, T>) -> Option<&T> {
+    #[must_use = "Use the returned application data, or handle an empty slot."]
+    pub fn ex_data<T: 'static + Send + Sync>(&self, index: Index<Ssl, T>) -> Option<&T> {
+        // SAFETY: the registered typed index identifies a live boxed T.
         unsafe {
-            let data = ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw());
-            if data.is_null() {
-                None
-            } else {
-                Some(&*(data as *const T))
-            }
+            ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw())
+                .cast::<T>()
+                .as_ref()
         }
     }
 
-    /// Returns a mutable reference to the extra data at the specified index.
+    /// Returns a mutable reference to registered application data.
     #[corresponds(SSL_get_ex_data)]
-    pub fn ex_data_mut<T>(&mut self, index: Index<Ssl, T>) -> Option<&mut T> {
+    pub fn ex_data_mut<T: 'static + Send + Sync>(
+        &mut self,
+        index: Index<Ssl, T>,
+    ) -> Option<&mut T> {
+        // SAFETY: the typed index identifies the boxed allocation, and the
+        // exclusive SSL borrow prevents a concurrent mutable access.
         unsafe {
             ffi::SSL_get_ex_data(self.as_ptr(), index.as_raw())
                 .cast::<T>()
                 .as_mut()
         }
+    }
+
+    fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<Ssl, T>) -> Option<&T> {
+        self.ex_data(slot.get()?)
+    }
+
+    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
+        self.ex_data(SSL_CALLBACKS.get(role)?)
+    }
+
+    fn session_context(&self) -> Option<&SslContextRef> {
+        self.slot_data(&SESSION_CTX_INDEX).map(|owner| &**owner)
     }
 
     /// Copies the contents of the last Finished message sent to the peer into the provided buffer.
@@ -4393,6 +4957,8 @@ impl SslRef {
     /// buffer required.
     #[corresponds(SSL_get_finished)]
     pub fn finished(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: The live connection copies the finished message into
+        // a writable output slice whose length is supplied exactly.
         unsafe { ffi::SSL_get_finished(self.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) }
     }
 
@@ -4403,19 +4969,25 @@ impl SslRef {
     /// buffer required.
     #[corresponds(SSL_get_peer_finished)]
     pub fn peer_finished(&self, buf: &mut [u8]) -> usize {
+        // SAFETY: The live connection copies the peer finished message
+        // into a writable output slice whose length is supplied exactly.
         unsafe { ffi::SSL_get_peer_finished(self.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) }
     }
 
     /// Determines if the initial handshake has been completed.
     #[corresponds(SSL_is_init_finished)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn is_init_finished(&self) -> bool {
+        // SAFETY: The live native connection returns a scalar
+        // handshake-completion status.
         unsafe { ffi::SSL_is_init_finished(self.as_ptr()) != 0 }
     }
 
     /// Sets the MTU used for DTLS connections.
     #[corresponds(SSL_set_mtu)]
     pub fn set_mtu(&mut self, mtu: u32) -> Result<(), ErrorStack> {
+        // SAFETY: This uniquely borrowed DTLS connection accepts a native
+        // unsigned MTU scalar without retaining Rust memory.
         unsafe { cvt(ffi::SSL_set_mtu(self.as_ptr(), mtu as c_uint)) }
     }
 
@@ -4441,7 +5013,7 @@ impl SslRef {
     ///
     /// Always `None` in FIPS builds, which lack the BoringSSL patch.
     #[corresponds(SSL_seal_app_data_limits)]
-    #[must_use]
+    #[must_use = "Use the returned limits when allocating and framing TLS record buffers."]
     pub fn seal_app_data_limits(&self) -> Option<SealLimits> {
         #[cfg(not(feature = "fips"))]
         {
@@ -4450,9 +5022,9 @@ impl SslRef {
             let ok = unsafe {
                 ffi::SSL_seal_app_data_limits(
                     self.as_ptr(),
-                    &mut max_fragment,
-                    &mut record_overhead,
-                    &mut pending_len,
+                    &raw mut max_fragment,
+                    &raw mut record_overhead,
+                    &raw mut pending_len,
                 )
             };
             (ok == 1 && max_fragment > 0).then_some(SealLimits {
@@ -4494,12 +5066,12 @@ impl SslRef {
                     ffi::SSL_seal_app_data(
                         self.as_ptr(),
                         out.as_mut_ptr().cast(),
-                        &mut written,
+                        &raw mut written,
                         out.len(),
                         ivecs.as_ptr(),
                         ivecs.len(),
                         max_in,
-                        &mut consumed,
+                        &raw mut consumed,
                     )
                 }
             });
@@ -4525,6 +5097,8 @@ impl SslRef {
     /// Sets the certificate.
     #[corresponds(SSL_use_certificate)]
     pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
+        // SAFETY: The certificate remains live until BoringSSL
+        // retains its own reference in the exclusively borrowed connection.
         unsafe {
             cvt(ffi::SSL_use_certificate(self.as_ptr(), cert.as_ptr()))?;
         }
@@ -4540,6 +5114,8 @@ impl SslRef {
     pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) {
         self.ssl_context().check_x509();
 
+        // SAFETY: The connection takes ownership of the native
+        // CA-name stack, and Rust relinquishes the original owner exactly once.
         unsafe { ffi::SSL_set_client_CA_list(self.as_ptr(), list.as_ptr()) }
         mem::forget(list);
     }
@@ -4550,6 +5126,8 @@ impl SslRef {
     where
         T: HasPrivate,
     {
+        // SAFETY: The borrowed private key remains live while the native
+        // connection acquires its own key reference.
         unsafe { cvt(ffi::SSL_use_PrivateKey(self.as_ptr(), key.as_ptr())) }
     }
 
@@ -4557,6 +5135,8 @@ impl SslRef {
     /// enabled modes.
     #[corresponds(SSL_set_mode)]
     pub fn set_mode(&mut self, mode: SslMode) -> SslMode {
+        // SAFETY: The live connection receives a native mode-bitset update
+        // through an exclusive Rust borrow.
         let bits = unsafe { ffi::SSL_set_mode(self.as_ptr(), mode.bits()) };
         SslMode::from_bits_retain(bits)
     }
@@ -4565,6 +5145,8 @@ impl SslRef {
     /// enabled modes.
     #[corresponds(SSL_clear_mode)]
     pub fn clear_mode(&mut self, mode: SslMode) -> SslMode {
+        // SAFETY: The live connection receives a native mode-bitset update
+        // through an exclusive Rust borrow.
         let bits = unsafe { ffi::SSL_clear_mode(self.as_ptr(), mode.bits()) };
         SslMode::from_bits_retain(bits)
     }
@@ -4572,6 +5154,8 @@ impl SslRef {
     /// Appends `cert` to the chain associated with the current certificate of `SSL`.
     #[corresponds(SSL_add1_chain_cert)]
     pub fn add_chain_cert(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
+        // SAFETY: The live connection borrows this certificate while
+        // BoringSSL increments and stores its own reference.
         unsafe { cvt(ffi::SSL_add1_chain_cert(self.as_ptr(), cert.as_ptr())) }
     }
 
@@ -4584,6 +5168,8 @@ impl SslRef {
     /// set of ECHConfigs. If the retry also fails, clients should report a connection failure.
     #[corresponds(SSL_set1_ech_config_list)]
     pub fn set_ech_config_list(&mut self, ech_config_list: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: The ECH-config byte slice stays live during
+        // its synchronous native validation/copy into this SSL connection.
         unsafe {
             cvt_0i(ffi::SSL_set1_ech_config_list(
                 self.as_ptr(),
@@ -4601,17 +5187,21 @@ impl SslRef {
     /// recover from potential key mismatches. If the result is `Some`, the client should retry the
     /// connection using the returned `ECHConfigList`.
     #[corresponds(SSL_get0_ech_retry_configs)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn get_ech_retry_configs(&self) -> Option<&[u8]> {
+        // SAFETY: The live SSL connection owns its optional
+        // ECH retry config and writes pointer and size to valid local slots.
         unsafe {
             let mut data = ptr::null();
             let mut len: usize = 0;
-            ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &raw mut data, &raw mut len);
 
             if data.is_null() {
                 None
             } else {
-                Some(slice::from_raw_parts(data, len))
+                // SAFETY: the ECH retry bytes are owned by the live SSL
+                // connection and stay immutable for the borrowed lifetime.
+                native_input(data, len)
             }
         }
     }
@@ -4623,25 +5213,31 @@ impl SslRef {
     /// ensure the server's certificate is valid for the public name, which is required to
     /// authenticate retry configs.
     #[corresponds(SSL_get0_ech_name_override)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn get_ech_name_override(&self) -> Option<&[u8]> {
+        // SAFETY: The live SSL connection owns its optional
+        // ECH public-name bytes and writes pointer and size into local slots.
         unsafe {
             let mut data: *const c_char = ptr::null();
             let mut len: usize = 0;
-            ffi::SSL_get0_ech_name_override(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_ech_name_override(self.as_ptr(), &raw mut data, &raw mut len);
 
             if data.is_null() {
                 None
             } else {
-                Some(slice::from_raw_parts(data.cast::<u8>(), len))
+                // SAFETY: the ECH public-name byte buffer belongs to the
+                // live native SSL connection and is not modified by this call.
+                native_input(data.cast::<u8>(), len)
             }
         }
     }
 
     /// Whether or not `SSL` negotiated ECH.
     #[corresponds(SSL_ech_accepted)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn ech_accepted(&self) -> bool {
+        // SAFETY: The native getter reads a scalar ECH status from
+        // the live SSL connection.
         unsafe { ffi::SSL_ech_accepted(self.as_ptr()) != 0 }
     }
 
@@ -4649,8 +5245,10 @@ impl SslRef {
     /// Set before the first ClientHello. This does not enable real ECH.
     #[corresponds(SSL_set_enable_ech_grease)]
     pub fn set_enable_ech_grease(&self, enable: bool) {
-        let enable = if enable { 1 } else { 0 };
+        let enable = c_int::from(enable);
 
+        // SAFETY: The live connection receives a scalar ECH
+        // GREASE flag with no borrowed Rust data.
         unsafe {
             ffi::SSL_set_enable_ech_grease(self.as_ptr(), enable);
         }
@@ -4659,6 +5257,8 @@ impl SslRef {
     /// Sets the compliance policy on `SSL`.
     #[corresponds(SSL_set_compliance_policy)]
     pub fn set_compliance_policy(&mut self, policy: CompliancePolicy) -> Result<(), ErrorStack> {
+        // SAFETY: The live connection receives a scalar
+        // policy value and no borrowed Rust data.
         unsafe { cvt_0i(ffi::SSL_set_compliance_policy(self.as_ptr(), policy.0)).map(|_| ()) }
     }
 
@@ -4666,14 +5266,18 @@ impl SslRef {
     #[corresponds(SSL_add1_credential)]
     #[cfg(feature = "credential")]
     pub fn add_credential(&mut self, credential: &SslCredentialRef) -> Result<(), ErrorStack> {
+        // SAFETY: The credential remains live while BoringSSL
+        // retains its own reference for this connection.
         unsafe { cvt_0i(ffi::SSL_add1_credential(self.as_ptr(), credential.as_ptr())).map(|_| ()) }
     }
 
     /// Returns the public key sent by the other peer, `None` if there is no ongoing handshake.
     #[corresponds(SSL_get0_peer_pubkey)]
     #[cfg(feature = "rpk")]
-    #[must_use]
+    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_pubkey(&self) -> Option<&PKeyRef<Public>> {
+        // SAFETY: The connection owns the optional peer key,
+        // and the native borrowed pointer is checked for null before use.
         unsafe {
             let pubkey = ffi::SSL_get0_peer_pubkey(self.as_ptr());
 
@@ -4701,6 +5305,8 @@ impl SslRef {
             ));
         }
 
+        // SAFETY: The transparent u8
+        // certificate-type values remain live until the connection copies them.
         unsafe {
             cvt_0i(ffi::SSL_set1_accepted_peer_cert_types(
                 self.as_ptr(),
@@ -4716,7 +5322,7 @@ impl SslRef {
     ///
     /// Only valid on a client-side `Ssl`; returns `None` on server-side SSLs.
     #[corresponds(SSL_get0_accepted_peer_cert_types)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     #[cfg(feature = "rpk")]
     pub fn server_certificate_types(&self) -> Option<&[CertificateType]> {
         if self.is_server() {
@@ -4725,8 +5331,15 @@ impl SslRef {
 
         let mut types = ptr::null();
         let mut types_len = 0;
+        // SAFETY: The connection owns the
+        // optional native certificate-type array and writes its pointer
+        // and length into valid local output slots.
         unsafe {
-            ffi::SSL_get0_accepted_peer_cert_types(self.as_ptr(), &mut types, &mut types_len);
+            ffi::SSL_get0_accepted_peer_cert_types(
+                self.as_ptr(),
+                &raw mut types,
+                &raw mut types_len,
+            );
 
             if types_len == 0 {
                 return None;
@@ -4745,30 +5358,30 @@ impl SslRef {
     /// Only valid on a client-side `Ssl`; returns `None` on server-side SSLs
     /// (a server knows its own selected credential type by other means).
     #[corresponds(SSL_get_peer_cert_type)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     #[cfg(feature = "rpk")]
     pub fn selected_server_certificate_type(&self) -> Option<CertificateType> {
         if self.is_server() {
             return None;
         }
 
-        unsafe {
-            Some(CertificateType(
-                ffi::SSL_get_peer_cert_type(self.as_ptr()) as u8
-            ))
-        }
+        // SAFETY: the live connection provides a scalar peer certificate-type
+        // code. Reject missing, negative or out-of-range native values.
+        let code = unsafe { ffi::SSL_get_peer_cert_type(self.as_ptr()) };
+        u8::try_from(code).ok().map(CertificateType)
     }
 
     /// Sets the client key shares to be used in the TLS 1.3 handshake.
     #[corresponds(SSL_set1_client_key_shares)]
     pub fn set_client_key_shares(&mut self, key_shares: &[KeyShare]) -> Result<(), ErrorStack> {
+        // SAFETY: KeyShare is a transparent native u16; BoringSSL validates and
+        // copies the borrowed slice while the SSL connection is live.
         unsafe {
             cvt(ffi::SSL_set1_client_key_shares(
                 self.as_ptr(),
-                key_shares.as_ptr() as *const _,
+                key_shares.as_ptr().cast::<u16>(),
                 key_shares.len(),
             ))
-            .map(|_| ())
         }
     }
 
@@ -4806,8 +5419,10 @@ impl SslRef {
     ///
     /// Only known during the handshake, such as in a certificate verification callback.
     #[corresponds(SSL_peer_matched_trust_anchor)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn peer_matched_trust_anchor(&self) -> bool {
+        // SAFETY: The live SSL connection returns a
+        // scalar peer trust-anchor match flag.
         unsafe { ffi::SSL_peer_matched_trust_anchor(self.as_ptr()) == 1 }
     }
 
@@ -4817,14 +5432,14 @@ impl SslRef {
     /// Only known during the handshake, such as in a certificate verification callback, where a
     /// client that rejects the certificate can choose anchors to request when it retries.
     #[corresponds(SSL_get0_peer_available_trust_anchors)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn peer_available_trust_anchors(&self) -> &[u8] {
         let mut data = ptr::null();
         let mut len = 0;
         // SAFETY: `self` is valid. BoringSSL keeps the list until the handshake moves on, which
         // the shared borrow of `self` prevents.
         unsafe {
-            ffi::SSL_get0_peer_available_trust_anchors(self.as_ptr(), &mut data, &mut len);
+            ffi::SSL_get0_peer_available_trust_anchors(self.as_ptr(), &raw mut data, &raw mut len);
             if data.is_null() {
                 &[]
             } else {
@@ -4846,6 +5461,9 @@ impl SslRef {
         settings: Option<&[u8]>,
     ) -> Result<(), ErrorStack> {
         let settings = settings.unwrap_or_default();
+        // SAFETY: Both borrowed ALPN protocol and ALPS
+        // payload slices remain live while BoringSSL copies their sizes
+        // and contents into the uniquely borrowed connection.
         unsafe {
             cvt(ffi::SSL_add_application_settings(
                 self.as_ptr(),
@@ -4854,7 +5472,6 @@ impl SslRef {
                 settings.as_ptr(),
                 settings.len(),
             ))
-            .map(|_| ())
         }
     }
 
@@ -4864,7 +5481,9 @@ impl SslRef {
     /// Both peers must use the same codepoint for ALPS to be negotiated.
     #[corresponds(SSL_set_alps_use_new_codepoint)]
     pub fn set_alps_use_new_codepoint(&mut self, enable: bool) {
-        let enable = if enable { 1 } else { 0 };
+        let enable = c_int::from(enable);
+        // SAFETY: The native connection receives a scalar
+        // ALPS codepoint-selection flag.
         unsafe { ffi::SSL_set_alps_use_new_codepoint(self.as_ptr(), enable) }
     }
 
@@ -4890,20 +5509,26 @@ impl SslRef {
     /// experimental in BoringSSL.
     #[corresponds(SSL_set_server_padding_request)]
     pub fn set_server_padding_request(&mut self, num_bytes: u16) {
+        // SAFETY: The uniquely borrowed SSL connection
+        // receives a scalar padding size and no pointer is retained.
         unsafe { ffi::SSL_set_server_padding_request(self.as_ptr(), num_bytes) }
     }
 
     /// Sets whether a server answers the client's server padding request.
     #[corresponds(SSL_set_server_padding_enabled)]
     pub fn set_server_padding_enabled(&mut self, enabled: bool) {
-        unsafe { ffi::SSL_set_server_padding_enabled(self.as_ptr(), enabled as _) }
+        // SAFETY: The uniquely borrowed SSL connection
+        // receives a scalar boolean converted to a native integer.
+        unsafe { ffi::SSL_set_server_padding_enabled(self.as_ptr(), c_int::from(enabled)) }
     }
 
     /// Returns whether the server sent the padding requested with
     /// [`set_server_padding_request`](Self::set_server_padding_request).
     #[corresponds(SSL_server_sent_requested_padding)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn server_sent_requested_padding(&self) -> bool {
+        // SAFETY: The live SSL connection returns a
+        // scalar negotiated-padding flag.
         unsafe { ffi::SSL_server_sent_requested_padding(self.as_ptr()) == 1 }
     }
 }
@@ -4920,25 +5545,25 @@ pub struct SealLimits {
 
 impl SealLimits {
     /// Most plaintext bytes in one record.
-    #[must_use]
-    pub fn max_fragment(&self) -> usize {
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
+    pub const fn max_fragment(&self) -> usize {
         self.max_fragment
     }
 
     /// Most bytes one record adds to its plaintext.
-    #[must_use]
-    pub fn record_overhead(&self) -> usize {
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
+    pub const fn record_overhead(&self) -> usize {
         self.record_overhead
     }
 
     /// Most bytes of pending handshake records written ahead of the data.
-    #[must_use]
-    pub fn pending_len(&self) -> usize {
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
+    pub const fn pending_len(&self) -> usize {
         self.pending_len
     }
 
     /// Returns the output room needed to seal `len` plaintext bytes, or `None` on overflow.
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn sealed_len(&self, len: usize) -> Option<usize> {
         len.div_ceil(self.max_fragment)
             .checked_mul(self.record_overhead)?
@@ -5025,7 +5650,7 @@ pub struct MidHandshakeSslStream<S> {
 
 impl<S> MidHandshakeSslStream<S> {
     /// Returns a shared reference to the inner stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
         self.stream.get_ref()
     }
@@ -5036,7 +5661,7 @@ impl<S> MidHandshakeSslStream<S> {
     }
 
     /// Returns a shared reference to the `Ssl` of the stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         self.stream.ssl()
     }
@@ -5047,25 +5672,25 @@ impl<S> MidHandshakeSslStream<S> {
     }
 
     /// Returns the underlying error which interrupted this handshake.
-    #[must_use]
-    pub fn error(&self) -> &Error {
+    #[must_use = "Inspect the returned failure information before deciding how to resume the handshake."]
+    pub const fn error(&self) -> &Error {
         &self.error
     }
 
     /// Consumes `self`, returning its error.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_error(self) -> Error {
         self.error
     }
 
     /// Returns the source data stream.
-    #[must_use]
+    #[must_use = "The returned underlying transport is the result of consuming the failed handshake."]
     pub fn into_source_stream(self) -> S {
         self.stream.into_inner()
     }
 
     /// Returns both the error and the source data stream, consuming `self`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_parts(self) -> (Error, S) {
         (self.error, self.stream.into_inner())
     }
@@ -5073,6 +5698,8 @@ impl<S> MidHandshakeSslStream<S> {
     /// Restarts the handshake process.
     #[corresponds(SSL_do_handshake)]
     pub fn handshake(mut self) -> Result<SslStream<S>, HandshakeError<S>> {
+        // SAFETY: The owned live SSL connection retains its BIO and callbacks
+        // throughout this handshake continuation, which may return an error.
         let ret = unsafe { ffi::SSL_do_handshake(self.stream.ssl.as_ptr()) };
         if ret > 0 {
             Ok(self.stream)
@@ -5096,11 +5723,19 @@ pub struct SslStream<S> {
 
 impl<S> Drop for SslStream<S> {
     fn drop(&mut self) {
-        // ssl holds a reference to method internally so it has to drop first
-        unsafe {
+        // Detach the Rust transport before SSL_free invokes the BIO destructor.
+        // The transport's Drop may unwind; release the native resources before
+        // dropping it in Rust rather than unwinding through a C callback.
+        // SAFETY: We own the stream and its BIO exclusively. into_inner may
+        // already have detached the state. SSL holds a reference to method,
+        // so freeing SSL must precede freeing the method.
+        let state = unsafe {
+            let state = bio::detach_state::<S>(self.ssl.get_raw_rbio());
             ManuallyDrop::drop(&mut self.ssl);
             ManuallyDrop::drop(&mut self.method);
-        }
+            state
+        };
+        drop(state);
     }
 }
 
@@ -5116,20 +5751,32 @@ where
     }
 }
 
+/// Clamps an I/O slice length to `BoringSSL`'s signed `int` API limit.
+/// The Rust slice can be larger than a single native `SSL_read` or `SSL_write` call.
+fn ssl_io_len(len: usize) -> c_int {
+    c_int::try_from(len).unwrap_or(c_int::MAX)
+}
+
 impl<S: Read + Write> SslStream<S> {
     /// Creates a new `SslStream`.
     ///
     /// This function performs no IO; the stream will not have performed any part of the handshake
     /// with the peer. The `connect` and `accept` methods can be used to
     /// explicitly perform the handshake.
+    ///
+    /// # Errors
+    ///
+    /// The native BIO transport cannot be constructed.
     pub fn new(ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
         let (bio, method) = bio::new(stream)?;
 
+        // SAFETY: the new BIO and its native reference are transferred to
+        // this live SSL object. BoringSSL owns the BIO until stream teardown.
         unsafe {
             ffi::SSL_set_bio(ssl.as_ptr(), bio, bio);
         }
 
-        Ok(SslStream {
+        Ok(Self {
             ssl: ManuallyDrop::new(ssl),
             method: ManuallyDrop::new(method),
             _p: PhantomData,
@@ -5142,18 +5789,29 @@ impl<S: Read + Write> SslStream<S> {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the pointer is valid.
-    pub unsafe fn from_raw_parts(ssl: *mut ffi::SSL, stream: S) -> Self {
+    /// The caller must transfer sole ownership of a live `SSL` allocation to
+    /// this stream and must not use that pointer afterward.
+    ///
+    /// # Errors
+    ///
+    /// The native BIO transport cannot be constructed.
+    pub unsafe fn from_raw_parts(ssl: *mut ffi::SSL, stream: S) -> Result<Self, ErrorStack> {
+        // SAFETY: the caller transfers sole ownership of the live SSL handle.
         let ssl = unsafe { Ssl::from_ptr(ssl) };
-        Self::new(ssl, stream).unwrap()
+        Self::new(ssl, stream)
     }
 
     /// Like `read`, but takes a possibly-uninitialized slice.
     ///
-    /// # Safety
+    /// # Initialization
     ///
-    /// No portion of `buf` will be de-initialized by this method. If the method returns `Ok(n)`,
-    /// then the first `n` bytes of `buf` are guaranteed to be initialized.
+    /// The method never de-initializes `buf`. On success the first `n` bytes
+    /// are initialized; all other bytes retain their original initialization state.
+    ///
+    /// # Errors
+    ///
+    /// The TLS read or underlying transport fails. Nonblocking reads may
+    /// report that additional network readiness is required.
     pub fn read_uninit(&mut self, buf: &mut [MaybeUninit<u8>]) -> io::Result<usize> {
         loop {
             match self.ssl_read_uninit(buf) {
@@ -5174,6 +5832,10 @@ impl<S: Read + Write> SslStream<S> {
     ///
     /// It is particularly useful with a nonblocking socket, where the error value will identify if
     /// OpenSSL is waiting on read or write readiness.
+    ///
+    /// # Errors
+    ///
+    /// The native read or underlying transport cannot complete the operation.
     #[corresponds(SSL_read)]
     pub fn ssl_read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
         // SAFETY: `ssl_read_uninit` does not de-initialize the buffer.
@@ -5185,43 +5847,57 @@ impl<S: Read + Write> SslStream<S> {
         }
     }
 
+    // Native SSL_read/SSL_write use signed results. Keep both paths' output
+    // conversion and bounds checks identical, including impossible invalid
+    // positive lengths from native code.
+    fn finish_native_io(&mut self, ret: c_int, offered_len: usize) -> Result<usize, Error> {
+        match usize::try_from(ret) {
+            Ok(n) if n > 0 && n <= offered_len => Ok(n),
+            _ => Err(self.make_error(ret)),
+        }
+    }
+
     /// Like `read_ssl`, but takes a possibly-uninitialized slice.
     ///
-    /// # Safety
+    /// # Initialization
     ///
-    /// No portion of `buf` will be de-initialized by this method. If the method returns `Ok(n)`,
-    /// then the first `n` bytes of `buf` are guaranteed to be initialized.
+    /// On success, the returned prefix of `buf` is initialized. All other
+    /// bytes retain their original initialization state.
+    ///
+    /// # Errors
+    ///
+    /// The native TLS read cannot complete or requires network readiness.
     pub fn ssl_read_uninit(&mut self, buf: &mut [MaybeUninit<u8>]) -> Result<usize, Error> {
         if buf.is_empty() {
             return Ok(0);
         }
 
-        let len = usize::min(c_int::MAX as usize, buf.len()) as c_int;
+        let len = ssl_io_len(buf.len());
+        // SAFETY: the live SSL stream has exclusive access to a writable
+        // `len`-byte prefix. Uninitialized output is valid for SSL_read.
         let ret = unsafe { ffi::SSL_read(self.ssl().as_ptr(), buf.as_mut_ptr().cast(), len) };
-        if ret > 0 {
-            Ok(ret as usize)
-        } else {
-            Err(self.make_error(ret))
-        }
+        self.finish_native_io(ret, buf.len())
     }
 
     /// Like `write`, but returns an `ssl::Error` rather than an `io::Error`.
     ///
     /// It is particularly useful with a nonblocking socket, where the error value will identify if
     /// OpenSSL is waiting on read or write readiness.
+    ///
+    /// # Errors
+    ///
+    /// The native TLS write cannot complete or requires network readiness.
     #[corresponds(SSL_write)]
     pub fn ssl_write(&mut self, buf: &[u8]) -> Result<usize, Error> {
         if buf.is_empty() {
             return Ok(0);
         }
 
-        let len = usize::min(c_int::MAX as usize, buf.len()) as c_int;
+        let len = ssl_io_len(buf.len());
+        // SAFETY: the borrowed input is readable for its entire lifetime and
+        // the live SSL stream reads at most `len` bytes synchronously.
         let ret = unsafe { ffi::SSL_write(self.ssl().as_ptr(), buf.as_ptr().cast(), len) };
-        if ret > 0 {
-            Ok(ret as usize)
-        } else {
-            Err(self.make_error(ret))
-        }
+        self.finish_native_io(ret, buf.len())
     }
 
     /// Shuts down the session.
@@ -5233,8 +5909,14 @@ impl<S: Read + Write> SslStream<S> {
     /// While the connection may be closed after the first step, it is recommended to fully shut the
     /// session down. In particular, it must be fully shut down if the connection is to be used for
     /// further communication in the future.
+    ///
+    /// # Errors
+    ///
+    /// Shutdown requires network readiness or the TLS transport fails.
     #[corresponds(SSL_shutdown)]
     pub fn shutdown(&mut self) -> Result<ShutdownResult, Error> {
+        // SAFETY: this stream uniquely owns the live SSL connection while
+        // BoringSSL drives the protocol shutdown state machine.
         match unsafe { ffi::SSL_shutdown(self.ssl.as_ptr()) } {
             0 => Ok(ShutdownResult::Sent),
             1 => Ok(ShutdownResult::Received),
@@ -5244,7 +5926,9 @@ impl<S: Read + Write> SslStream<S> {
 
     /// Returns the session's shutdown state.
     #[corresponds(SSL_get_shutdown)]
+    #[must_use = "Inspect the peer and local TLS shutdown state."]
     pub fn get_shutdown(&mut self) -> ShutdownState {
+        // SAFETY: the native getter reads flags from a live SSL object.
         unsafe {
             let bits = ffi::SSL_get_shutdown(self.ssl.as_ptr());
             ShutdownState::from_bits_retain(bits)
@@ -5257,12 +5941,19 @@ impl<S: Read + Write> SslStream<S> {
     /// shutdown was not completed.
     #[corresponds(SSL_set_shutdown)]
     pub fn set_shutdown(&mut self, state: ShutdownState) {
+        // SAFETY: the borrowed live SSL object receives a native flag bitset.
         unsafe { ffi::SSL_set_shutdown(self.ssl.as_ptr(), state.bits()) }
     }
 
     /// Initiates a client-side TLS handshake.
+    ///
+    /// # Errors
+    ///
+    /// The handshake fails or needs additional transport readiness.
     #[corresponds(SSL_connect)]
     pub fn connect(&mut self) -> Result<(), Error> {
+        // SAFETY: the stream exclusively owns the SSL connection during the
+        // native client handshake. Transport callbacks remain attached.
         let ret = unsafe { ffi::SSL_connect(self.ssl.as_ptr()) };
         if ret > 0 {
             Ok(())
@@ -5272,8 +5963,14 @@ impl<S: Read + Write> SslStream<S> {
     }
 
     /// Initiates a server-side TLS handshake.
+    ///
+    /// # Errors
+    ///
+    /// The handshake fails or needs additional transport readiness.
     #[corresponds(SSL_accept)]
     pub fn accept(&mut self) -> Result<(), Error> {
+        // SAFETY: the stream exclusively owns the SSL connection during the
+        // native server handshake. Transport callbacks remain attached.
         let ret = unsafe { ffi::SSL_accept(self.ssl.as_ptr()) };
         if ret > 0 {
             Ok(())
@@ -5285,6 +5982,8 @@ impl<S: Read + Write> SslStream<S> {
     /// Initiates the handshake.
     #[corresponds(SSL_do_handshake)]
     pub fn do_handshake(&mut self) -> Result<(), Error> {
+        // SAFETY: The stream exclusively holds the live SSL connection, its BIO
+        // and the native callback state throughout this handshake operation.
         let ret = unsafe { ffi::SSL_do_handshake(self.ssl.as_ptr()) };
         if ret > 0 {
             Ok(())
@@ -5310,7 +6009,6 @@ impl<S> SslStream<S> {
                     Some(InnerError::Ssl(errs))
                 }
             }
-            ErrorCode::ZERO_RETURN => None,
             ErrorCode::WANT_READ | ErrorCode::WANT_WRITE => {
                 self.get_bio_error().map(InnerError::Io)
             }
@@ -5321,24 +6019,32 @@ impl<S> SslStream<S> {
     }
 
     fn check_panic(&mut self) {
+        // SAFETY: The owned BIO holds a panic slot for the current transport type;
+        // the native state remains live until stream teardown.
         if let Some(err) = unsafe { bio::take_panic::<S>(self.ssl.get_raw_rbio()) } {
             resume_unwind(err)
         }
     }
 
     fn get_bio_error(&mut self) -> Option<io::Error> {
+        // SAFETY: The owned BIO holds the transport error slot for the current
+        // stream type, which is read before native teardown.
         unsafe { bio::take_error::<S>(self.ssl.get_raw_rbio()) }
     }
 
-    /// Converts the SslStream to the underlying data stream.
-    #[must_use]
+    /// Converts the `SslStream` to the underlying data stream.
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_inner(self) -> S {
+        // SAFETY: Consuming this stream transfers its transport out of the owned
+        // native BIO exactly once; teardown observes the detached state.
         unsafe { bio::take_stream::<S>(self.ssl.get_raw_rbio()) }
     }
 
     /// Returns a shared reference to the underlying stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
+        // SAFETY: The live owned BIO contains the stream state and the returned
+        // shared reference cannot outlive this SslStream borrow.
         unsafe {
             let bio = self.ssl.get_raw_rbio();
             bio::get_ref(bio)
@@ -5352,6 +6058,8 @@ impl<S> SslStream<S> {
     /// It is inadvisable to read from or write to the underlying stream as it
     /// will most likely corrupt the SSL session.
     pub fn get_mut(&mut self) -> &mut S {
+        // SAFETY: The live owned BIO contains the stream state; the exclusive
+        // Rust borrow prevents mutable aliasing of its transport.
         unsafe {
             let bio = self.ssl.get_raw_rbio();
             bio::get_mut(bio)
@@ -5359,7 +6067,7 @@ impl<S> SslStream<S> {
     }
 
     /// Returns a shared reference to the `Ssl` object associated with this stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         &self.ssl
     }
@@ -5409,22 +6117,41 @@ impl<S> SslStreamBuilder<S>
 where
     S: Read + Write,
 {
-    /// Begin creating an `SslStream` atop `stream`
-    pub fn new(ssl: Ssl, stream: S) -> Self {
-        Self {
-            inner: SslStream::new(ssl, stream).unwrap(),
+    /// Begin creating an `SslStream` atop `stream`.
+    ///
+    /// # Errors
+    ///
+    /// The native BIO transport cannot be constructed.
+    pub fn new(ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
+        Ok(Self {
+            inner: SslStream::new(ssl, stream)?,
+        })
+    }
+
+    fn pending(self, code: ErrorCode, message: &'static str) -> MidHandshakeSslStream<S> {
+        MidHandshakeSslStream {
+            stream: self.inner,
+            error: Error {
+                code,
+                cause: Some(InnerError::Io(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    message,
+                ))),
+            },
         }
     }
 
     /// Configure as an outgoing stream from a client.
     #[corresponds(SSL_set_connect_state)]
     pub fn set_connect_state(&mut self) {
+        // SAFETY: the builder owns a live SSL object and exclusively borrows it.
         unsafe { ffi::SSL_set_connect_state(self.inner.ssl.as_ptr()) }
     }
 
     /// Configure as an incoming stream to a server.
     #[corresponds(SSL_set_accept_state)]
     pub fn set_accept_state(&mut self) {
+        // SAFETY: the builder owns a live SSL object and exclusively borrows it.
         unsafe { ffi::SSL_set_accept_state(self.inner.ssl.as_ptr()) }
     }
 
@@ -5433,26 +6160,24 @@ where
     /// This method calls [`Self::set_connect_state`] and returns without actually
     /// initiating the handshake. The caller is then free to call
     /// [`MidHandshakeSslStream`] and loop on [`HandshakeError::WouldBlock`].
-    #[must_use]
+    #[must_use = "Drive the returned handshake state; dropping it discards the underlying stream."]
     pub fn setup_connect(mut self) -> MidHandshakeSslStream<S> {
         self.set_connect_state();
 
-        MidHandshakeSslStream {
-            stream: self.inner,
-            error: Error {
-                code: ErrorCode::WANT_WRITE,
-                cause: Some(InnerError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "connect handshake has not started yet",
-                ))),
-            },
-        }
+        self.pending(
+            ErrorCode::WANT_WRITE,
+            "connect handshake has not started yet",
+        )
     }
 
     /// Attempts a client-side TLS handshake.
     ///
     /// This is a convenience method which combines [`Self::setup_connect`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// The handshake fails or needs additional I/O readiness.
     pub fn connect(self) -> Result<SslStream<S>, HandshakeError<S>> {
         self.setup_connect().handshake()
     }
@@ -5462,26 +6187,21 @@ where
     /// This method calls [`Self::set_accept_state`] and returns without actually
     /// initiating the handshake. The caller is then free to call
     /// [`MidHandshakeSslStream`] and loop on [`HandshakeError::WouldBlock`].
-    #[must_use]
+    #[must_use = "Drive the returned handshake state; dropping it discards the underlying stream."]
     pub fn setup_accept(mut self) -> MidHandshakeSslStream<S> {
         self.set_accept_state();
 
-        MidHandshakeSslStream {
-            stream: self.inner,
-            error: Error {
-                code: ErrorCode::WANT_READ,
-                cause: Some(InnerError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    "accept handshake has not started yet",
-                ))),
-            },
-        }
+        self.pending(ErrorCode::WANT_READ, "accept handshake has not started yet")
     }
 
     /// Attempts a server-side TLS handshake.
     ///
     /// This is a convenience method which combines [`Self::setup_accept`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// The handshake fails or needs additional I/O readiness.
     pub fn accept(self) -> Result<SslStream<S>, HandshakeError<S>> {
         self.setup_accept().handshake()
     }
@@ -5492,6 +6212,8 @@ where
     #[corresponds(SSL_do_handshake)]
     pub fn handshake(self) -> Result<SslStream<S>, HandshakeError<S>> {
         let mut stream = self.inner;
+        // SAFETY: The builder owns the live SSL handle and BIO while BoringSSL
+        // advances this handshake and uses its installed callbacks.
         let ret = unsafe { ffi::SSL_do_handshake(stream.ssl.as_ptr()) };
         if ret > 0 {
             Ok(stream)
@@ -5508,12 +6230,9 @@ where
 
 impl<S> SslStreamBuilder<S> {
     /// Returns a shared reference to the underlying stream.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
-        unsafe {
-            let bio = self.inner.ssl.get_raw_rbio();
-            bio::get_ref(bio)
-        }
+        self.inner.get_ref()
     }
 
     /// Returns a mutable reference to the underlying stream.
@@ -5523,14 +6242,11 @@ impl<S> SslStreamBuilder<S> {
     /// It is inadvisable to read from or write to the underlying stream as it
     /// will most likely corrupt the SSL session.
     pub fn get_mut(&mut self) -> &mut S {
-        unsafe {
-            let bio = self.inner.ssl.get_raw_rbio();
-            bio::get_mut(bio)
-        }
+        self.inner.get_mut()
     }
 
     /// Returns a shared reference to the `Ssl` object associated with this builder.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn ssl(&self) -> &SslRef {
         &self.inner.ssl
     }
@@ -5538,21 +6254,6 @@ impl<S> SslStreamBuilder<S> {
     /// Returns a mutable reference to the `Ssl` object associated with this builder.
     pub fn ssl_mut(&mut self) -> &mut SslRef {
         &mut self.inner.ssl
-    }
-
-    /// Set the DTLS MTU size.
-    ///
-    /// It will be ignored if the value is smaller than the minimum packet size
-    /// the DTLS protocol requires.
-    ///
-    /// # Panics
-    /// This function panics if the given mtu size can't be represented in a positive `c_long` range
-    #[deprecated(note = "Use SslRef::set_mtu instead", since = "0.10.30")]
-    pub fn set_dtls_mtu_size(&mut self, mtu_size: usize) {
-        unsafe {
-            let bio = self.inner.ssl.get_raw_rbio();
-            bio::set_dtls_mtu_size::<S>(bio, mtu_size);
-        }
     }
 }
 
@@ -5565,10 +6266,10 @@ pub struct CertificateType(u8);
 #[cfg(feature = "rpk")]
 impl CertificateType {
     /// A X.509 certificate.
-    pub const X509: Self = Self(ffi::TLSEXT_cert_type_x509 as u8);
+    pub const X509: Self = Self(crate::native_u8(ffi::TLSEXT_cert_type_x509));
 
     /// A raw public key.
-    pub const RAW_PUBLIC_KEY: Self = Self(ffi::TLSEXT_cert_type_rpk as u8);
+    pub const RAW_PUBLIC_KEY: Self = Self(crate::native_u8(ffi::TLSEXT_cert_type_rpk));
 }
 
 /// The result of a shutdown request.
@@ -5592,9 +6293,9 @@ bitflags! {
     }
 }
 
-/// Describes private key hooks. This is used to off-load signing operations to
-/// a custom, potentially asynchronous, backend. Metadata about the key such as
-/// the type and size are parsed out of the certificate.
+/// Private key hooks for signing and decryption, including offloading to a
+/// custom asynchronous backend. The certificate supplies key metadata such as
+/// its type and size.
 ///
 /// Corresponds to [`ssl_private_key_method_st`].
 ///
@@ -5610,6 +6311,10 @@ pub trait PrivateKeyMethod: Send + Sync + 'static {
     /// The caller should arrange for the high-level operation on `ssl` to be
     /// retried when the operation is completed. This will result in a call to
     /// [`Self::complete`].
+    ///
+    /// # Errors
+    ///
+    /// The operation fails or must be retried after asynchronous completion.
     fn sign(
         &self,
         ssl: &mut SslRef,
@@ -5631,7 +6336,10 @@ pub trait PrivateKeyMethod: Send + Sync + 'static {
     ///
     /// This method only works with RSA keys and should perform a raw RSA
     /// decryption operation with no padding.
-    // NOTE(nox): What does it mean that it is an error?
+    ///
+    /// # Errors
+    ///
+    /// The operation fails or must be retried after asynchronous completion.
     fn decrypt(
         &self,
         ssl: &mut SslRef,
@@ -5647,6 +6355,10 @@ pub trait PrivateKeyMethod: Send + Sync + 'static {
     /// it returns `Err(PrivateKeyMethodError::RETRY)`.
     ///
     /// This method may be called arbitrarily many times before completion.
+    ///
+    /// # Errors
+    ///
+    /// The operation fails or remains pending and needs a later retry.
     fn complete(&self, ssl: &mut SslRef, output: &mut [u8])
         -> Result<usize, PrivateKeyMethodError>;
 }
@@ -5674,18 +6386,24 @@ pub trait CertificateCompressor: Send + Sync + 'static {
     /// Indicates if compressor support decompression
     const CAN_DECOMPRESS: bool;
 
-    /// Perform compression of `input` buffer and write compressed data to `output`.
-    #[allow(unused_variables)]
-    fn compress<W>(&self, input: &[u8], output: &mut W) -> io::Result<()>
+    /// Compress `input` into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Compression is unsupported by this implementation, or writing fails.
+    fn compress<W>(&self, _input: &[u8], _output: &mut W) -> io::Result<()>
     where
         W: Write,
     {
         Err(io::Error::other("not implemented"))
     }
 
-    /// Perform decompression of `input` buffer and write compressed data to `output`.
-    #[allow(unused_variables)]
-    fn decompress<W>(&self, input: &[u8], output: &mut W) -> io::Result<()>
+    /// Decompress `input` into `output`.
+    ///
+    /// # Errors
+    ///
+    /// Decompression is unsupported by this implementation, or writing fails.
+    fn decompress<W>(&self, _input: &[u8], _output: &mut W) -> io::Result<()>
     where
         W: Write,
     {
@@ -5696,10 +6414,14 @@ pub trait CertificateCompressor: Send + Sync + 'static {
 use crate::ffi::{SSL_CTX_up_ref, SSL_SESSION_get_master_key, SSL_SESSION_up_ref, SSL_is_server};
 
 unsafe fn get_new_idx(f: ffi::CRYPTO_EX_free) -> c_int {
+    // SAFETY: The native callback is a static function pointer and the
+    // register call retains no temporary Rust storage; other args are null.
     unsafe { ffi::SSL_CTX_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 
 unsafe fn get_new_ssl_idx(f: ffi::CRYPTO_EX_free) -> c_int {
+    // SAFETY: The native callback is a static function pointer and the
+    // register call retains no temporary Rust storage; other args are null.
     unsafe { ffi::SSL_get_ex_new_index(0, ptr::null_mut(), ptr::null_mut(), None, f) }
 }
 

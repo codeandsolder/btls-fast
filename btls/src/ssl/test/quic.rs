@@ -116,7 +116,7 @@ fn server_builder() -> SslContextBuilder {
 
 fn server_context() -> SslContext {
     let mut builder = server_builder();
-    builder.set_alpn_select_callback(|_, _| Ok(b"h3"));
+    builder.set_alpn_select_callback(|_, _| Ok(b"h3")).unwrap();
     builder.build()
 }
 
@@ -128,13 +128,15 @@ fn client_context(sessions: Arc<Mutex<Vec<SslSession>>>) -> SslContext {
     builder.set_verify(SslVerifyMode::PEER);
     builder.set_alpn_protos(b"\x02h3").unwrap();
     builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    builder.set_new_session_callback(move |_, session| sessions.lock().unwrap().push(session));
+    builder
+        .set_new_session_callback(move |_, session| sessions.lock().unwrap().push(session))
+        .unwrap();
     builder.build()
 }
 
 fn client(ctx: &SslContext, session: Option<&SslSession>) -> Ssl {
     let mut ssl = Ssl::new(ctx).unwrap();
-    ssl.set_ex_data(*RECORDED, Recorded::default());
+    ssl.set_ex_data(*RECORDED, Recorded::default()).unwrap();
     ssl.set_connect_state();
     ssl.set_quic_transport_params(b"client params").unwrap();
     if let Some(session) = session {
@@ -145,7 +147,7 @@ fn client(ctx: &SslContext, session: Option<&SslSession>) -> Ssl {
 
 fn server(ctx: &SslContext, early_data_context: &[u8]) -> Ssl {
     let mut ssl = Ssl::new(ctx).unwrap();
-    ssl.set_ex_data(*RECORDED, Recorded::default());
+    ssl.set_ex_data(*RECORDED, Recorded::default()).unwrap();
     ssl.set_accept_state();
     ssl.set_quic_transport_params(b"server params").unwrap();
     ssl.set_quic_early_data_context(early_data_context).unwrap();
@@ -307,7 +309,9 @@ fn failing_handshake() {
 
     // A server that selects no ALPN protocol alerts at the level it writes.
     let mut builder = server_builder();
-    builder.set_alpn_select_callback(|_, _| Err(AlpnError::ALERT_FATAL));
+    builder
+        .set_alpn_select_callback(|_, _| Err(AlpnError::ALERT_FATAL))
+        .unwrap();
     let server_ctx = builder.build();
     let mut c = client(&client_ctx, None);
     let mut s = server(&server_ctx, b"context");

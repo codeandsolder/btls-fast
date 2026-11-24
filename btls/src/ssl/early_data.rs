@@ -33,7 +33,7 @@ impl EarlyDataReason {
     /// The session does not allow early data.
     pub const UNSUPPORTED_FOR_SESSION: Self =
         Self(ffi::ssl_early_data_reason_t::ssl_early_data_unsupported_for_session);
-    /// The server sent a HelloRetryRequest.
+    /// The server sent a `HelloRetryRequest`.
     pub const HELLO_RETRY_REQUEST: Self =
         Self(ffi::ssl_early_data_reason_t::ssl_early_data_hello_retry_request);
     /// The negotiated ALPN protocol differs from the session's.
@@ -54,8 +54,10 @@ impl EarlyDataReason {
 
     /// Returns a short name of the reason.
     #[corresponds(SSL_early_data_reason_string)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn description(&self) -> Option<&'static str> {
+        // SAFETY: BoringSSL returns a static C-string or null. The pointer is
+        // checked before constructing a borrowed `CStr`.
         unsafe {
             let description = ffi::SSL_early_data_reason_string(self.0);
             if description.is_null() {
@@ -83,6 +85,7 @@ impl SslContextBuilder {
     /// servers reject it and issue sessions that do not allow it.
     #[corresponds(SSL_CTX_set_early_data_enabled)]
     pub fn set_early_data_enabled(&mut self, enabled: bool) {
+        // SAFETY: the builder exclusively owns a valid native context.
         unsafe { ffi::SSL_CTX_set_early_data_enabled(self.as_ptr(), enabled.into()) }
     }
 }
@@ -91,22 +94,25 @@ impl SslRef {
     /// Overrides [`SslContextBuilder::set_early_data_enabled`] for this connection.
     #[corresponds(SSL_set_early_data_enabled)]
     pub fn set_early_data_enabled(&mut self, enabled: bool) {
+        // SAFETY: the exclusive native SSL reference remains live for the call.
         unsafe { ffi::SSL_set_early_data_enabled(self.as_ptr(), enabled.into()) }
     }
 
     /// Returns whether the handshake is in the early data state, where a client may send early
     /// data and a server may read it.
     #[corresponds(SSL_in_early_data)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn in_early_data(&self) -> bool {
+        // SAFETY: the native SSL reference remains live for this read-only query.
         unsafe { ffi::SSL_in_early_data(self.as_ptr()) == 1 }
     }
 
     /// Returns whether the peer accepted the early data this client sent, or whether this server
     /// accepted it.
     #[corresponds(SSL_early_data_accepted)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn early_data_accepted(&self) -> bool {
+        // SAFETY: the native SSL reference remains live for this read-only query.
         unsafe { ffi::SSL_early_data_accepted(self.as_ptr()) == 1 }
     }
 
@@ -125,13 +131,16 @@ impl SslRef {
     /// without a reject, after the handshake completed, or twice aborts.
     #[corresponds(SSL_reset_early_data_reject)]
     pub fn reset_early_data_reject(&mut self) {
+        // SAFETY: the exclusive SSL pointer is valid; the caller must observe
+        // the documented BoringSSL state precondition to avoid a native abort.
         unsafe { ffi::SSL_reset_early_data_reject(self.as_ptr()) }
     }
 
     /// Returns why the connection did or did not use early data.
     #[corresponds(SSL_get_early_data_reason)]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn early_data_reason(&self) -> EarlyDataReason {
+        // SAFETY: the native SSL reference remains live for this read-only query.
         EarlyDataReason(unsafe { ffi::SSL_get_early_data_reason(self.as_ptr()) })
     }
 }
@@ -139,8 +148,9 @@ impl SslRef {
 impl SslSessionRef {
     /// Returns whether a client may send early data with the session.
     #[corresponds(SSL_SESSION_early_data_capable)]
-    #[must_use]
+    #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn early_data_capable(&self) -> bool {
+        // SAFETY: the native session reference remains live for this query.
         unsafe { ffi::SSL_SESSION_early_data_capable(self.as_ptr()) == 1 }
     }
 }

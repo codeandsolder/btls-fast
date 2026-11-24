@@ -98,7 +98,7 @@ impl TcpPeer {
     ) -> Result<(TcpStream, Self), BoxError> {
         let listener = TcpSocket::new_v4()?;
         let client = TcpSocket::new_v4()?;
-        if let Pace::Batch = pace {
+        if matches!(pace, Pace::Batch) {
             // Set before connecting, so the window scale fits; accepted sockets inherit them.
             for socket in [&listener, &client] {
                 socket.set_recv_buffer_size(SOCKET_BUF_LEN)?;
@@ -121,7 +121,7 @@ impl TcpPeer {
         let (requests, request_rx) = mpsc::channel();
         let (reply_tx, replies) = mpsc::channel();
         let thread =
-            thread::spawn(move || serve(socket, tls, direction, body, request_rx, reply_tx));
+            thread::spawn(move || serve(socket, tls, direction, body, request_rx, &reply_tx));
         let peer = Self {
             tls,
             pace,
@@ -281,7 +281,7 @@ where
         mut self,
         runtime: &Runtime,
         requests: Receiver<Request>,
-        replies: Sender<()>,
+        replies: &Sender<()>,
     ) -> Result<u64, BoxError> {
         for request in requests {
             match request {
@@ -355,7 +355,7 @@ where
         Ok(n)
     }
 
-    fn advance(&mut self, n: usize) {
+    const fn advance(&mut self, n: usize) {
         self.moved += n as u64;
         self.offset = (self.offset + n) % self.body.len();
     }
@@ -393,11 +393,11 @@ where
     let ssl = stream.ssl();
     let suite = ssl
         .current_cipher()
-        .and_then(|cipher| cipher.standard_name());
+        .and_then(btls::ssl::SslCipherRef::standard_name);
     if ssl.version2() != Some(SslVersion::TLS1_3) || suite != Some(SUITE) {
         return Err(format!(
             "negotiated {} {}, expected TLSv1.3 {SUITE}",
-            ssl.version_str(),
+            ssl.version_str().unwrap_or("unknown protocol"),
             suite.unwrap_or("no cipher"),
         )
         .into());
@@ -412,7 +412,7 @@ fn serve(
     direction: Direction,
     body: &'static [u8],
     requests: Receiver<Request>,
-    replies: Sender<()>,
+    replies: &Sender<()>,
 ) -> Result<u64, BoxError> {
     let runtime = tokio_runtime()?;
     let socket = {

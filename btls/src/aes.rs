@@ -1,44 +1,9 @@
-//! Low level AES IGE and key wrapping functionality
+//! Low-level AES block encryption and RFC 3394 key wrapping.
 //!
-//! AES ECB, CBC, XTS, CTR, CFB, GCM and other conventional symmetric encryption
-//! modes are found in [`symm`].  This is the implementation of AES IGE and key wrapping
-//!
-//! Advanced Encryption Standard (AES) provides symmetric key cipher that
-//! the same key is used to encrypt and decrypt data.  This implementation
-//! uses 128, 192, or 256 bit keys.  This module provides functions to
-//! create a new key with [`new_encrypt`].
-//!
-//! [`new_encrypt`]: struct.AesKey.html#method.new_encrypt
-//!
-//! The [`symm`] module should be used in preference to this module in most cases.
-//! The IGE block cypher is a non-traditional cipher mode.  More traditional AES
-//! encryption methods are found in the [`Crypter`] and [`Cipher`] structs.
-//!
-//! [`symm`]: ../symm/index.html
-//! [`Crypter`]: ../symm/struct.Crypter.html
-//! [`Cipher`]: ../symm/struct.Cipher.html
-//!
-//! # Examples
-//!
-//! ## Key wrapping
-//! ```rust
-//! use btls::aes::{AesKey, unwrap_key, wrap_key};
-//!
-//! let kek = b"\x00\x01\x02\x03\x04\x05\x06\x07\x08\x09\x0A\x0B\x0C\x0D\x0E\x0F";
-//! let key_to_wrap = b"\x00\x11\x22\x33\x44\x55\x66\x77\x88\x99\xAA\xBB\xCC\xDD\xEE\xFF";
-//!
-//! let enc_key = AesKey::new_encrypt(kek).unwrap();
-//! let mut ciphertext = [0u8; 24];
-//! wrap_key(&enc_key, None, &mut ciphertext, &key_to_wrap[..]).unwrap();
-//! let dec_key = AesKey::new_decrypt(kek).unwrap();
-//! let mut orig_key = [0u8; 16];
-//! unwrap_key(&dec_key, None, &mut orig_key, &ciphertext[..]).unwrap();
-//!
-//! assert_eq!(&orig_key[..], &key_to_wrap[..]);
-//! ```
-//!
+//! Use the higher-level symmetric cipher or AEAD interfaces for ordinary messages.
+//! Encryption and decryption schedules are distinct types.
 use crate::ffi;
-use libc::c_int;
+use libc::{c_int, c_uint};
 use openssl_macros::corresponds;
 use std::{fmt, mem, ptr};
 
@@ -54,71 +19,43 @@ impl fmt::Display for KeyError {
 
 impl std::error::Error for KeyError {}
 
-/// The key used to encrypt or decrypt cipher blocks. Its key schedule is zeroed on drop.
-pub struct AesKey(ffi::AES_KEY);
+struct AesSchedule(ffi::AES_KEY);
 
-impl AesKey {
+impl AesSchedule {
     /// A zeroed key. AES-128 and AES-192 schedules fill only part of it, and the rest must still
     /// be initialized.
-    fn zeroed() -> Self {
-        AesKey(ffi::AES_KEY {
+    const fn zeroed() -> Self {
+        Self(ffi::AES_KEY {
             rd_key: [0; 60],
             rounds: 0,
         })
     }
 
-    /// Prepares a key for encryption.
-    ///
-    /// # Failure
-    ///
-    /// Returns an error if the key is not 128, 192, or 256 bits.
-    #[corresponds(AES_set_encrypt_key)]
-    pub fn new_encrypt(key: &[u8]) -> Result<AesKey, KeyError> {
-        unsafe {
-            assert!(key.len() <= c_int::MAX as usize / 8);
-
-            let mut aes_key = AesKey::zeroed();
-            let r = ffi::AES_set_encrypt_key(
-                key.as_ptr(),
-                (key.len() * 8).try_into().map_err(|_| KeyError(()))?,
-                &mut aes_key.0,
-            );
-            if r == 0 {
-                Ok(aes_key)
-            } else {
-                Err(KeyError(()))
-            }
-        }
-    }
-
-    /// Prepares a key for decryption.
-    ///
-    /// # Failure
-    ///
-    /// Returns an error if the key is not 128, 192, or 256 bits.
-    #[corresponds(AES_set_decrypt_key)]
-    pub fn new_decrypt(key: &[u8]) -> Result<AesKey, KeyError> {
-        unsafe {
-            assert!(key.len() <= c_int::MAX as usize / 8);
-
-            let mut aes_key = AesKey::zeroed();
-            let r = ffi::AES_set_decrypt_key(
-                key.as_ptr(),
-                (key.len() * 8).try_into().map_err(|_| KeyError(()))?,
-                &mut aes_key.0,
-            );
-
-            if r == 0 {
-                Ok(aes_key)
-            } else {
-                Err(KeyError(()))
-            }
+    fn new_schedule(
+        key: &[u8],
+        initialize: unsafe extern "C" fn(*const u8, c_uint, *mut ffi::AES_KEY) -> c_int,
+    ) -> Result<Self, KeyError> {
+        let bits = match key.len() {
+            16 => 128,
+            24 => 192,
+            32 => 256,
+            _ => return Err(KeyError(())),
+        };
+        let mut schedule = Self::zeroed();
+        // SAFETY: The selected native initializer reads exactly the matching
+        // key length and writes the initialized, exclusively owned schedule.
+        let result = unsafe { initialize(key.as_ptr(), bits, &raw mut schedule.0) };
+        if result == 0 {
+            Ok(schedule)
+        } else {
+            Err(KeyError(()))
         }
     }
 }
 
-impl Drop for AesKey {
+impl Drop for AesSchedule {
     fn drop(&mut self) {
+        // SAFETY: The entire owned schedule is initialized and writable.
         unsafe {
             ffi::OPENSSL_cleanse(
                 ptr::from_mut(&mut self.0).cast(),
@@ -128,93 +65,130 @@ impl Drop for AesKey {
     }
 }
 
-/// Encrypts a single block with a key from [`AesKey::new_encrypt`], as the building block of
-/// other modes such as QUIC header protection.
-#[corresponds(AES_encrypt)]
-pub fn encrypt_block(key: &AesKey, in_: &[u8; 16], out: &mut [u8; 16]) {
-    unsafe { ffi::AES_encrypt(in_.as_ptr(), out.as_mut_ptr(), &key.0) }
-}
+macro_rules! aes_schedule {
+    ($key:ident, $init:ident, $block:ident, $native_block:ident, $kind:literal, $operation:literal) => {
+        #[doc = $kind]
+        pub struct $key(AesSchedule);
 
-/// Decrypts a single block with a key from [`AesKey::new_decrypt`].
-#[corresponds(AES_decrypt)]
-pub fn decrypt_block(key: &AesKey, in_: &[u8; 16], out: &mut [u8; 16]) {
-    unsafe { ffi::AES_decrypt(in_.as_ptr(), out.as_mut_ptr(), &key.0) }
-}
+        impl $key {
+            /// Prepares the corresponding AES key schedule.
+            ///
+            /// # Errors
+            ///
+            /// Returns an error unless the key is 128, 192, or 256 bits.
+            #[corresponds($init)]
+            pub fn new(key: &[u8]) -> Result<Self, KeyError> {
+                AesSchedule::new_schedule(key, ffi::$init).map(Self)
+            }
 
-/// Wrap a key, according to [RFC 3394](https://tools.ietf.org/html/rfc3394)
-///
-/// * `key`: The key-encrypting-key to use. Must be a encrypting key
-/// * `iv`: The IV to use. You must use the same IV for both wrapping and unwrapping
-/// * `out`: The output buffer to store the ciphertext
-/// * `in_`: The input buffer, storing the key to be wrapped
-///
-/// Returns the number of bytes written into `out`
-///
-/// # Panics
-///
-/// Panics if either `out` or `in_` do not have sizes that are a multiple of 8, or if
-/// `out` is not 8 bytes longer than `in_`
-#[corresponds(AES_wrap_key)]
-pub fn wrap_key(
-    key: &AesKey,
-    iv: Option<[u8; 8]>,
-    out: &mut [u8],
-    in_: &[u8],
-) -> Result<usize, KeyError> {
-    unsafe {
-        assert!(out.len() >= in_.len() + 8); // Ciphertext is 64 bits longer (see 2.2.1)
-
-        let written = ffi::AES_wrap_key(
-            std::ptr::addr_of!(key.0).cast_mut(), // this is safe, the implementation only uses the key as a const pointer.
-            iv.as_ref().map_or(ptr::null(), |iv| iv.as_ptr()),
-            out.as_mut_ptr(),
-            in_.as_ptr(),
-            in_.len(),
-        );
-        if written <= 0 {
-            Err(KeyError(()))
-        } else {
-            Ok(written as usize)
+            #[doc = $operation]
+            #[corresponds($native_block)]
+            pub fn $block(&self, input: &[u8; 16], out: &mut [u8; 16]) {
+                // SAFETY: Both blocks are exactly 16 bytes. The constructor
+                // initializes the schedule for the matching native operation.
+                unsafe {
+                    ffi::$native_block(input.as_ptr(), out.as_mut_ptr(), &raw const self.0 .0)
+                }
+            }
         }
+    };
+}
+
+aes_schedule!(
+    AesEncryptKey,
+    AES_set_encrypt_key,
+    encrypt_block,
+    AES_encrypt,
+    "An AES encryption schedule, cleansed on drop.",
+    "Encrypts one block."
+);
+aes_schedule!(
+    AesDecryptKey,
+    AES_set_decrypt_key,
+    decrypt_block,
+    AES_decrypt,
+    "An AES decryption schedule, cleansed on drop.",
+    "Decrypts one block."
+);
+
+impl AesEncryptKey {
+    /// Wraps key material according to RFC 3394, returning the written length.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input length, insufficient output capacity,
+    /// or native failure. Input must contain at least two eight-byte blocks.
+    #[corresponds(AES_wrap_key)]
+    pub fn wrap_key(
+        &self,
+        iv: Option<[u8; 8]>,
+        out: &mut [u8],
+        input: &[u8],
+    ) -> Result<usize, KeyError> {
+        let len = input.len().checked_add(8).ok_or(KeyError(()))?;
+        let expected = c_int::try_from(len).map_err(|_| KeyError(()))?;
+        if input.len() < 16 || !input.len().is_multiple_of(8) {
+            return Err(KeyError(()));
+        }
+        let dest = out.get_mut(..len).ok_or(KeyError(()))?;
+        // SAFETY: The length checks establish the native routine's input and output
+        // contracts; its optional IV is eight bytes and the schedule is for encryption.
+        let written = unsafe {
+            ffi::AES_wrap_key(
+                &raw const self.0 .0,
+                iv.as_ref().map_or(ptr::null(), |iv| iv.as_ptr()),
+                dest.as_mut_ptr(),
+                input.as_ptr(),
+                input.len(),
+            )
+        };
+        if written != expected {
+            return Err(KeyError(()));
+        }
+        Ok(len)
     }
 }
 
-/// Unwrap a key, according to [RFC 3394](https://tools.ietf.org/html/rfc3394)
-///
-/// * `key`: The key-encrypting-key to decrypt the wrapped key. Must be a decrypting key
-/// * `iv`: The same IV used for wrapping the key
-/// * `out`: The buffer to write the unwrapped key to
-/// * `in_`: The input ciphertext
-///
-/// Returns the number of bytes written into `out`
-///
-/// # Panics
-///
-/// Panics if either `out` or `in_` do not have sizes that are a multiple of 8, or
-/// if `in_` is not 8 bytes longer than `out`
-#[corresponds(AES_unwrap_key)]
-pub fn unwrap_key(
-    key: &AesKey,
-    iv: Option<[u8; 8]>,
-    out: &mut [u8],
-    in_: &[u8],
-) -> Result<usize, KeyError> {
-    unsafe {
-        assert!(out.len() + 8 <= in_.len());
-
-        let written = ffi::AES_unwrap_key(
-            std::ptr::addr_of!(key.0).cast_mut(), // this is safe, the implementation only uses the key as a const pointer.
-            iv.as_ref().map_or(ptr::null(), |iv| iv.as_ptr().cast()),
-            out.as_ptr().cast_mut(),
-            in_.as_ptr().cast(),
-            in_.len(),
-        );
-
-        if written <= 0 {
-            Err(KeyError(()))
-        } else {
-            Ok(written as usize)
+impl AesDecryptKey {
+    /// Unwraps and authenticates RFC 3394 key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid input length, insufficient output capacity,
+    /// or failed authentication. On native failure, the intended output prefix
+    /// is cleansed; bytes beyond that prefix are untouched.
+    #[corresponds(AES_unwrap_key)]
+    pub fn unwrap_key(
+        &self,
+        iv: Option<[u8; 8]>,
+        out: &mut [u8],
+        input: &[u8],
+    ) -> Result<usize, KeyError> {
+        if input.len() < 24 || !input.len().is_multiple_of(8) {
+            return Err(KeyError(()));
         }
+        c_int::try_from(input.len()).map_err(|_| KeyError(()))?;
+        let len = input.len() - 8;
+        let expected = c_int::try_from(len).map_err(|_| KeyError(()))?;
+        let dest = out.get_mut(..len).ok_or(KeyError(()))?;
+        // SAFETY: The native API writes exactly input.len() - 8 bytes even
+        // before authenticity is established. dest has that capacity, the
+        // IV is eight bytes if supplied, and the schedule is for decryption.
+        let written = unsafe {
+            ffi::AES_unwrap_key(
+                &raw const self.0 .0,
+                iv.as_ref().map_or(ptr::null(), |iv| iv.as_ptr()),
+                dest.as_mut_ptr(),
+                input.as_ptr(),
+                input.len(),
+            )
+        };
+        if written != expected {
+            // SAFETY: dest is an exclusively borrowed, initialized writable slice.
+            unsafe { ffi::OPENSSL_cleanse(dest.as_mut_ptr().cast(), dest.len()) };
+            return Err(KeyError(()));
+        }
+        Ok(len)
     }
 }
 
@@ -233,19 +207,15 @@ mod test {
             .try_into()
             .unwrap();
         let mut ciphertext = [0; 16];
-        encrypt_block(
-            &AesKey::new_encrypt(&key).unwrap(),
-            &plaintext,
-            &mut ciphertext,
-        );
+        AesEncryptKey::new(&key)
+            .unwrap()
+            .encrypt_block(&plaintext, &mut ciphertext);
         assert_eq!(hex::encode(ciphertext), "69c4e0d86a7b0430d8cdb78070b4c55a");
 
         let mut decrypted = [0; 16];
-        decrypt_block(
-            &AesKey::new_decrypt(&key).unwrap(),
-            &ciphertext,
-            &mut decrypted,
-        );
+        AesDecryptKey::new(&key)
+            .unwrap()
+            .decrypt_block(&ciphertext, &mut decrypted);
         assert_eq!(decrypted, plaintext);
     }
 
@@ -257,20 +227,43 @@ mod test {
         let expected_ciphertext =
             Vec::from_hex("1FA68B0A8112B447AEF34BD8FB5A7B829D3E862371D2CFE5").unwrap();
 
-        let enc_key = AesKey::new_encrypt(&raw_key).unwrap();
+        let enc_key = AesEncryptKey::new(&raw_key).unwrap();
         let mut wrapped = [0; 24];
-        assert_eq!(
-            wrap_key(&enc_key, None, &mut wrapped, &key_data).unwrap(),
-            24
-        );
+        assert_eq!(enc_key.wrap_key(None, &mut wrapped, &key_data).unwrap(), 24);
         assert_eq!(&wrapped[..], &expected_ciphertext[..]);
 
-        let dec_key = AesKey::new_decrypt(&raw_key).unwrap();
+        let dec_key = AesDecryptKey::new(&raw_key).unwrap();
         let mut unwrapped = [0; 16];
         assert_eq!(
-            unwrap_key(&dec_key, None, &mut unwrapped, &wrapped).unwrap(),
+            dec_key.unwrap_key(None, &mut unwrapped, &wrapped).unwrap(),
             16
         );
         assert_eq!(&unwrapped[..], &key_data[..]);
+    }
+    #[test]
+    fn wrap_capacity_and_authentication() {
+        let enc = AesEncryptKey::new(&[0; 16]).unwrap();
+        let dec = AesDecryptKey::new(&[0; 16]).unwrap();
+        let input = [42; 16];
+        let mut wrapped = [0xa5; 31];
+        assert!(enc.wrap_key(None, &mut wrapped[..23], &input).is_err());
+        assert_eq!(wrapped, [0xa5; 31]);
+        assert_eq!(enc.wrap_key(None, &mut wrapped, &input).unwrap(), 24);
+        assert_eq!(wrapped[24..], [0xa5; 7]);
+        let mut out = [0xa5; 23];
+        assert!(dec
+            .unwrap_key(None, &mut out[..15], &wrapped[..24])
+            .is_err());
+        assert_eq!(out, [0xa5; 23]);
+        assert_eq!(dec.unwrap_key(None, &mut out, &wrapped[..24]).unwrap(), 16);
+        assert_eq!(out[..16], input);
+        assert_eq!(out[16..], [0xa5; 7]);
+        assert!(dec
+            .unwrap_key(Some([0; 8]), &mut out, &wrapped[..24])
+            .is_err());
+        assert_eq!(out[..16], [0; 16]);
+        assert_eq!(out[16..], [0xa5; 7]);
+        assert!(enc.wrap_key(None, &mut wrapped, &input[..8]).is_err());
+        assert!(dec.unwrap_key(None, &mut out, &wrapped[..23]).is_err());
     }
 }

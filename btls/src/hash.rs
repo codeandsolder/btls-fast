@@ -10,7 +10,6 @@ use crate::error::ErrorStack;
 use crate::ffi;
 use crate::ffi::{EVP_MD_CTX_free, EVP_MD_CTX_new};
 use crate::nid::Nid;
-use crate::try_int;
 use crate::{cvt, cvt_p};
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -21,93 +20,94 @@ impl MessageDigest {
     ///
     /// # Safety
     ///
-    /// The caller must ensure the pointer is valid.
-    #[must_use]
-    pub unsafe fn from_ptr(x: *const ffi::EVP_MD) -> Self {
-        MessageDigest(x)
+    /// The pointer must reference an immutable native digest descriptor that
+    /// remains valid for the lifetime of the process.
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
+    pub const unsafe fn from_ptr(x: *const ffi::EVP_MD) -> Self {
+        Self(x)
     }
 
     /// Returns the `MessageDigest` corresponding to an `Nid`.
     #[corresponds(EVP_get_digestbynid)]
-    #[must_use]
-    pub fn from_nid(type_: Nid) -> Option<MessageDigest> {
+    #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
+    pub fn from_nid(type_: Nid) -> Option<Self> {
+        // SAFETY: the native lookup returns a static descriptor or null.
         unsafe {
             let ptr = ffi::EVP_get_digestbynid(type_.as_raw());
             if ptr.is_null() {
                 None
             } else {
-                Some(MessageDigest(ptr))
+                Some(Self(ptr))
             }
         }
     }
 
-    #[must_use]
-    pub fn md5() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_md5()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn md5() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_md5()) }
     }
 
-    #[must_use]
-    pub fn sha1() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha1()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn sha1() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_sha1()) }
     }
 
-    #[must_use]
-    pub fn sha224() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha224()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn sha224() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_sha224()) }
     }
 
-    #[must_use]
-    pub fn sha256() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha256()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn sha256() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_sha256()) }
     }
 
-    #[must_use]
-    pub fn sha384() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha384()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn sha384() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_sha384()) }
     }
 
-    #[must_use]
-    pub fn sha512() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha512()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn sha512() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_sha512()) }
     }
 
-    #[must_use]
-    pub fn sha512_256() -> MessageDigest {
-        unsafe { MessageDigest(ffi::EVP_sha512_256()) }
+    #[must_use = "Use the returned digest descriptor for the intended hash operation."]
+    pub fn sha512_256() -> Self {
+        // SAFETY: the native getter returns an immutable static descriptor.
+        unsafe { Self(ffi::EVP_sha512_256()) }
     }
 
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_ptr(&self) -> *const ffi::EVP_MD {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_ptr(self) -> *const ffi::EVP_MD {
         self.0
     }
 
     /// The size of the digest in bytes.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn size(&self) -> usize {
+    #[must_use = "Use the returned size when allocating or validating cryptographic buffers."]
+    pub fn size(self) -> usize {
+        // SAFETY: the descriptor remains valid for the process lifetime.
         unsafe { ffi::EVP_MD_size(self.0) }
     }
 
     /// The name of the digest.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn type_(&self) -> Nid {
+    #[must_use = "The returned identifier is the result of this query."]
+    pub fn type_(self) -> Nid {
+        // SAFETY: the descriptor remains valid for the process lifetime.
         Nid::from_raw(unsafe { ffi::EVP_MD_type(self.0) })
     }
 }
 
+// SAFETY: descriptor pointers always reference immutable process-lifetime data.
 unsafe impl Sync for MessageDigest {}
+// SAFETY: native digest descriptors are static and not thread-affine.
 unsafe impl Send for MessageDigest {}
-
-#[derive(PartialEq, Copy, Clone)]
-enum State {
-    Reset,
-    Updated,
-    Finalized,
-}
-
-use self::State::*;
 
 /// Provides message digest (hash) computation.
 ///
@@ -144,102 +144,117 @@ use self::State::*;
 ///
 /// Don't ever hash passwords, use the functions in the `pkcs5` module or bcrypt/scrypt instead.
 ///
-/// For extendable output functions (XOFs, i.e. SHAKE128/SHAKE256), you must use finish_xof instead
-/// of finish and provide a buf to store the hash. The hash will be as long as the buf.
 pub struct Hasher {
     ctx: *mut ffi::EVP_MD_CTX,
-    md: *const ffi::EVP_MD,
-    type_: MessageDigest,
-    state: State,
+    digest: MessageDigest,
+    finalized: bool,
 }
 
-unsafe impl Sync for Hasher {}
+// SAFETY: the unique context owner is movable between threads; mutation
+// requires an exclusive borrow. Its digest descriptor is immutable.
 unsafe impl Send for Hasher {}
 
 impl Hasher {
-    /// Creates a new `Hasher` with the specified hash type.
-    pub fn new(ty: MessageDigest) -> Result<Hasher, ErrorStack> {
+    /// Creates a new hasher for the selected native digest.
+    ///
+    /// # Errors
+    ///
+    /// The context allocation fails or the digest cannot be initialized.
+    pub fn new(digest: MessageDigest) -> Result<Self, ErrorStack> {
         ffi::init();
-
+        // SAFETY: the allocator returns a fresh native context or null.
         let ctx = unsafe { cvt_p(EVP_MD_CTX_new())? };
-
-        let mut h = Hasher {
+        let mut hasher = Self {
             ctx,
-            md: ty.as_ptr(),
-            type_: ty,
-            state: Finalized,
+            digest,
+            finalized: true,
         };
-        h.init()?;
-        Ok(h)
+        hasher.ensure_active()?;
+        Ok(hasher)
     }
 
-    fn init(&mut self) -> Result<(), ErrorStack> {
-        match self.state {
-            Reset => return Ok(()),
-            Updated => {
-                self.finish()?;
-            }
-            Finalized => (),
+    fn ensure_active(&mut self) -> Result<(), ErrorStack> {
+        if self.finalized {
+            // SAFETY: self owns the initialized native allocation; digest
+            // identifies an immutable live descriptor.
+            unsafe {
+                cvt(ffi::EVP_DigestInit_ex(
+                    self.ctx,
+                    self.digest.as_ptr(),
+                    ptr::null_mut(),
+                ))?;
+            };
+            self.finalized = false;
         }
-        unsafe {
-            cvt(ffi::EVP_DigestInit_ex(self.ctx, self.md, ptr::null_mut()))?;
-        }
-        self.state = Reset;
         Ok(())
     }
 
     /// Feeds data into the hasher.
+    ///
+    /// # Errors
+    ///
+    /// The native digest initialization or update fails.
     pub fn update(&mut self, data: &[u8]) -> Result<(), ErrorStack> {
-        if self.state == Finalized {
-            self.init()?;
-        }
+        self.ensure_active()?;
+        // SAFETY: the native digest is active and exclusively borrowed, with
+        // a readable input slice of the supplied length.
         unsafe {
             cvt(ffi::EVP_DigestUpdate(
                 self.ctx,
-                data.as_ptr().cast_mut().cast(),
+                data.as_ptr().cast(),
                 data.len(),
-            ))?;
+            ))
         }
-        self.state = Updated;
-        Ok(())
     }
 
-    /// Returns the hash of the data written and resets the non-XOF hasher.
+    /// Returns the hash of the data written and resets the hasher.
+    ///
+    /// # Errors
+    ///
+    /// The native digest operation fails or reports an invalid output length.
     pub fn finish(&mut self) -> Result<DigestBytes, ErrorStack> {
-        if self.state == Finalized {
-            self.init()?;
-        }
-        unsafe {
-            let mut len = try_int(ffi::EVP_MAX_MD_SIZE)?;
-            let mut buf = [0; ffi::EVP_MAX_MD_SIZE as usize];
+        self.ensure_active()?;
+        let mut len: c_uint = 0;
+        let mut buf = [0; ffi::EVP_MAX_MD_SIZE as usize];
+        // SAFETY: the active context writes at most EVP_MAX_MD_SIZE bytes to
+        // this exclusive output buffer, and reports the actual byte count.
+        let result = unsafe {
             cvt(ffi::EVP_DigestFinal_ex(
                 self.ctx,
                 buf.as_mut_ptr(),
-                &mut len,
-            ))?;
-            self.state = Finalized;
-            Ok(DigestBytes {
-                buf,
-                len: try_int(len)?,
-            })
+                &raw mut len,
+            ))
+        };
+        self.finalized = true;
+        result?;
+        let len = usize::try_from(len).map_err(ErrorStack::internal_error)?;
+        if len > buf.len() || len != self.digest.size() {
+            return Err(ErrorStack::internal_error_str(
+                "invalid native digest output length",
+            ));
         }
+        Ok(DigestBytes { buf, len })
     }
 
-    /// Writes the hash of the data into the supplied buf and resets the XOF hasher.
-    /// The hash will be as long as the buf.
-    pub fn finish_xof(&mut self, buf: &mut [u8]) -> Result<(), ErrorStack> {
-        if self.state == Finalized {
-            self.init()?;
+    /// Copies the current digest state into an independently owned context.
+    ///
+    /// # Errors
+    ///
+    /// Native allocation or copying the digest state fails.
+    pub fn try_clone(&self) -> Result<Self, ErrorStack> {
+        // SAFETY: the allocator returns a fresh native context or null.
+        let ctx = unsafe { cvt_p(EVP_MD_CTX_new())? };
+        let copy = Self {
+            ctx,
+            digest: self.digest,
+            finalized: self.finalized,
+        };
+        if !self.finalized {
+            // SAFETY: source is live and immutably borrowed; the destination
+            // is initialized and owned by copy even if copying fails.
+            unsafe { cvt(ffi::EVP_MD_CTX_copy_ex(copy.ctx, self.ctx))? };
         }
-        unsafe {
-            cvt(ffi::EVP_DigestFinalXOF(
-                self.ctx,
-                buf.as_mut_ptr(),
-                buf.len(),
-            ))?;
-            self.state = Finalized;
-            Ok(())
-        }
+        Ok(copy)
     }
 }
 
@@ -255,32 +270,11 @@ impl Write for Hasher {
     }
 }
 
-impl Clone for Hasher {
-    fn clone(&self) -> Hasher {
-        let ctx = unsafe {
-            let ctx = EVP_MD_CTX_new();
-            assert!(!ctx.is_null());
-            let r = ffi::EVP_MD_CTX_copy_ex(ctx, self.ctx);
-            assert_eq!(r, 1);
-            ctx
-        };
-        Hasher {
-            ctx,
-            md: self.md,
-            type_: self.type_,
-            state: self.state,
-        }
-    }
-}
-
 impl Drop for Hasher {
     fn drop(&mut self) {
-        unsafe {
-            if self.state != Finalized {
-                drop(self.finish());
-            }
-            EVP_MD_CTX_free(self.ctx);
-        }
+        // SAFETY: this is the uniquely owned native allocation, and free
+        // performs the context cleanup without finalizing the digest.
+        unsafe { EVP_MD_CTX_free(self.ctx) };
     }
 }
 
@@ -288,17 +282,10 @@ impl Drop for Hasher {
 ///
 /// This type derefs to a byte slice - it exists to avoid allocating memory to
 /// store the digest data.
-#[derive(Copy)]
+#[derive(Clone, Copy)]
 pub struct DigestBytes {
     pub(crate) buf: [u8; ffi::EVP_MAX_MD_SIZE as usize],
     pub(crate) len: usize,
-}
-
-impl Clone for DigestBytes {
-    #[inline]
-    fn clone(&self) -> DigestBytes {
-        *self
-    }
 }
 
 impl Deref for DigestBytes {
@@ -330,31 +317,40 @@ impl fmt::Debug for DigestBytes {
     }
 }
 
-/// Computes the hash of the `data` with the non-XOF hasher `t`.
+/// Computes the hash of the input using the selected digest.
+///
+/// # Errors
+///
+/// Native allocation, initialization or digest computation fails.
 pub fn hash(t: MessageDigest, data: &[u8]) -> Result<DigestBytes, ErrorStack> {
     let mut h = Hasher::new(t)?;
     h.update(data)?;
     h.finish()
 }
 
-/// Computes the hash of the `data` with the XOF hasher `t` and stores it in `buf`.
-pub fn hash_xof(t: MessageDigest, data: &[u8], buf: &mut [u8]) -> Result<(), ErrorStack> {
-    let mut h = Hasher::new(t)?;
-    h.update(data)?;
-    h.finish_xof(buf)
-}
-
 /// Computes HMAC with SHA-256 digest.
+///
+/// # Errors
+///
+/// Native HMAC initialization or computation fails.
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], ErrorStack> {
     hmac(MessageDigest::sha256(), key, data)
 }
 
 /// Computes HMAC with SHA-512 digest.
+///
+/// # Errors
+///
+/// Native HMAC initialization or computation fails.
 pub fn hmac_sha512(key: &[u8], data: &[u8]) -> Result<[u8; 64], ErrorStack> {
     hmac(MessageDigest::sha512(), key, data)
 }
 
 /// Computes HMAC with SHA-1 digest.
+///
+/// # Errors
+///
+/// Native HMAC initialization or computation fails.
 pub fn hmac_sha1(key: &[u8], data: &[u8]) -> Result<[u8; 20], ErrorStack> {
     hmac(MessageDigest::sha1(), key, data)
 }
@@ -364,9 +360,16 @@ pub(crate) fn hmac<const N: usize>(
     key: &[u8],
     data: &[u8],
 ) -> Result<[u8; N], ErrorStack> {
+    if digest.size() != N || N == 0 || N > ffi::EVP_MAX_MD_SIZE as usize {
+        return Err(ErrorStack::internal_error_str(
+            "HMAC output width does not match digest",
+        ));
+    }
     let mut out = [0u8; N];
     let mut out_len: c_uint = 0;
 
+    // SAFETY: the digest's exact native output size matches N, and all
+    // input/output pointers describe their readable/writable buffers.
     cvt_p(unsafe {
         ffi::HMAC(
             digest.as_ptr(),
@@ -375,11 +378,15 @@ pub(crate) fn hmac<const N: usize>(
             data.as_ptr(),
             data.len(),
             out.as_mut_ptr(),
-            &mut out_len,
+            &raw mut out_len,
         )
     })?;
 
-    assert_eq!(out_len as usize, N);
+    if usize::try_from(out_len).map_err(ErrorStack::internal_error)? != N {
+        return Err(ErrorStack::internal_error_str(
+            "invalid native HMAC output length",
+        ));
+    }
 
     Ok(out)
 }
@@ -389,6 +396,12 @@ mod tests {
     use hex::{self, FromHex};
 
     use super::*;
+
+    #[test]
+    fn rejects_mismatched_hmac_output_width() {
+        assert!(hmac::<1>(MessageDigest::sha256(), b"key", b"message").is_err());
+        assert!(hmac::<64>(MessageDigest::sha256(), b"key", b"message").is_err());
+    }
 
     fn hash_test(hashtype: MessageDigest, hashtest: &(&str, &str)) {
         let res = hash(hashtype, &Vec::from_hex(hashtest.0).unwrap()).unwrap();
@@ -491,20 +504,23 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn test_clone() {
         let i = 7;
         let inp = Vec::from_hex(MD5_TESTS[i].0).unwrap();
         assert!(inp.len() > 2);
         let p = inp.len() / 2;
-        let h0 = Hasher::new(MessageDigest::md5()).unwrap();
+        let mut h0 = Hasher::new(MessageDigest::md5()).unwrap();
 
         println!("Clone a new hasher");
-        let mut h1 = h0.clone();
+        let mut h1 = h0.try_clone().unwrap();
+        assert_eq!(
+            &*h0.finish().unwrap(),
+            &*hash(MessageDigest::md5(), &[]).unwrap()
+        );
         h1.write_all(&inp[..p]).unwrap();
         {
             println!("Clone an updated hasher");
-            let mut h2 = h1.clone();
+            let mut h2 = h1.try_clone().unwrap();
             h2.write_all(&inp[p..]).unwrap();
             let res = h2.finish().unwrap();
             assert_eq!(hex::encode(res), MD5_TESTS[i].1);
@@ -514,7 +530,11 @@ mod tests {
         assert_eq!(hex::encode(res), MD5_TESTS[i].1);
 
         println!("Clone a finished hasher");
-        let mut h3 = h1.clone();
+        let mut h3 = h1.try_clone().unwrap();
+        assert_eq!(
+            &*h1.finish().unwrap(),
+            &*hash(MessageDigest::md5(), &[]).unwrap()
+        );
         h3.write_all(&Vec::from_hex(MD5_TESTS[i + 1].0).unwrap())
             .unwrap();
         let res = h3.finish().unwrap();

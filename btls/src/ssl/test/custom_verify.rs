@@ -1,4 +1,5 @@
 use super::server::Server;
+use crate::ssl::SslRef;
 use crate::ssl::{ErrorCode, HandshakeError, SslAlert, SslVerifyMode};
 use crate::x509::X509StoreContext;
 use crate::{hash::MessageDigest, ssl::SslVerifyError};
@@ -27,7 +28,8 @@ fn untrusted_callback_override_bad() {
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, |_| {
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REVOKED))
-        });
+        })
+        .unwrap();
 
     client.connect_err();
 }
@@ -43,7 +45,8 @@ fn untrusted_callback_override_ok() {
             assert!(ssl.peer_cert_chain().is_some());
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -77,7 +80,8 @@ fn untrusted_with_set_cert() {
                 .unwrap();
 
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))
-        });
+        })
+        .unwrap();
 
     client.connect_err();
 }
@@ -107,7 +111,8 @@ fn trusted_with_set_cert() {
                 .unwrap();
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -123,7 +128,8 @@ fn trusted_callback_override_ok() {
             assert!(ssl.peer_certificate().is_some());
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -141,9 +147,17 @@ fn trusted_callback_override_bad() {
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, |_| {
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))
-        });
+        })
+        .unwrap();
 
     client.connect_err();
+}
+
+fn check_peer_digest(ssl: &mut SslRef) -> Result<(), SslVerifyError> {
+    let cert = ssl.peer_certificate().unwrap();
+    let digest = cert.digest(MessageDigest::sha1()).unwrap();
+    assert_eq!(hex::encode(digest), super::TEST_CERT_DIGEST);
+    Ok(())
 }
 
 #[test]
@@ -151,27 +165,19 @@ fn callback() {
     static CALLED_BACK: AtomicBool = AtomicBool::new(false);
     let server = Server::builder().build();
     let mut client = server.client();
-    let expected = super::TEST_CERT_DIGEST;
-
     client
         .ctx()
         .set_verify_callback(SslVerifyMode::PEER, |_, _| {
             panic!("verify callback should not be called");
-        });
-
+        })
+        .unwrap();
     client
         .ctx()
-        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+        .set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
             CALLED_BACK.store(true, Ordering::SeqCst);
-
-            let cert = ssl.peer_certificate().unwrap();
-            let digest = cert.digest(MessageDigest::sha1()).unwrap();
-
-            assert_eq!(hex::encode(digest), expected);
-
-            Ok(())
-        });
-
+            check_peer_digest(ssl)
+        })
+        .unwrap();
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
 }
@@ -181,27 +187,19 @@ fn ssl_callback() {
     static CALLED_BACK: AtomicBool = AtomicBool::new(false);
     let server = Server::builder().build();
     let mut client = server.client().build().builder();
-    let expected = super::TEST_CERT_DIGEST;
-
     client
         .ssl()
         .set_verify_callback(SslVerifyMode::PEER, |_, _| {
             panic!("verify callback should not be called");
-        });
-
+        })
+        .unwrap();
     client
         .ssl()
-        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+        .set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
             CALLED_BACK.store(true, Ordering::SeqCst);
-
-            let cert = ssl.peer_certificate().unwrap();
-            let digest = cert.digest(MessageDigest::sha1()).unwrap();
-
-            assert_eq!(hex::encode(digest), expected);
-
-            Ok(())
-        });
-
+            check_peer_digest(ssl)
+        })
+        .unwrap();
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
 }
@@ -216,7 +214,8 @@ fn both_callback() {
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, |_| {
             panic!("verify callback should not be called");
-        });
+        })
+        .unwrap();
 
     let mut client = client.build().builder();
     let expected = super::TEST_CERT_DIGEST;
@@ -232,7 +231,8 @@ fn both_callback() {
             assert_eq!(hex::encode(digest), expected);
 
             Ok(())
-        });
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
@@ -265,7 +265,8 @@ fn retry() {
             }
 
             Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REVOKED))
-        });
+        })
+        .unwrap();
 
     let HandshakeError::WouldBlock(handshake) = client.connect_err() else {
         panic!("should be WouldBlock");
@@ -275,4 +276,46 @@ fn retry() {
     assert!(handshake.error().would_block());
     assert_eq!(handshake.error().code(), ErrorCode::WANT_CERTIFICATE_VERIFY);
     handshake.handshake().unwrap_err();
+}
+
+#[test]
+fn copied_custom_verifier_survives_context_switch() {
+    use crate::ssl::{SslContextBuilder, SslMethod};
+    use std::sync::Arc;
+
+    fn policy(
+        called: Arc<AtomicBool>,
+        accept: bool,
+    ) -> impl Fn(&mut SslRef) -> Result<(), SslVerifyError> {
+        move |ssl| {
+            called.store(true, Ordering::SeqCst);
+            if accept {
+                check_peer_digest(ssl)
+            } else {
+                Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_UNKNOWN))
+            }
+        }
+    }
+
+    let called = Arc::new(AtomicBool::new(false));
+    let replacement_called = Arc::new(AtomicBool::new(false));
+    let server = Server::builder().build();
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, policy(called.clone(), true))
+        .unwrap();
+    let mut replacement = SslContextBuilder::new(SslMethod::tls()).unwrap();
+    replacement
+        .set_custom_verify_callback(
+            SslVerifyMode::PEER,
+            policy(replacement_called.clone(), false),
+        )
+        .unwrap();
+    let replacement = replacement.build();
+    let mut client = client.build().builder();
+    client.ssl().set_ssl_context(&replacement).unwrap();
+    client.connect();
+    assert!(called.load(Ordering::SeqCst));
+    assert!(!replacement_called.load(Ordering::SeqCst));
 }

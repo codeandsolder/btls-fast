@@ -5,8 +5,6 @@ mod plain;
 mod rustls;
 
 #[cfg(test)]
-// Criterion's harness-free targets also set cfg(test), but omit the test functions.
-#[allow(dead_code, unused_imports)]
 mod tests;
 
 use std::{
@@ -86,15 +84,17 @@ struct Batches {
 /// Adapts one client stream library to the shared measured loops.
 ///
 /// Connectors and connections are created outside measurement. Every TLS client offers only
-/// TLS 1.3 with TLS_AES_128_GCM_SHA256 and skips certificate checks; the server asserts the suite.
+/// TLS 1.3 with `TLS_AES_128_GCM_SHA256` and skips certificate checks; the server asserts the suite.
 trait ClientAdapter {
     /// Client configuration built once per registered benchmark.
-    type Connector;
+    // Connections and their handshake futures are safe to move between
+    // executor threads, although measured runs use a current-thread runtime.
+    type Connector: Sync;
 
     /// Stream returned by [`Self::connect`] over transport `S`.
-    type Stream<S>: AsyncRead + AsyncWrite + Unpin
+    type Stream<S>: AsyncRead + AsyncWrite + Unpin + Send
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 
     /// Stable name appended to the Criterion benchmark ID.
     const NAME: &'static str;
@@ -109,9 +109,9 @@ trait ClientAdapter {
     fn connect<S>(
         connector: &Self::Connector,
         transport: S,
-    ) -> impl Future<Output = Result<Self::Stream<S>, BoxError>>
+    ) -> impl Future<Output = Result<Self::Stream<S>, BoxError>> + Send
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 }
 
 // ===== impl ClientBenchCase =====
@@ -259,7 +259,7 @@ where
         let Peer::Tcp(mut peer) = peer else {
             return Ok(());
         };
-        if let Direction::Write = case.target.direction {
+        if matches!(case.target.direction, Direction::Write) {
             // close_notify and FIN end a streaming server's reads.
             if let Err(error) = stream.shutdown().await {
                 return Err(peer.explain(error.into()));
@@ -293,7 +293,7 @@ where
 impl Peer {
     /// Splits `iters` bodies of `len` bytes into batches. Over TCP a body larger than
     /// [`BATCH_LEN`] moves in parts, so every batch fits the socket buffers.
-    fn batches(&self, len: usize, iters: u64) -> Batches {
+    const fn batches(&self, len: usize, iters: u64) -> Batches {
         Batches {
             len,
             split: matches!(self, Self::Tcp(_)),
@@ -303,7 +303,7 @@ impl Peer {
     }
 
     /// Bytes on the wire for `copies` of a `len`-byte part.
-    fn wire_len(&self, len: usize, copies: usize) -> usize {
+    const fn wire_len(&self, len: usize, copies: usize) -> usize {
         let tls = match self {
             Self::Memory(_) => Tls::Enabled,
             Self::Tcp(peer) => peer.tls(),
@@ -484,9 +484,9 @@ where
 /// Registers `connection`, moving it into each timed batch and back outside the clock, and
 /// finishes it once the benchmark has run.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics inside the benchmark on an I/O error or a failed data check.
+/// Returns the first failed batch operation or a missing connection state.
 fn measure<T>(
     group: &mut BenchmarkGroup<'_, WallTime>,
     runtime: &Runtime,
@@ -498,21 +498,33 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     let slot = &Cell::new(Some(connection));
+    // Criterion's asynchronous timing API returns a duration, not a Result.
+    // Keep errors outside the measured closure for propagation after the run.
+    let failure = Cell::new(None::<BoxError>);
     group.bench_function(label, |bencher| {
         bencher.to_async(runtime).iter_custom(|iters| {
-            let mut connection = slot
-                .take()
-                .expect("the connection returns after every batch");
+            let next = slot.take();
+            let failure = &failure;
             async move {
+                let Some(mut connection) = next else {
+                    failure.set(Some("the connection did not return after a batch".into()));
+                    return Duration::ZERO;
+                };
                 let elapsed = match connection.run(case, iters).await {
                     Ok(elapsed) => elapsed,
-                    Err(error) => panic!("{}", connection.explain(error)),
+                    Err(error) => {
+                        failure.set(Some(connection.explain(error)));
+                        Duration::ZERO
+                    }
                 };
                 slot.set(Some(connection));
                 elapsed
             }
         });
     });
+    if let Some(error) = failure.take() {
+        return Err(error);
+    }
     let connection = slot.take().ok_or("the connection did not return")?;
     runtime.block_on(connection.finish(case))
 }
@@ -533,7 +545,7 @@ where
     for _ in 0..iters {
         last = read_part(stream, buf, case, 0..body.len(), |_, _| true).await?;
     }
-    let elapsed = stopwatch.elapsed();
+    let elapsed = stopwatch.elapsed()?;
     check_tail(buf, last, body)?;
     Ok(elapsed)
 }
@@ -548,7 +560,7 @@ where
     for _ in 0..iters {
         write_part(stream, body, case).await?;
     }
-    Ok(stopwatch.elapsed())
+    Ok(stopwatch.elapsed()?)
 }
 
 /// Reads `iters` bodies in batches the server queues before the clock starts, passing each read
@@ -577,7 +589,7 @@ where
         for _ in 0..batch.copies {
             last = read_part(stream, buf, case, batch.part.clone(), &mut check).await?;
         }
-        elapsed += stopwatch.elapsed();
+        elapsed += stopwatch.elapsed()?;
 
         check_tail(buf, last, &body[..batch.part.end])?;
         match peer.queued()? {
@@ -609,7 +621,7 @@ where
             for _ in 0..batch.copies {
                 write_part(stream, part, case).await?;
             }
-            elapsed += stopwatch.elapsed();
+            elapsed += stopwatch.elapsed()?;
         }
         peer.receive(part, batch.copies).await?;
     }
@@ -635,7 +647,7 @@ where
         for _ in 0..copies {
             write_part(stream, part, case).await?;
         }
-        Ok::<_, io::Error>(stopwatch.elapsed())
+        stopwatch.elapsed()
     };
     tokio::time::timeout(patience, write)
         .await

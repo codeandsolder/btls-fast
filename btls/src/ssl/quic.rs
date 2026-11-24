@@ -1,6 +1,6 @@
 //! QUIC support for TLS 1.3 connections ([RFC 9001](https://www.rfc-editor.org/rfc/rfc9001)).
 //!
-//! A QUIC connection has no BIO. BoringSSL hands its secrets and handshake messages to the
+//! A QUIC connection has no BIO. `BoringSSL` hands its secrets and handshake messages to the
 //! [`QuicMethod`] of the context instead of writing records, and takes the peer's handshake
 //! messages through [`Ssl::provide_quic_data`].
 //!
@@ -21,7 +21,7 @@ use std::{ptr, slice};
 pub struct QuicEncryptionLevel(ffi::ssl_encryption_level_t);
 
 impl QuicEncryptionLevel {
-    /// Protects the ClientHello and ServerHello.
+    /// Protects the `ClientHello` and `ServerHello`.
     pub const INITIAL: Self = Self(ffi::ssl_encryption_level_t::ssl_encryption_initial);
     /// Protects client 0-RTT data. The handshake itself never writes at this level.
     pub const EARLY_DATA: Self = Self(ffi::ssl_encryption_level_t::ssl_encryption_early_data);
@@ -37,14 +37,18 @@ pub struct QuicMethodError;
 
 /// The QUIC hooks of a context (`SSL_QUIC_METHOD`), see [`SslContextBuilder::set_quic_method`].
 ///
-/// BoringSSL calls them from inside [`Ssl::do_handshake`] and
+/// `BoringSSL` calls them from inside [`Ssl::do_handshake`] and
 /// [`Ssl::process_quic_post_handshake`], and from calls that send an alert, never from
 /// [`Ssl::provide_quic_data`]. Callbacks receive an [`SslRef`] for configuration and queries;
 /// handshake input and driving require the [`Ssl`] owner after the callback returns.
 /// Per-connection state belongs in the connection's ex data. An error terminates the handshake.
 pub trait QuicMethod: Send + Sync + 'static {
-    /// Installs the read secret and cipher suite of `level`. BoringSSL calls it at most once per
+    /// Installs the read secret and cipher suite of `level`. `BoringSSL` calls it at most once per
     /// level, and only after the write secret that ACKs the packets it protects.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot install the negotiated read secret.
     fn set_read_secret(
         &self,
         ssl: &mut SslRef,
@@ -60,6 +64,10 @@ pub trait QuicMethod: Send + Sync + 'static {
     /// asked for a certificate is not authenticated yet. After a 0-RTT reject, the
     /// [`QuicEncryptionLevel::EARLY_DATA`] secret may use another cipher suite than the other
     /// levels.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot install the negotiated write secret.
     fn set_write_secret(
         &self,
         ssl: &mut SslRef,
@@ -69,6 +77,10 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 
     /// Adds handshake data to the current flight at `level`.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot queue the handshake bytes.
     fn add_handshake_data(
         &self,
         ssl: &mut SslRef,
@@ -77,9 +89,17 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 
     /// Signals that the current flight, which may span several levels, is complete.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot flush the current handshake flight.
     fn flush_flight(&self, ssl: &mut SslRef) -> Result<(), QuicMethodError>;
 
     /// Sends a fatal alert at `level`.
+    ///
+    /// # Errors
+    ///
+    /// The transport cannot send the alert.
     fn send_alert(
         &self,
         ssl: &mut SslRef,
@@ -88,7 +108,7 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 }
 
-/// The `SSL_QUIC_METHOD` of `M`, which BoringSSL keeps a pointer to.
+/// The `SSL_QUIC_METHOD` of `M`, which `BoringSSL` keeps a pointer to.
 struct QuicMethodTable<M>(PhantomData<M>);
 
 impl<M: QuicMethod> QuicMethodTable<M> {
@@ -109,11 +129,20 @@ impl SslContextBuilder {
     /// callbacks look `method` up in its current context. A context switched in during the
     /// handshake, such as by [`SslRef::set_ssl_context`], must therefore hold a method of the
     /// same type, or the handshake fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if callback storage cannot be allocated or the native QUIC method cannot be installed.
     #[corresponds(SSL_CTX_set_quic_method)]
     pub fn set_quic_method<M: QuicMethod>(&mut self, method: M) -> Result<(), ErrorStack> {
-        self.replace_ex_data(SslContext::cached_ex_index::<M>(), method);
+        self.set_ex_data(
+            SslContext::register_callback::<M>(super::CallbackRole::Quic)?,
+            method,
+        )?;
         // A promoted constant, so the table lives for the whole program.
         let table: &'static ffi::SSL_QUIC_METHOD = &QuicMethodTable::<M>::METHOD;
+        // SAFETY: the native context is uniquely borrowed; it retains only
+        // the static function table, and the callback state lives in ex-data.
         unsafe { cvt(ffi::SSL_CTX_set_quic_method(self.as_ptr(), table)) }
     }
 }
@@ -130,6 +159,7 @@ impl Ssl {
     /// ```
     #[corresponds(SSL_set_connect_state)]
     pub fn set_connect_state(&mut self) {
+        // SAFETY: only the owner of this connection may change its role.
         unsafe { ffi::SSL_set_connect_state(self.as_ptr()) }
     }
 
@@ -144,6 +174,7 @@ impl Ssl {
     /// ```
     #[corresponds(SSL_set_accept_state)]
     pub fn set_accept_state(&mut self) {
+        // SAFETY: only the owner of this connection may change its role.
         unsafe { ffi::SSL_set_accept_state(self.as_ptr()) }
     }
 
@@ -161,7 +192,12 @@ impl Ssl {
     /// }
     /// ```
     #[corresponds(SSL_do_handshake)]
+    ///
+    /// # Errors
+    ///
+    /// The native handshake may need peer input or fail with an SSL error code.
     pub fn do_handshake(&mut self) -> Result<(), ErrorCode> {
+        // SAFETY: The owner drives the native handshake, and callback views cannot reenter it.
         let ret = unsafe { ffi::SSL_do_handshake(self.as_ptr()) };
         if ret == 1 {
             Ok(())
@@ -186,11 +222,16 @@ impl Ssl {
     /// }
     /// ```
     #[corresponds(SSL_provide_quic_data)]
+    ///
+    /// # Errors
+    ///
+    /// Native rejects invalid encryption levels, oversized input or invalid state.
     pub fn provide_quic_data(
         &mut self,
         level: QuicEncryptionLevel,
         data: &[u8],
     ) -> Result<(), ErrorStack> {
+        // SAFETY: The owner uniquely holds SSL, and native borrows the data slice only during this call.
         unsafe {
             cvt(ffi::SSL_provide_quic_data(
                 self.as_ptr(),
@@ -213,7 +254,12 @@ impl Ssl {
     /// }
     /// ```
     #[corresponds(SSL_process_quic_post_handshake)]
+    ///
+    /// # Errors
+    ///
+    /// Native rejects malformed post-handshake input or invalid state.
     pub fn process_quic_post_handshake(&mut self) -> Result<(), ErrorCode> {
+        // SAFETY: The owner drives native post-handshake state, and callbacks cannot reenter it.
         let ret = unsafe { ffi::SSL_process_quic_post_handshake(self.as_ptr()) };
         if ret == 1 {
             Ok(())
@@ -227,7 +273,12 @@ impl SslRef {
     /// Sets the transport parameters this endpoint sends
     /// ([RFC 9001 §8.2](https://www.rfc-editor.org/rfc/rfc9001#section-8.2)).
     #[corresponds(SSL_set_quic_transport_params)]
+    ///
+    /// # Errors
+    ///
+    /// The native connection may reject the parameter bytes or current state.
     pub fn set_quic_transport_params(&mut self, params: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: Native copies this readable parameter slice during an exclusive SSL borrow.
         unsafe {
             cvt(ffi::SSL_set_quic_transport_params(
                 self.as_ptr(),
@@ -239,13 +290,15 @@ impl SslRef {
 
     /// Returns the transport parameters the peer sent, once they arrived.
     #[corresponds(SSL_get_peer_quic_transport_params)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn peer_quic_transport_params(&self) -> Option<&[u8]> {
         let mut params = ptr::null();
         let mut len = 0;
+        // SAFETY: native returns a borrowed byte view into the live SSL
+        // session. A shared borrow prevents concurrent connection mutation.
         unsafe {
-            ffi::SSL_get_peer_quic_transport_params(self.as_ptr(), &mut params, &mut len);
-            if len == 0 {
+            ffi::SSL_get_peer_quic_transport_params(self.as_ptr(), &raw mut params, &raw mut len);
+            if len == 0 || params.is_null() {
                 None
             } else {
                 Some(slice::from_raw_parts(params, len))
@@ -257,6 +310,8 @@ impl SslRef {
     /// standard 57, for draft versions of QUIC.
     #[corresponds(SSL_set_quic_use_legacy_codepoint)]
     pub fn set_quic_use_legacy_codepoint(&mut self, use_legacy: bool) {
+        // SAFETY: the connection is exclusively borrowed, and bool converts
+        // infallibly to the C ABI integer flag.
         unsafe { ffi::SSL_set_quic_use_legacy_codepoint(self.as_ptr(), use_legacy.into()) }
     }
 
@@ -266,7 +321,12 @@ impl SslRef {
     /// ([RFC 9000 §7.4.1](https://www.rfc-editor.org/rfc/rfc9000#section-7.4.1)). Without it,
     /// a QUIC server issues no tickets for 0-RTT.
     #[corresponds(SSL_set_quic_early_data_context)]
+    ///
+    /// # Errors
+    ///
+    /// The native connection may reject the early-data context or its state.
     pub fn set_quic_early_data_context(&mut self, context: &[u8]) -> Result<(), ErrorStack> {
+        // SAFETY: The connection is exclusive and native copies the readable context slice.
         unsafe {
             cvt(ffi::SSL_set_quic_early_data_context(
                 self.as_ptr(),
@@ -280,8 +340,9 @@ impl SslRef {
     ///
     /// BoringSSL asserts that the connection is a QUIC one in debug builds.
     #[corresponds(SSL_quic_read_level)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn quic_read_level(&self) -> QuicEncryptionLevel {
+        // SAFETY: The native QUIC session is live and shared-borrowed.
         QuicEncryptionLevel(unsafe { ffi::SSL_quic_read_level(self.as_ptr()) })
     }
 
@@ -289,43 +350,52 @@ impl SslRef {
     ///
     /// BoringSSL asserts that the connection is a QUIC one in debug builds.
     #[corresponds(SSL_quic_write_level)]
-    #[must_use]
+    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
     pub fn quic_write_level(&self) -> QuicEncryptionLevel {
+        // SAFETY: The native QUIC session is live and shared-borrowed.
         QuicEncryptionLevel(unsafe { ffi::SSL_quic_write_level(self.as_ptr()) })
     }
 
     /// Returns the most handshake data the peer may send at `level`, to bound buffering
     /// ([RFC 9000 §7.5](https://www.rfc-editor.org/rfc/rfc9000#section-7.5)).
     #[corresponds(SSL_quic_max_handshake_flight_len)]
-    #[must_use]
+    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
     pub fn quic_max_handshake_flight_len(&self, level: QuicEncryptionLevel) -> usize {
+        // SAFETY: the native QUIC session stays borrowed for this size query.
         unsafe { ffi::SSL_quic_max_handshake_flight_len(self.as_ptr(), level.0) }
     }
 }
 
 /// Finds the [`QuicMethod`] of the context `ssl` belongs to and runs `f` with it. A missing
 /// method fails like `f`.
-fn with_method<M: QuicMethod>(
+///
+/// # Safety
+///
+/// The pointer must refer to the live native SSL connection invoking the
+/// QUIC callback; it remains uniquely accessible throughout the callback.
+unsafe fn with_method<M: QuicMethod>(
     ssl: *mut ffi::SSL,
     f: impl FnOnce(&M, &mut SslRef) -> Result<(), QuicMethodError>,
 ) -> c_int {
     // SAFETY: BoringSSL passes the callbacks the `SSL` they run for.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     let ssl_context = ssl.ssl_context().to_owned();
-    let Some(method) = ssl_context.ex_data(SslContext::cached_ex_index::<M>()) else {
+    let Some(method) = ssl_context.callback::<M>(super::CallbackRole::Quic) else {
         return 0;
     };
-    f(method, ssl).is_ok().into()
+    crate::util::catch_native(|| f(method, ssl).is_ok())
+        .unwrap_or(false)
+        .into()
 }
 
-/// Pushes `SSL_R_QUIC_INTERNAL_ERROR` for a failed secret callback. BoringSSL does so for the
+/// Pushes `SSL_R_QUIC_INTERNAL_ERROR` for a failed secret callback. `BoringSSL` does so for the
 /// other callbacks, but not these, which would leave the error queue empty.
 fn secret_result(ret: c_int) -> c_int {
     if ret == 0 {
         // SAFETY: the file name is a static C string.
         unsafe {
             ffi::ERR_put_error(
-                ffi::ERR_LIB_SSL.0 as c_int,
+                ffi::ERR_LIB_SSL.0.cast_signed(),
                 0,
                 ffi::SSL_R_QUIC_INTERNAL_ERROR,
                 concat!(file!(), "\0").as_ptr().cast(),
@@ -336,6 +406,42 @@ fn secret_result(ret: c_int) -> c_int {
     ret
 }
 
+type SecretApplication<M> =
+    fn(&M, &mut SslRef, QuicEncryptionLevel, &SslCipherRef, &[u8]) -> Result<(), QuicMethodError>;
+
+/// Dispatches a native secret callback with one shared validated byte view.
+///
+/// # Safety
+///
+/// The native caller supplies a live SSL connection, and non-null cipher and
+/// secret storage for every nonempty secret during the synchronous callback.
+unsafe fn dispatch_secret<M: QuicMethod>(
+    ssl: *mut ffi::SSL,
+    level: ffi::ssl_encryption_level_t,
+    cipher: *const ffi::SSL_CIPHER,
+    secret: *const u8,
+    secret_len: usize,
+    apply: SecretApplication<M>,
+) -> c_int {
+    if cipher.is_null() || (secret_len != 0 && secret.is_null()) {
+        return secret_result(0);
+    }
+    // SAFETY: the native callback supplies an immutable live cipher object.
+    let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
+    let secret = if secret_len == 0 {
+        &[]
+    } else {
+        // SAFETY: native keeps secret_len bytes readable until callback return.
+        unsafe { slice::from_raw_parts(secret, secret_len) }
+    };
+    // SAFETY: ssl remains live and uniquely accessible for the native callback.
+    secret_result(unsafe {
+        with_method::<M>(ssl, |method, ssl| {
+            apply(method, ssl, QuicEncryptionLevel(level), cipher, secret)
+        })
+    })
+}
+
 unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
@@ -343,12 +449,8 @@ unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
-    // SAFETY: BoringSSL passes the cipher suite and a secret of `secret_len` bytes.
-    let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
-    let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
-    secret_result(with_method::<M>(ssl, |method, ssl| {
-        method.set_read_secret(ssl, QuicEncryptionLevel(level), cipher, secret)
-    }))
+    // SAFETY: the native QUIC callback passes a live SSL, cipher, and secret.
+    unsafe { dispatch_secret::<M>(ssl, level, cipher, secret, secret_len, M::set_read_secret) }
 }
 
 unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
@@ -358,12 +460,8 @@ unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
     secret: *const u8,
     secret_len: usize,
 ) -> c_int {
-    // SAFETY: BoringSSL passes the cipher suite and a secret of `secret_len` bytes.
-    let cipher = unsafe { SslCipherRef::from_ptr(cipher.cast_mut()) };
-    let secret = unsafe { slice::from_raw_parts(secret, secret_len) };
-    secret_result(with_method::<M>(ssl, |method, ssl| {
-        method.set_write_secret(ssl, QuicEncryptionLevel(level), cipher, secret)
-    }))
+    // SAFETY: the native QUIC callback passes a live SSL, cipher, and secret.
+    unsafe { dispatch_secret::<M>(ssl, level, cipher, secret, secret_len, M::set_write_secret) }
 }
 
 unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
@@ -373,14 +471,24 @@ unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
     len: usize,
 ) -> c_int {
     // SAFETY: BoringSSL passes `len` bytes of handshake data.
-    let data = unsafe { slice::from_raw_parts(data, len) };
-    with_method::<M>(ssl, |method, ssl| {
-        method.add_handshake_data(ssl, QuicEncryptionLevel(level), data)
-    })
+    // A zero-length native buffer is permitted to have a null pointer.
+    let data = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: native keeps these reported handshake bytes readable.
+        unsafe { slice::from_raw_parts(data, len) }
+    };
+    // SAFETY: native keeps the SSL owner alive for this callback.
+    unsafe {
+        with_method::<M>(ssl, |method, ssl| {
+            method.add_handshake_data(ssl, QuicEncryptionLevel(level), data)
+        })
+    }
 }
 
 unsafe extern "C" fn raw_flush_flight<M: QuicMethod>(ssl: *mut ffi::SSL) -> c_int {
-    with_method::<M>(ssl, |method, ssl| method.flush_flight(ssl))
+    // SAFETY: native keeps the SSL owner alive for this callback.
+    unsafe { with_method::<M>(ssl, M::flush_flight) }
 }
 
 unsafe extern "C" fn raw_send_alert<M: QuicMethod>(
@@ -388,7 +496,10 @@ unsafe extern "C" fn raw_send_alert<M: QuicMethod>(
     level: ffi::ssl_encryption_level_t,
     alert: u8,
 ) -> c_int {
-    with_method::<M>(ssl, |method, ssl| {
-        method.send_alert(ssl, QuicEncryptionLevel(level), SslAlert(alert.into()))
-    })
+    // SAFETY: native keeps the SSL owner alive for this callback.
+    unsafe {
+        with_method::<M>(ssl, |method, ssl| {
+            method.send_alert(ssl, QuicEncryptionLevel(level), SslAlert(alert.into()))
+        })
+    }
 }

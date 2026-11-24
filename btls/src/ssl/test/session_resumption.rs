@@ -15,7 +15,7 @@ use crate::ssl::SslSessionCacheMode;
 use crate::ssl::SslVerifyError;
 use crate::ssl::SslVerifyMode;
 use crate::ssl::SslVersion;
-use crate::ssl::TicketKeyCallbackResult;
+use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
 use crate::symm::Cipher;
 use crate::symm::CipherCtxRef;
 use crate::x509::extension::SubjectAlternativeName;
@@ -45,11 +45,14 @@ fn resume_session() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-        // The server sends multiple session tickets but we only care to retrieve one.
-        let _ = SESSION_TICKET.set(session);
-    });
+    client
+        .ctx()
+        .set_new_session_callback(|_, session| {
+            NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
+            // The server sends multiple session tickets but we only care to retrieve one.
+            let _ = SESSION_TICKET.set(session);
+        })
+        .unwrap();
     let ssl_stream = client.connect();
 
     assert!(!ssl_stream.ssl().session_reused());
@@ -107,10 +110,14 @@ fn client_session_cache_apis() {
         .set_custom_verify_callback(SslVerifyMode::PEER, move |_| {
             callback_verify_count.fetch_add(1, Ordering::SeqCst);
             Ok::<_, SslVerifyError>(())
-        });
-    client.ctx().set_new_session_callback(move |_, session| {
-        callback_sessions.lock().unwrap().push(session);
-    });
+        })
+        .unwrap();
+    client
+        .ctx()
+        .set_new_session_callback(move |_, session| {
+            callback_sessions.lock().unwrap().push(session);
+        })
+        .unwrap();
     let client = client.build();
 
     let first = client.builder().connect();
@@ -152,9 +159,11 @@ fn client_session_resumes_within_scope_and_domain() {
         connector.set_ca_file("test/root-ca.pem").unwrap();
         connector.set_session_id_context(scope).unwrap();
         let sessions = sessions.clone();
-        connector.set_client_session_callback(move |_, session| {
-            sessions.lock().unwrap().push(session);
-        });
+        connector
+            .set_client_session_callback(move |_, session| {
+                sessions.lock().unwrap().push(session);
+            })
+            .unwrap();
         connector.build()
     };
     let issue = |connector: &SslConnector, configure: fn(&mut ConnectConfiguration)| {
@@ -227,8 +236,8 @@ fn client_session_resumes_within_scope_and_domain() {
 #[test]
 fn client_session_is_not_offered_after_its_chain_expires() {
     // A foobar.com leaf from the test root that expired a day ago.
-    let day: libc::time_t = 24 * 60 * 60;
-    let now: libc::time_t = SystemTime::now()
+    let day: i64 = 24 * 60 * 60;
+    let now: i64 = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
@@ -239,13 +248,13 @@ fn client_session_is_not_offered_after_its_chain_expires() {
     let ca_key = PKey::private_key_from_pem(&fs::read("test/root-ca.key").unwrap()).unwrap();
     let mut name = X509Name::builder().unwrap();
     name.append_entry_by_text("CN", "foobar.com").unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
     let mut leaf = X509::builder().unwrap();
     leaf.set_version(2).unwrap();
     let serial = BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap();
     leaf.set_serial_number(&serial).unwrap();
     leaf.set_subject_name(&name).unwrap();
-    leaf.set_issuer_name(ca.subject_name()).unwrap();
+    leaf.set_issuer_name(ca.subject_name().unwrap()).unwrap();
     leaf.set_pubkey(&key).unwrap();
     leaf.set_not_before(&Asn1Time::from_unix(now - 2 * day).unwrap())
         .unwrap();
@@ -267,7 +276,9 @@ fn client_session_is_not_offered_after_its_chain_expires() {
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_ca_file("test/root-ca.pem").unwrap();
     let issued = sessions.clone();
-    connector.set_client_session_callback(move |_, session| issued.lock().unwrap().push(session));
+    connector
+        .set_client_session_callback(move |_, session| issued.lock().unwrap().push(session))
+        .unwrap();
     let connector = connector.build();
 
     // Verified as of a time inside the validity period.
@@ -294,60 +305,42 @@ fn client_session_is_not_offered_after_its_chain_expires() {
 
 #[test]
 fn custom_callback_success() {
-    static SESSION_TICKET: OnceLock<SslSession> = OnceLock::new();
-    static NST_RECIEVED_COUNT: AtomicU8 = AtomicU8::new(0);
-
-    let mut server = Server::builder();
-    server.expected_connections_count(2);
-    unsafe {
-        server
-            .ctx()
-            .set_ticket_key_callback(test_success_tickey_key_callback);
-    };
-    let server = server.build();
-
-    let mut client = server.client();
-    client
-        .ctx()
-        .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-        // The server sends multiple session tickets but we only care to retrieve one.
-        let _ = SESSION_TICKET.set(session);
-    });
-    let ssl_stream = client.connect();
-
-    assert!(!ssl_stream.ssl().session_reused());
-    assert!(SESSION_TICKET.get().is_some());
-    assert_eq!(SUCCESS_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 2);
-    assert_eq!(SUCCESS_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 0);
-    assert_eq!(NST_RECIEVED_COUNT.load(Ordering::SeqCst), 2);
-
-    // Retrieve the session ticket
-    let session_ticket = SESSION_TICKET.get().unwrap();
-
-    // Attempt to resume the connection using the session ticket
-    let client_2 = server.client();
-    let mut ssl_builder = client_2.build().builder();
-    unsafe { ssl_builder.ssl().set_session(session_ticket).unwrap() };
-    let ssl_stream_2 = ssl_builder.connect();
-
-    assert!(ssl_stream_2.ssl().session_reused());
-    assert_eq!(SUCCESS_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 4);
-    assert_eq!(SUCCESS_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 1);
+    custom_callback_roundtrip(
+        test_success_tickey_key_callback,
+        &SUCCESS_ENCRYPTION_CALLED_BACK,
+        &SUCCESS_DECRYPTION_CALLED_BACK,
+        true,
+    );
 }
 
 #[test]
 fn custom_callback_unrecognized_decryption_ticket() {
-    static SESSION_TICKET: OnceLock<SslSession> = OnceLock::new();
-    static NST_RECIEVED_COUNT: AtomicU8 = AtomicU8::new(0);
+    custom_callback_roundtrip(
+        test_noop_tickey_key_callback,
+        &NOOP_ENCRYPTION_CALLED_BACK,
+        &NOOP_DECRYPTION_CALLED_BACK,
+        false,
+    );
+}
+
+fn custom_callback_roundtrip(
+    callback: fn(
+        &SslRef,
+        TicketKeyMode<'_>,
+        &mut CipherCtxRef,
+        &mut HmacCtxRef,
+    ) -> TicketKeyCallbackResult,
+    encryptions: &AtomicU8,
+    decryptions: &AtomicU8,
+    resumed: bool,
+) {
+    let session_ticket = std::sync::Arc::new(OnceLock::new());
+    let received = std::sync::Arc::new(AtomicU8::new(0));
 
     let mut server = Server::builder();
     server.expected_connections_count(2);
     unsafe {
-        server
-            .ctx()
-            .set_ticket_key_callback(test_noop_tickey_key_callback);
+        server.ctx().set_ticket_key_callback(callback).unwrap();
     };
     let server = server.build();
 
@@ -355,21 +348,26 @@ fn custom_callback_unrecognized_decryption_ticket() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        NST_RECIEVED_COUNT.fetch_add(1, Ordering::SeqCst);
-        // The server sends multiple session tickets but we only care to retrieve one.
-        let _ = SESSION_TICKET.set(session);
-    });
+    let ticket_out = session_ticket.clone();
+    let received_out = received.clone();
+    client
+        .ctx()
+        .set_new_session_callback(move |_, session| {
+            received_out.fetch_add(1, Ordering::SeqCst);
+            // The server sends multiple session tickets but we only care to retrieve one.
+            let _ = ticket_out.set(session);
+        })
+        .unwrap();
     let ssl_stream = client.connect();
 
     assert!(!ssl_stream.ssl().session_reused());
-    assert!(SESSION_TICKET.get().is_some());
-    assert_eq!(NOOP_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 2);
-    assert_eq!(NOOP_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 0);
-    assert_eq!(NST_RECIEVED_COUNT.load(Ordering::SeqCst), 2);
+    assert!(session_ticket.get().is_some());
+    assert_eq!(encryptions.load(Ordering::SeqCst), 2);
+    assert_eq!(decryptions.load(Ordering::SeqCst), 0);
+    assert_eq!(received.load(Ordering::SeqCst), 2);
 
     // Retrieve the session ticket
-    let session_ticket = SESSION_TICKET.get().unwrap();
+    let session_ticket = session_ticket.get().unwrap();
 
     // Attempt to resume the connection using the session ticket
     let client_2 = server.client();
@@ -377,21 +375,18 @@ fn custom_callback_unrecognized_decryption_ticket() {
     unsafe { ssl_builder.ssl().set_session(session_ticket).unwrap() };
     let ssl_stream_2 = ssl_builder.connect();
 
-    // Second connection was NOT resumed due to TicketKeyCallbackResult::Noop on decryption
-    assert!(!ssl_stream_2.ssl().session_reused());
-    assert_eq!(NOOP_ENCRYPTION_CALLED_BACK.load(Ordering::SeqCst), 4);
-    assert_eq!(NOOP_DECRYPTION_CALLED_BACK.load(Ordering::SeqCst), 1);
+    assert_eq!(ssl_stream_2.ssl().session_reused(), resumed);
+    assert_eq!(encryptions.load(Ordering::SeqCst), 4);
+    assert_eq!(decryptions.load(Ordering::SeqCst), 1);
 }
 
 // Successfully return a session ticket in encryption mode but return a
 // TicketKeyCallbackResult::Noop in decryption mode.
 fn test_noop_tickey_key_callback(
     _ssl: &SslRef,
-    key_name: &mut [u8; 16],
-    iv: &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    mode: TicketKeyMode<'_>,
     evp_ctx: &mut CipherCtxRef,
     hmac_ctx: &mut HmacCtxRef,
-    encrypt: bool,
 ) -> TicketKeyCallbackResult {
     // These should only be used for testing purposes.
     const TEST_KEY_NAME: [u8; 16] = [5; 16];
@@ -402,42 +397,48 @@ fn test_noop_tickey_key_callback(
     let digest = MessageDigest::sha256();
     let cipher = Cipher::aes_128_cbc();
 
-    if encrypt {
-        NOOP_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+    match mode {
+        TicketKeyMode::Encrypt { key_name, iv } => {
+            NOOP_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Ensure key_name and iv are initialized and set test values.
-        assert_eq!(key_name, &[0; 16]);
-        assert_eq!(iv, &[0; 16]);
-        key_name.copy_from_slice(&TEST_KEY_NAME);
-        iv.copy_from_slice(&TEST_CBC_IV);
+            // Ensure key_name and iv are initialized and set test values.
+            assert_eq!(key_name, &[0; 16]);
+            assert_eq!(iv, &[0; 16]);
+            key_name.copy_from_slice(&TEST_KEY_NAME);
+            iv.copy_from_slice(&TEST_CBC_IV);
 
-        // Set the encryption context.
-        evp_ctx
-            .init_encrypt(&cipher, &TEST_AES_128_CBC_KEY, &TEST_CBC_IV)
-            .unwrap();
+            // Set the encryption context.
+            evp_ctx
+                .init(
+                    cipher,
+                    crate::symm::Mode::Encrypt,
+                    &TEST_AES_128_CBC_KEY,
+                    Some(&TEST_CBC_IV),
+                )
+                .unwrap();
 
-        // Set the hmac context.
-        hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+            // Set the hmac context.
+            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
 
-        TicketKeyCallbackResult::Success
-    } else {
-        NOOP_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+            TicketKeyCallbackResult::Success
+        }
+        TicketKeyMode::Decrypt { key_name, iv: _ } => {
+            NOOP_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Check key_name matches.
-        assert_eq!(key_name, &TEST_KEY_NAME);
+            // Check key_name matches.
+            assert_eq!(key_name, &TEST_KEY_NAME);
 
-        TicketKeyCallbackResult::Noop
+            TicketKeyCallbackResult::Noop
+        }
     }
 }
 
 // Custom callback to encrypt and decrypt session tickets
 fn test_success_tickey_key_callback(
     _ssl: &SslRef,
-    key_name: &mut [u8; 16],
-    iv: &mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
+    mode: TicketKeyMode<'_>,
     evp_ctx: &mut CipherCtxRef,
     hmac_ctx: &mut HmacCtxRef,
-    encrypt: bool,
 ) -> TicketKeyCallbackResult {
     // These should only be used for testing purposes.
     const TEST_KEY_NAME: [u8; 16] = [5; 16];
@@ -448,35 +449,48 @@ fn test_success_tickey_key_callback(
     let digest = MessageDigest::sha256();
     let cipher = Cipher::aes_128_cbc();
 
-    if encrypt {
-        SUCCESS_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+    match mode {
+        TicketKeyMode::Encrypt { key_name, iv } => {
+            SUCCESS_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Ensure key_name and iv are initialized and set test values.
-        assert_eq!(key_name, &[0; 16]);
-        assert_eq!(iv, &[0; 16]);
-        key_name.copy_from_slice(&TEST_KEY_NAME);
-        iv.copy_from_slice(&TEST_CBC_IV);
+            // Ensure key_name and iv are initialized and set test values.
+            assert_eq!(key_name, &[0; 16]);
+            assert_eq!(iv, &[0; 16]);
+            key_name.copy_from_slice(&TEST_KEY_NAME);
+            iv.copy_from_slice(&TEST_CBC_IV);
 
-        // Set the encryption context.
-        evp_ctx
-            .init_encrypt(&cipher, &TEST_AES_128_CBC_KEY, &TEST_CBC_IV)
-            .unwrap();
+            // Set the encryption context.
+            evp_ctx
+                .init(
+                    cipher,
+                    crate::symm::Mode::Encrypt,
+                    &TEST_AES_128_CBC_KEY,
+                    Some(&TEST_CBC_IV),
+                )
+                .unwrap();
 
-        // Set the hmac context.
-        hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
-    } else {
-        SUCCESS_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
+            // Set the hmac context.
+            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+        }
+        TicketKeyMode::Decrypt { key_name, iv } => {
+            SUCCESS_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-        // Check key_name matches.
-        assert_eq!(key_name, &TEST_KEY_NAME);
+            // Check key_name matches.
+            assert_eq!(key_name, &TEST_KEY_NAME);
 
-        // Set the decryption context.
-        evp_ctx
-            .init_decrypt(&cipher, &TEST_AES_128_CBC_KEY, iv)
-            .unwrap();
+            // Set the decryption context.
+            evp_ctx
+                .init(
+                    cipher,
+                    crate::symm::Mode::Decrypt,
+                    &TEST_AES_128_CBC_KEY,
+                    Some(iv),
+                )
+                .unwrap();
 
-        // Set the hmac context.
-        hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+            // Set the hmac context.
+            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
+        }
     }
 
     TicketKeyCallbackResult::Success

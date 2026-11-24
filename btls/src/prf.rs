@@ -31,6 +31,10 @@ use crate::hash::MessageDigest;
 ///
 /// `seed` should contain the full PRF seed for the calling protocol. In TLS
 /// 1.2 this is often a concatenation of random values.
+///
+/// # Errors
+///
+/// Returns the native error stack if the PRF rejects the arguments.
 #[corresponds(CRYPTO_tls1_prf)]
 pub fn tls1_prf(
     digest: MessageDigest,
@@ -39,6 +43,9 @@ pub fn tls1_prf(
     label: &[u8],
     seed: &[u8],
 ) -> Result<(), ErrorStack> {
+    // SAFETY: the digest is a live immutable native handle. All byte slices
+    // remain valid during the synchronous PRF call; the output is exclusive
+    // and its exact writable length is supplied to BoringSSL.
     unsafe {
         ffi::init();
 

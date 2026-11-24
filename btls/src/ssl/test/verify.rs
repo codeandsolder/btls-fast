@@ -53,7 +53,8 @@ fn untrusted_callback_override_ok() {
             assert!(x509.verify_result().is_err());
 
             true
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -67,7 +68,8 @@ fn untrusted_callback_override_bad() {
     let mut client = server.client();
     client
         .ctx()
-        .set_verify_callback(SslVerifyMode::PEER, |_, _| false);
+        .set_verify_callback(SslVerifyMode::PEER, |_, _| false)
+        .unwrap();
 
     client.connect_err();
 }
@@ -84,7 +86,8 @@ fn trusted_callback_override_ok() {
             assert_eq!(x509.verify_result(), Ok(()));
 
             true
-        });
+        })
+        .unwrap();
 
     client.connect();
 }
@@ -100,7 +103,8 @@ fn trusted_callback_override_bad() {
 
     client
         .ctx()
-        .set_verify_callback(SslVerifyMode::PEER, |_, _| false);
+        .set_verify_callback(SslVerifyMode::PEER, |_, _| false)
+        .unwrap();
 
     client.connect_err();
 }
@@ -121,7 +125,8 @@ fn callback() {
             let digest = cert.digest(MessageDigest::sha1()).unwrap();
             assert_eq!(hex::encode(digest), expected);
             true
-        });
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));
@@ -143,7 +148,8 @@ fn ssl_callback() {
             let digest = cert.digest(MessageDigest::sha1()).unwrap();
             assert_eq!(hex::encode(digest), expected);
             true
-        });
+        })
+        .unwrap();
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::SeqCst));

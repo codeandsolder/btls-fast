@@ -43,12 +43,12 @@ impl ErrorStack {
     /// otherwise the stack may be empty or a leftover from unrelated calls.
     #[corresponds(ERR_get_error_line_data)]
     #[must_use = "Use ErrorStack::clear() to drop the error stack"]
-    pub fn get() -> ErrorStack {
+    pub fn get() -> Self {
         let mut vec = vec![];
         while let Some(err) = Error::get() {
             vec.push(err);
         }
-        ErrorStack(vec)
+        Self(vec)
     }
 
     /// Pushes the errors back onto the OpenSSL error stack.
@@ -74,6 +74,7 @@ impl ErrorStack {
     /// Empties the current thread's error queue.
     #[corresponds(ERR_clear_error)]
     pub(crate) fn clear() {
+        // SAFETY: clears only the calling thread's BoringSSL error queue.
         unsafe {
             ffi::ERR_clear_error();
         }
@@ -82,7 +83,7 @@ impl ErrorStack {
 
 impl ErrorStack {
     /// Returns the errors in the stack.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn errors(&self) -> &[Error] {
         &self.0
     }
@@ -115,14 +116,14 @@ impl fmt::Display for ErrorStack {
 impl error::Error for ErrorStack {}
 
 impl From<ErrorStack> for io::Error {
-    fn from(e: ErrorStack) -> io::Error {
-        io::Error::other(e)
+    fn from(e: ErrorStack) -> Self {
+        Self::other(e)
     }
 }
 
 impl From<ErrorStack> for fmt::Error {
-    fn from(_: ErrorStack) -> fmt::Error {
-        fmt::Error
+    fn from(_: ErrorStack) -> Self {
+        Self
     }
 }
 
@@ -143,7 +144,10 @@ enum Data {
     Static(&'static str),
 }
 
+// SAFETY: `file` points to a static native source filename, and the other
+// fields contain owned values, integer codes, or static strings.
 unsafe impl Sync for Error {}
+// SAFETY: moving the descriptor does not affect native error-queue ownership.
 unsafe impl Send for Error {}
 
 static BORING_INTERNAL: &CStr = c"btls-rust";
@@ -152,7 +156,10 @@ impl Error {
     /// Pops the first error off the OpenSSL error stack.
     #[must_use = "Use ErrorStack::clear() to drop the error stack"]
     #[corresponds(ERR_get_error_line_data)]
-    pub fn get() -> Option<Error> {
+    pub fn get() -> Option<Self> {
+        // SAFETY: the output pointers are writable local slots; BoringSSL
+        // provides stable source filenames and copies of dynamic error data
+        // are taken before the thread-local error slot can be overwritten.
         unsafe {
             ffi::init();
 
@@ -160,7 +167,12 @@ impl Error {
             let mut line = 0;
             let mut data = ptr::null();
             let mut flags = 0;
-            match ffi::ERR_get_error_line_data(&mut file, &mut line, &mut data, &mut flags) {
+            match ffi::ERR_get_error_line_data(
+                &raw mut file,
+                &raw mut line,
+                &raw mut data,
+                &raw mut flags,
+            ) {
                 0 => None,
                 code => {
                     // The memory referenced by data is only valid until that slot is overwritten
@@ -170,10 +182,10 @@ impl Error {
                     } else {
                         Data::None
                     };
-                    Some(Error {
+                    Some(Self {
                         code,
                         file,
-                        line: line as c_uint,
+                        line: c_uint::try_from(line).unwrap_or_default(),
                         data,
                     })
                 }
@@ -184,10 +196,12 @@ impl Error {
     /// Pushes the error back onto the OpenSSL error stack.
     #[corresponds(ERR_put_error)]
     pub fn put(&self) {
+        // SAFETY: BoringSSL accepts these decoded error fields; the borrowed
+        // C-string, when present, is valid for the duration of the call.
         unsafe {
             ffi::ERR_put_error(
                 ffi::ERR_GET_LIB(self.code),
-                ffi::ERR_GET_FUNC(self.code),
+                0,
                 ffi::ERR_GET_REASON(self.code),
                 self.file,
                 self.line,
@@ -200,31 +214,24 @@ impl Error {
 
     /// Get `{lib}_R_{reason}` reason code for the given library, or `None` if the error is from a different library.
     ///
-    /// Libraries are identified by [`ERR_LIB_{name}`(ffi::ERR_LIB_SSL) constants.
+    /// Libraries are identified by `ERR_LIB_*` constants (for example `ffi::ERR_LIB_SSL`).
     #[inline]
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     #[track_caller]
     pub fn library_reason(&self, library_code: ErrLib) -> Option<c_int> {
         debug_assert!(library_code.0 < ffi::ERR_NUM_LIBS.0);
-        (self.library_code() == library_code.0 as c_int).then_some(self.reason_code())
-    }
-
-    /// Returns a raw OpenSSL **packed** error code for this error, which **can't be reliably compared to any error constant**.
-    ///
-    /// Use [`Error::library_code()`] and [`Error::library_reason()`] instead.
-    /// Packed error codes are different than [SSL error codes](crate::ssl::ErrorCode).
-    #[must_use]
-    #[deprecated(note = "use library_reason() to compare error codes")]
-    pub fn code(&self) -> c_uint {
-        self.code
+        let native_code = c_int::try_from(library_code.0).ok()?;
+        (self.library_code() == native_code).then_some(self.reason_code())
     }
 
     /// Returns the name of the library reporting the error, if available.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn library(&self) -> Option<&'static str> {
         if self.is_internal() {
             return None;
         }
+        // SAFETY: the native lookup returns a null or static NUL-terminated
+        // error-string pointer, which is checked before creating a `CStr`.
         unsafe {
             let cstr = ffi::ERR_lib_error_string(self.code);
             if cstr.is_null() {
@@ -240,22 +247,19 @@ impl Error {
     /// Returns the raw OpenSSL error constant for the library reporting the error (`ERR_LIB_{name}`).
     ///
     /// Error [reason codes](Error::library_reason) are not globally unique, but scoped to each library.
-    #[must_use]
-    pub fn library_code(&self) -> c_int {
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub const fn library_code(&self) -> c_int {
         ffi::ERR_GET_LIB(self.code)
     }
 
-    /// Returns `None`. Boring doesn't use function codes.
-    pub fn function(&self) -> Option<&'static str> {
-        None
-    }
-
     /// Returns the reason for the error.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn reason(&self) -> Option<&str> {
         if self.is_internal() {
             return self.data();
         }
+        // SAFETY: native error-reason strings are static and NUL-terminated;
+        // a null result is checked before building the borrowed `CStr`.
         unsafe {
             let cstr = ffi::ERR_reason_error_string(self.code);
             if cstr.is_null() {
@@ -272,14 +276,16 @@ impl Error {
     ///
     /// For `ERR_LIB_SYS` the reason code is `errno`. `ERR_LIB_USER` can use any values.
     /// Other libraries may use [`ERR_R_*`](ffi::ERR_R_FATAL) or their own codes.
-    #[must_use]
-    pub fn reason_code(&self) -> c_int {
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub const fn reason_code(&self) -> c_int {
         ffi::ERR_GET_REASON(self.code)
     }
 
     /// Returns the name of the source file which encountered the error.
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub fn file(&self) -> &'static str {
+        // SAFETY: `file` is a static native source filename supplied by the
+        // error queue, or null, which we check before reading the string.
         unsafe {
             if self.file.is_null() {
                 return "";
@@ -293,14 +299,13 @@ impl Error {
     /// Returns the line in the source file which encountered the error.
     ///
     /// 0 if unknown
-    #[allow(clippy::unnecessary_cast)]
-    #[must_use]
-    pub fn line(&self) -> u32 {
-        self.line as u32
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
+    pub const fn line(&self) -> u32 {
+        self.line
     }
 
     /// Returns additional data describing the error.
-    #[must_use]
+    #[must_use = "Use the returned supplementary native error information when reporting the failure."]
     pub fn data(&self) -> Option<&str> {
         match &self.data {
             Data::None => None,
@@ -310,7 +315,7 @@ impl Error {
         }
     }
 
-    #[must_use]
+    #[must_use = "Use the returned diagnostic information to handle or report the result."]
     fn data_cstr(&self) -> Option<Cow<'_, CStr>> {
         let s = match &self.data {
             Data::None => return None,
@@ -323,7 +328,7 @@ impl Error {
 
     fn new_internal(msg: Data) -> Self {
         Self {
-            code: ffi::ERR_PACK(ffi::ERR_LIB_NONE.0 as _, 0, 0) as _,
+            code: ffi::ERR_PACK(ffi::ERR_LIB_NONE.0, 0),
             file: BORING_INTERNAL.as_ptr(),
             line: 0,
             data: msg,

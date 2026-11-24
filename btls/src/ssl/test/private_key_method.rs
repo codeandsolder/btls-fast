@@ -12,31 +12,18 @@ use std::io::Write;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
-#[allow(clippy::type_complexity)]
+type Sign = dyn Fn(&mut SslRef, &[u8], SslSignatureAlgorithm, &mut [u8]) -> Result<usize, PrivateKeyMethodError>
+    + Send
+    + Sync;
+type Decrypt =
+    dyn Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<usize, PrivateKeyMethodError> + Send + Sync;
+type Complete =
+    dyn Fn(&mut SslRef, &mut [u8]) -> Result<usize, PrivateKeyMethodError> + Send + Sync;
+
 pub(super) struct Method {
-    sign: Box<
-        dyn Fn(
-                &mut SslRef,
-                &[u8],
-                SslSignatureAlgorithm,
-                &mut [u8],
-            ) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    >,
-    decrypt: Box<
-        dyn Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    >,
-    complete: Box<
-        dyn Fn(&mut SslRef, &mut [u8]) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    >,
+    sign: Box<Sign>,
+    decrypt: Box<Decrypt>,
+    complete: Box<Complete>,
 }
 
 impl Method {
@@ -61,19 +48,6 @@ impl Method {
             + 'static,
     ) -> Self {
         self.sign = Box::new(sign);
-
-        self
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn decrypt(
-        mut self,
-        decrypt: impl Fn(&mut SslRef, &[u8], &mut [u8]) -> Result<usize, PrivateKeyMethodError>
-            + Send
-            + Sync
-            + 'static,
-    ) -> Self {
-        self.decrypt = Box::new(decrypt);
 
         self
     }
@@ -120,10 +94,27 @@ impl PrivateKeyMethod for Method {
     }
 }
 
+#[test]
+fn native_private_key_method_tables_have_static_identity() {
+    use crate::ssl::callbacks::PrivateKeyMethodDescriptor;
+
+    let context = PrivateKeyMethodDescriptor::<Method, false>::descriptor();
+    let context_again = PrivateKeyMethodDescriptor::<Method, false>::descriptor();
+    let credential = PrivateKeyMethodDescriptor::<Method, true>::descriptor();
+
+    assert!(std::ptr::eq(context, context_again));
+    assert!(context.sign.is_some());
+    assert!(context.decrypt.is_some());
+    assert!(context.complete.is_some());
+    assert!(credential.sign.is_some());
+    assert!(credential.decrypt.is_some());
+    assert!(credential.complete.is_some());
+}
+
 fn builder_with_private_key_method(method: Method) -> Builder {
     let mut builder = Server::builder();
 
-    builder.ctx().set_private_key_method(method);
+    builder.ctx().set_private_key_method(method).unwrap();
 
     builder
 }
@@ -153,6 +144,35 @@ fn test_sign_failure() {
     client.connect_err();
 
     assert!(called_sign.load(Ordering::SeqCst));
+}
+
+#[test]
+fn invalid_private_key_output_fails_handshake() {
+    let checked_output = Arc::new(AtomicBool::new(false));
+    let checked = checked_output.clone();
+    let mut builder =
+        builder_with_private_key_method(Method::new().sign(move |_, _, _, output| {
+            checked.store(output.iter().all(|&byte| byte == 0), Ordering::SeqCst);
+            Ok(output.len() + 1)
+        }));
+    builder.should_error();
+    let server = builder.build();
+    server.client_with_root_ca().connect_err();
+    assert!(checked_output.load(Ordering::SeqCst));
+}
+
+#[test]
+fn private_key_callback_panic_fails_handshake() {
+    let invoked = Arc::new(AtomicBool::new(false));
+    let called = invoked.clone();
+    let mut builder = builder_with_private_key_method(Method::new().sign(move |_, _, _, _| {
+        called.store(true, Ordering::SeqCst);
+        panic!("application signature callback failed");
+    }));
+    builder.should_error();
+    let server = builder.build();
+    server.client_with_root_ca().connect_err();
+    assert!(invoked.load(Ordering::SeqCst));
 }
 
 #[test]
@@ -262,6 +282,55 @@ fn test_sign_retry_complete_ok() {
     let client = server.client_with_root_ca();
 
     client.connect();
+}
+
+#[cfg(feature = "rpk")]
+#[test]
+fn raw_public_key_uses_credential_specific_method() {
+    use crate::ssl::{CertificateType, SslAlert, SslCredential, SslVerifyError, SslVerifyMode};
+    let invoked = Arc::new(AtomicBool::new(false));
+    let called = invoked.clone();
+    let key = PKey::private_key_from_pem(KEY).unwrap();
+    let mut credential = SslCredential::new_raw_public_key().unwrap();
+    credential
+        .set_spki_bytes(Some(&key.public_key_to_der().unwrap()))
+        .unwrap();
+    credential
+        .set_private_key_method(Method::new().sign(move |_, input, algorithm, output| {
+            assert_eq!(algorithm, SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256);
+            called.store(true, Ordering::SeqCst);
+            Ok(sign_with_default_config(input, output))
+        }))
+        .unwrap();
+    let credential = credential.build();
+    // The context-wide handler has exactly the same Rust type but must not run.
+    let mut builder = builder_with_private_key_method(
+        Method::new().sign(|_, _, _, _| Err(PrivateKeyMethodError::FAILURE)),
+    );
+    builder.ctx().add_credential(&credential).unwrap();
+    drop(credential);
+    let server = builder.build();
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_server_certificate_types(&[CertificateType::RAW_PUBLIC_KEY])
+        .unwrap();
+    client
+        .ctx()
+        .set_verify_algorithm_prefs(&[SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256])
+        .unwrap();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            if ssl.peer_pubkey().is_some_and(|peer| peer.public_eq(&key)) {
+                Ok(())
+            } else {
+                Err(SslVerifyError::Invalid(SslAlert::BAD_CERTIFICATE))
+            }
+        })
+        .unwrap();
+    client.connect();
+    assert!(invoked.load(Ordering::SeqCst));
 }
 
 fn sign_with_default_config(input: &[u8], output: &mut [u8]) -> usize {

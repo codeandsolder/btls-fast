@@ -47,357 +47,210 @@ use crate::ffi;
 use libc::c_void;
 use std::mem::MaybeUninit;
 
-/// Computes the SHA1 hash of some data.
-///
-/// # Warning
-///
-/// SHA1 is known to be insecure - it should not be used unless required for
-/// compatibility with existing systems.
-#[inline]
-#[must_use]
-pub fn sha1(data: &[u8]) -> [u8; 20] {
-    unsafe {
-        let mut hash: MaybeUninit<[u8; 20]> = MaybeUninit::uninit();
-        ffi::SHA1(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
-        hash.assume_init()
-    }
-}
-
-/// Computes the SHA224 hash of some data.
-#[inline]
-#[must_use]
-pub fn sha224(data: &[u8]) -> [u8; 28] {
-    unsafe {
-        let mut hash: MaybeUninit<[u8; 28]> = MaybeUninit::uninit();
-        ffi::SHA224(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
-        hash.assume_init()
-    }
-}
-
-/// Computes the SHA256 hash of some data.
-#[inline]
-#[must_use]
-pub fn sha256(data: &[u8]) -> [u8; 32] {
-    unsafe {
-        let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
-        ffi::SHA256(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
-        hash.assume_init()
-    }
-}
-
-/// Computes the SHA384 hash of some data.
-#[inline]
-#[must_use]
-pub fn sha384(data: &[u8]) -> [u8; 48] {
-    unsafe {
-        let mut hash: MaybeUninit<[u8; 48]> = MaybeUninit::uninit();
-        ffi::SHA384(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
-        hash.assume_init()
-    }
-}
-
-/// Computes the SHA512 hash of some data.
-#[inline]
-#[must_use]
-pub fn sha512(data: &[u8]) -> [u8; 64] {
-    unsafe {
-        let mut hash: MaybeUninit<[u8; 64]> = MaybeUninit::uninit();
-        ffi::SHA512(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
-        hash.assume_init()
-    }
-}
-
-/// Computes the SHA512-256 hash of some data.
-#[inline]
-#[must_use]
-pub fn sha512_256(data: &[u8]) -> [u8; 32] {
-    unsafe {
-        let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
-        ffi::SHA512_256(data.as_ptr(), data.len(), hash.as_mut_ptr().cast());
-        hash.assume_init()
-    }
-}
-
-/// An object which calculates a SHA1 hash of some data.
-///
-/// # Warning
-///
-/// SHA1 is known to be insecure - it should not be used unless required for
-/// compatibility with existing systems.
-#[derive(Clone)]
-pub struct Sha1(ffi::SHA_CTX);
-
-impl Default for Sha1 {
-    #[inline]
-    fn default() -> Sha1 {
-        Sha1::new()
-    }
-}
-
-impl Sha1 {
-    /// Creates a new hasher.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Sha1 {
-        unsafe {
-            let mut ctx = MaybeUninit::uninit();
-            ffi::SHA1_Init(ctx.as_mut_ptr());
-            Sha1(ctx.assume_init())
+// Every invocation pairs a context with the native functions for exactly
+// one algorithm. The storage mode records whether the native constructor
+// initializes every context field; the SHA512 family does not.
+macro_rules! define_sha {
+    (
+        $(#[$function_doc:meta])*
+        $function:ident,
+        $(#[$struct_doc:meta])*
+        $hasher:ident, $context:ident, $size:literal,
+        $storage:ident, $native_hash:ident, $init:ident, $update:ident, $finalize:ident
+    ) => {
+        $(#[$function_doc])*
+        #[inline]
+        #[must_use = "The computed digest is the result of hashing the input."]
+        pub fn $function(data: &[u8]) -> [u8; $size] {
+            let mut digest = MaybeUninit::<[u8; $size]>::uninit();
+            // SAFETY: The input is readable for data.len() bytes. The paired
+            // native function writes the entire fixed-size digest.
+            unsafe {
+                ffi::$native_hash(data.as_ptr(), data.len(), digest.as_mut_ptr().cast());
+                digest.assume_init()
+            }
         }
-    }
 
-    /// Feeds some data into the hasher.
+        $(#[$struct_doc])*
+        #[derive(Clone)]
+        pub struct $hasher(ffi::$context);
+
+        impl Default for $hasher {
+            #[inline]
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $hasher {
+            /// Creates a new hasher.
+            #[inline]
+            #[must_use = "The returned hasher owns the initialized state for subsequent updates."]
+            pub fn new() -> Self {
+                let mut ctx = MaybeUninit::<ffi::$context>::$storage();
+                // SAFETY: The selected storage mode and native constructor
+                // together initialize every field. SHA1/224/256 clear the
+                // complete integer-only context; the SHA512 family sets its
+                // chaining state and counters, leaving the pre-zeroed buffer.
+                unsafe {
+                    ffi::$init(ctx.as_mut_ptr());
+                    Self(ctx.assume_init())
+                }
+            }
+
+            /// Feeds more data into the hasher.
+            #[inline]
+            pub fn update(&mut self, buf: &[u8]) {
+                // SAFETY: The context is initialized and uniquely borrowed.
+                // The native update reads at most buf.len() bytes.
+                unsafe {
+                    ffi::$update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
+                }
+            }
+
+            /// Returns the hash of the data.
+            #[inline]
+            #[must_use = "The computed digest is the result of consuming this hasher."]
+            pub fn finish(mut self) -> [u8; $size] {
+                let mut digest = MaybeUninit::<[u8; $size]>::uninit();
+                // SAFETY: The private context was initialized by its matching
+                // constructor; finalization writes the complete digest.
+                unsafe {
+                    ffi::$finalize(digest.as_mut_ptr().cast(), &mut self.0);
+                    digest.assume_init()
+                }
+            }
+        }
+    };
+}
+
+define_sha!(
+    /// Computes the SHA-1 hash of some data.
     ///
-    /// This can be called multiple times.
-    #[inline]
-    pub fn update(&mut self, buf: &[u8]) {
-        unsafe {
-            ffi::SHA1_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
-        }
-    }
-
-    /// Returns the hash of the data.
-    #[inline]
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 20] {
-        unsafe {
-            let mut hash: MaybeUninit<[u8; 20]> = MaybeUninit::uninit();
-            ffi::SHA1_Final(hash.as_mut_ptr().cast(), &mut self.0);
-            hash.assume_init()
-        }
-    }
-}
-
-/// An object which calculates a SHA224 hash of some data.
-#[derive(Clone)]
-pub struct Sha224(ffi::SHA256_CTX);
-
-impl Default for Sha224 {
-    #[inline]
-    fn default() -> Sha224 {
-        Sha224::new()
-    }
-}
-
-impl Sha224 {
-    /// Creates a new hasher.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Sha224 {
-        unsafe {
-            let mut ctx = MaybeUninit::uninit();
-            ffi::SHA224_Init(ctx.as_mut_ptr());
-            Sha224(ctx.assume_init())
-        }
-    }
-
-    /// Feeds some data into the hasher.
+    /// # Warning
+    /// SHA-1 is insecure and should not be used except for existing systems.
+    sha1,
+    /// Incremental SHA-1 hasher.
     ///
-    /// This can be called multiple times.
-    #[inline]
-    pub fn update(&mut self, buf: &[u8]) {
-        unsafe {
-            ffi::SHA224_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
-        }
-    }
-
-    /// Returns the hash of the data.
-    #[inline]
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 28] {
-        unsafe {
-            let mut hash: MaybeUninit<[u8; 28]> = MaybeUninit::uninit();
-            ffi::SHA224_Final(hash.as_mut_ptr().cast(), &mut self.0);
-            hash.assume_init()
-        }
-    }
-}
-
-/// An object which calculates a SHA256 hash of some data.
-#[derive(Clone)]
-pub struct Sha256(ffi::SHA256_CTX);
-
-impl Default for Sha256 {
-    #[inline]
-    fn default() -> Sha256 {
-        Sha256::new()
-    }
-}
-
-impl Sha256 {
-    /// Creates a new hasher.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Sha256 {
-        unsafe {
-            let mut ctx = MaybeUninit::uninit();
-            ffi::SHA256_Init(ctx.as_mut_ptr());
-            Sha256(ctx.assume_init())
-        }
-    }
-
-    /// Feeds some data into the hasher.
-    ///
-    /// This can be called multiple times.
-    #[inline]
-    pub fn update(&mut self, buf: &[u8]) {
-        unsafe {
-            ffi::SHA256_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
-        }
-    }
-
-    /// Returns the hash of the data.
-    #[inline]
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 32] {
-        unsafe {
-            let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
-            ffi::SHA256_Final(hash.as_mut_ptr().cast(), &mut self.0);
-            hash.assume_init()
-        }
-    }
-}
-
-/// An object which calculates a SHA384 hash of some data.
-#[derive(Clone)]
-pub struct Sha384(ffi::SHA512_CTX);
-
-impl Default for Sha384 {
-    #[inline]
-    fn default() -> Sha384 {
-        Sha384::new()
-    }
-}
-
-impl Sha384 {
-    /// Creates a new hasher.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Sha384 {
-        unsafe {
-            let mut ctx = MaybeUninit::uninit();
-            ffi::SHA384_Init(ctx.as_mut_ptr());
-            Sha384(ctx.assume_init())
-        }
-    }
-
-    /// Feeds some data into the hasher.
-    ///
-    /// This can be called multiple times.
-    #[inline]
-    pub fn update(&mut self, buf: &[u8]) {
-        unsafe {
-            ffi::SHA384_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
-        }
-    }
-
-    /// Returns the hash of the data.
-    #[inline]
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 48] {
-        unsafe {
-            let mut hash: MaybeUninit<[u8; 48]> = MaybeUninit::uninit();
-            ffi::SHA384_Final(hash.as_mut_ptr().cast(), &mut self.0);
-            hash.assume_init()
-        }
-    }
-}
-
-/// An object which calculates a SHA512 hash of some data.
-#[derive(Clone)]
-pub struct Sha512(ffi::SHA512_CTX);
-
-impl Default for Sha512 {
-    #[inline]
-    fn default() -> Sha512 {
-        Sha512::new()
-    }
-}
-
-impl Sha512 {
-    /// Creates a new hasher.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Sha512 {
-        unsafe {
-            let mut ctx = MaybeUninit::uninit();
-            ffi::SHA512_Init(ctx.as_mut_ptr());
-            Sha512(ctx.assume_init())
-        }
-    }
-
-    /// Feeds some data into the hasher.
-    ///
-    /// This can be called multiple times.
-    #[inline]
-    pub fn update(&mut self, buf: &[u8]) {
-        unsafe {
-            ffi::SHA512_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
-        }
-    }
-
-    /// Returns the hash of the data.
-    #[inline]
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 64] {
-        unsafe {
-            let mut hash: MaybeUninit<[u8; 64]> = MaybeUninit::uninit();
-            ffi::SHA512_Final(hash.as_mut_ptr().cast(), &mut self.0);
-            hash.assume_init()
-        }
-    }
-}
-
-/// An object which calculates a SHA512-256 hash of some data.
-#[derive(Clone)]
-pub struct Sha512_256(ffi::SHA512_CTX);
-
-impl Default for Sha512_256 {
-    #[inline]
-    fn default() -> Sha512_256 {
-        Sha512_256::new()
-    }
-}
-
-impl Sha512_256 {
-    /// Creates a new hasher.
-    #[inline]
-    #[must_use]
-    pub fn new() -> Sha512_256 {
-        unsafe {
-            let mut ctx = MaybeUninit::uninit();
-            ffi::SHA512_256_Init(ctx.as_mut_ptr());
-            Sha512_256(ctx.assume_init())
-        }
-    }
-
-    /// Feeds some data into the hasher.
-    ///
-    /// This can be called multiple times.
-    #[inline]
-    pub fn update(&mut self, buf: &[u8]) {
-        unsafe {
-            ffi::SHA512_256_Update(&mut self.0, buf.as_ptr().cast::<c_void>(), buf.len());
-        }
-    }
-
-    /// Returns the hash of the data.
-    #[inline]
-    #[must_use]
-    pub fn finish(mut self) -> [u8; 32] {
-        unsafe {
-            let mut hash: MaybeUninit<[u8; 32]> = MaybeUninit::uninit();
-            ffi::SHA512_256_Final(hash.as_mut_ptr().cast(), &mut self.0);
-            hash.assume_init()
-        }
-    }
-}
+    /// # Warning
+    /// SHA-1 is insecure and should not be used except for existing systems.
+    Sha1,
+    SHA_CTX,
+    20,
+    uninit,
+    SHA1,
+    SHA1_Init,
+    SHA1_Update,
+    SHA1_Final
+);
+define_sha!(
+    /// Computes the SHA-224 hash of some data.
+    sha224,
+    /// Incremental SHA-224 hasher.
+    Sha224,
+    SHA256_CTX,
+    28,
+    uninit,
+    SHA224,
+    SHA224_Init,
+    SHA224_Update,
+    SHA224_Final
+);
+define_sha!(
+    /// Computes the SHA-256 hash of some data.
+    sha256,
+    /// Incremental SHA-256 hasher.
+    Sha256,
+    SHA256_CTX,
+    32,
+    uninit,
+    SHA256,
+    SHA256_Init,
+    SHA256_Update,
+    SHA256_Final
+);
+define_sha!(
+    /// Computes the SHA-384 hash of some data.
+    sha384,
+    /// Incremental SHA-384 hasher.
+    Sha384,
+    SHA512_CTX,
+    48,
+    zeroed,
+    SHA384,
+    SHA384_Init,
+    SHA384_Update,
+    SHA384_Final
+);
+define_sha!(
+    /// Computes the SHA-512 hash of some data.
+    sha512,
+    /// Incremental SHA-512 hasher.
+    Sha512,
+    SHA512_CTX,
+    64,
+    zeroed,
+    SHA512,
+    SHA512_Init,
+    SHA512_Update,
+    SHA512_Final
+);
+define_sha!(
+    /// Computes the SHA-512/256 hash of some data.
+    sha512_256,
+    /// Incremental SHA-512/256 hasher.
+    Sha512_256,
+    SHA512_CTX,
+    32,
+    zeroed,
+    SHA512_256,
+    SHA512_256_Init,
+    SHA512_256_Update,
+    SHA512_256_Final
+);
 
 #[cfg(test)]
 mod test {
     use hex;
 
     use super::*;
+
+    #[test]
+    fn wide_hash_contexts_have_initialized_block_storage() {
+        let sha384 = Sha384::new();
+        let sha512 = Sha512::new();
+        let sha512_256 = Sha512_256::new();
+        assert_eq!(sha384.0.p, [0; 128]);
+        assert_eq!(sha512.0.p, [0; 128]);
+        assert_eq!(sha512_256.0.p, [0; 128]);
+    }
+
+    #[test]
+    fn wide_hash_clones_are_independent_at_block_boundaries() {
+        macro_rules! check {
+            ($hasher:ty, $one_shot:ident) => {{
+                for len in [0, 1, 127, 128, 129, 255, 256] {
+                    let prefix = vec![42; len];
+                    let mut original = <$hasher>::new();
+                    original.update(&prefix);
+                    let mut clone = original.clone();
+                    clone.update(b"second");
+                    original.update(b"first");
+                    assert_eq!(
+                        clone.finish(),
+                        $one_shot(&[prefix.as_slice(), b"second"].concat())
+                    );
+                    assert_eq!(
+                        original.finish(),
+                        $one_shot(&[prefix.as_slice(), b"first"].concat())
+                    );
+                }
+            }};
+        }
+        check!(Sha384, sha384);
+        check!(Sha512, sha512);
+        check!(Sha512_256, sha512_256);
+    }
 
     #[test]
     fn standalone_1() {

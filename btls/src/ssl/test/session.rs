@@ -48,23 +48,29 @@ fn new_get_session_callback() {
     server
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::SERVER | SslSessionCacheMode::NO_INTERNAL);
-    server.ctx().set_new_session_callback(|_, session| {
-        SERVER_SESSION_DER.set(session.to_der().unwrap()).unwrap();
-    });
+    server
+        .ctx()
+        .set_new_session_callback(|_, session| {
+            SERVER_SESSION_DER.set(session.to_der().unwrap()).unwrap();
+        })
+        .unwrap();
     unsafe {
-        server.ctx().set_get_session_callback(|_, id| {
-            let Some(der) = SERVER_SESSION_DER.get() else {
-                return Ok(None);
-            };
+        server
+            .ctx()
+            .set_get_session_callback(|_, id| {
+                let Some(der) = SERVER_SESSION_DER.get() else {
+                    return Ok(None);
+                };
 
-            let session = SslSession::from_der(der).unwrap();
+                let session = SslSession::from_der(der).unwrap();
 
-            FOUND_SESSION.store(true, Ordering::SeqCst);
+                FOUND_SESSION.store(true, Ordering::SeqCst);
 
-            assert_eq!(id, session.id());
+                assert_eq!(id, session.id());
 
-            Ok(Some(session))
-        });
+                Ok(Some(session))
+            })
+            .unwrap();
     }
     server.ctx().set_session_id_context(b"foo").unwrap();
 
@@ -75,9 +81,12 @@ fn new_get_session_callback() {
     client
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    client.ctx().set_new_session_callback(|_, session| {
-        CLIENT_SESSION_DER.set(session.to_der().unwrap()).unwrap();
-    });
+    client
+        .ctx()
+        .set_new_session_callback(|_, session| {
+            CLIENT_SESSION_DER.set(session.to_der().unwrap()).unwrap();
+        })
+        .unwrap();
 
     let client = client.build();
 
@@ -116,13 +125,16 @@ fn new_get_session_callback_pending() {
         .ctx()
         .set_session_cache_mode(SslSessionCacheMode::SERVER | SslSessionCacheMode::NO_INTERNAL);
     unsafe {
-        server.ctx().set_get_session_callback(|_, _| {
-            if !CALLED_SERVER_CALLBACK.swap(true, Ordering::SeqCst) {
-                return Err(GetSessionPendingError);
-            }
+        server
+            .ctx()
+            .set_get_session_callback(|_, _| {
+                if !CALLED_SERVER_CALLBACK.swap(true, Ordering::SeqCst) {
+                    return Err(GetSessionPendingError);
+                }
 
-            Ok(None)
-        });
+                Ok(None)
+            })
+            .unwrap();
     }
     server.ctx().set_session_id_context(b"foo").unwrap();
     server.err_cb(|error| {
@@ -165,7 +177,8 @@ fn new_session_callback_swapped_ctx() {
         .set_session_cache_mode(SslSessionCacheMode::CLIENT | SslSessionCacheMode::NO_INTERNAL);
     client
         .ctx()
-        .set_new_session_callback(|_, _| CALLED_BACK.store(true, Ordering::SeqCst));
+        .set_new_session_callback(|_, _| CALLED_BACK.store(true, Ordering::SeqCst))
+        .unwrap();
 
     let mut client = client.build().builder();
 

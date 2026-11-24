@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreign_types::ForeignTypeRef;
@@ -9,24 +9,23 @@ use openssl_macros::corresponds;
 
 use crate::dh::Dh;
 use crate::error::ErrorStack;
-use crate::ex_data::Index;
+use crate::ex_data::IndexSlot;
 use crate::ffi;
 use crate::ssl::{
     HandshakeError, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod, SslMode,
     SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
 };
 use crate::stack::StackRef;
-use crate::version;
 use crate::x509::{X509Ref, X509};
 use std::net::IpAddr;
 
 use super::callbacks::raw_client_session;
-use super::{MidHandshakeSslStream, SESSION_CTX_INDEX};
+use super::MidHandshakeSslStream;
 
-pub(super) static CLIENT_SESSION_INDEX: LazyLock<Index<SslContext, ClientSessionCallback>> =
-    LazyLock::new(|| SslContext::new_ex_index().unwrap());
-pub(super) static SESSION_PEER_INDEX: LazyLock<Index<Ssl, SessionPeer>> =
-    LazyLock::new(|| Ssl::new_ex_index().unwrap());
+pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
+    IndexSlot::new(Ssl::new_ex_index);
 static NEXT_ISSUER: AtomicU64 = AtomicU64::new(1);
 
 const FFDHE_2048: &str = "
@@ -40,31 +39,13 @@ ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
 -----END DH PARAMETERS-----
 ";
 
-#[allow(clippy::inconsistent_digit_grouping)]
 fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
     let mut ctx = SslContextBuilder::new(method)?;
 
-    let mut opts = SslOptions::ALL
-        | SslOptions::NO_COMPRESSION
-        | SslOptions::NO_SSLV2
-        | SslOptions::NO_SSLV3
-        | SslOptions::SINGLE_DH_USE
-        | SslOptions::SINGLE_ECDH_USE;
-    opts &= !SslOptions::DONT_INSERT_EMPTY_FRAGMENTS;
-
-    ctx.set_options(opts);
-
-    let mut mode =
-        SslMode::AUTO_RETRY | SslMode::ACCEPT_MOVING_WRITE_BUFFER | SslMode::ENABLE_PARTIAL_WRITE;
-
-    // This is quite a useful optimization for saving memory, but historically
-    // caused CVEs in OpenSSL pre-1.0.1h, according to
-    // https://bugs.python.org/issue25672
-    if version::number() >= 0x1000_1080 {
-        mode |= SslMode::RELEASE_BUFFERS;
-    }
-
-    ctx.set_mode(mode);
+    // BoringSSL already enables SSL_OP_ALL by default. The remaining OpenSSL
+    // compatibility flags used here had a literal value of zero, so configure
+    // only the two write modes that change the native behavior.
+    ctx.set_mode(SslMode::ACCEPT_MOVING_WRITE_BUFFER | SslMode::ENABLE_PARTIAL_WRITE);
 
     Ok(ctx)
 }
@@ -83,6 +64,10 @@ impl SslConnector {
     /// Creates a new builder for TLS connections.
     ///
     /// The default configuration is subject to change, and is currently derived from Python.
+    ///
+    /// # Errors
+    ///
+    /// Native context creation, CA-path initialization, or cipher configuration fails.
     pub fn builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_default_verify_paths()?;
@@ -97,6 +82,10 @@ impl SslConnector {
     /// Creates a bare builder for TLS connections without default CA certificates.
     ///
     /// The caller is responsible for providing a custom certificate store.
+    ///
+    /// # Errors
+    ///
+    /// Native context creation or cipher configuration fails.
     pub fn bare_builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_cipher_list(
@@ -109,6 +98,10 @@ impl SslConnector {
     /// Initiates a client-side TLS session on a stream.
     ///
     /// The domain is used for SNI and hostname verification.
+    ///
+    /// # Errors
+    ///
+    /// The SSL connection cannot be configured or attached to the stream.
     pub fn setup_connect<S>(
         &self,
         domain: &str,
@@ -126,6 +119,10 @@ impl SslConnector {
     ///
     /// This is a convenience method which combines [`Self::setup_connect`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// Connection setup or the TLS handshake fails.
     pub fn connect<S>(&self, domain: &str, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
@@ -136,6 +133,10 @@ impl SslConnector {
     }
 
     /// Returns a structure allowing for configuration of a single TLS session before connection.
+    ///
+    /// # Errors
+    ///
+    /// A new native SSL connection cannot be allocated.
     pub fn configure(&self) -> Result<ConnectConfiguration, ErrorStack> {
         Ssl::new(&self.0).map(|ssl| ConnectConfiguration {
             ssl,
@@ -146,13 +147,13 @@ impl SslConnector {
     }
 
     /// Consumes the `SslConnector`, returning the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_context(self) -> SslContext {
         self.0
     }
 
     /// Returns a shared reference to the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn context(&self) -> &SslContextRef {
         &self.0
     }
@@ -163,7 +164,7 @@ pub struct SslConnectorBuilder(SslContextBuilder);
 
 impl SslConnectorBuilder {
     /// Consumes the builder, returning an `SslConnector`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslConnector {
         SslConnector(self.0.build())
     }
@@ -173,8 +174,12 @@ impl SslConnectorBuilder {
     /// Client session caching is enabled. Only connections created by
     /// [`ConnectConfiguration::into_ssl`] report sessions. This shares BoringSSL's new session
     /// callback with [`SslContextBuilder::set_new_session_callback`]; the last one set wins.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_sess_set_new_cb)]
-    pub fn set_client_session_callback<F>(&mut self, callback: F)
+    pub fn set_client_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
         F: Fn(&mut SslRef, ClientSession) + 'static + Sync + Send,
     {
@@ -182,13 +187,16 @@ impl SslConnectorBuilder {
             issuer: NEXT_ISSUER.fetch_add(1, Ordering::Relaxed),
             callback: Box::new(callback),
         };
-        self.replace_ex_data(*CLIENT_SESSION_INDEX, callback);
+        self.set_ex_data(CLIENT_SESSION_INDEX.register()?, callback)?;
+        // SAFETY: the builder owns a live native context for each session-cache
+        // configuration call, and the callback is a static C-ABI function.
         unsafe {
             let mode =
                 ffi::SSL_CTX_get_session_cache_mode(self.as_ptr()) | ffi::SSL_SESS_CACHE_CLIENT;
             ffi::SSL_CTX_set_session_cache_mode(self.as_ptr(), mode);
             ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(raw_client_session));
         }
+        Ok(())
     }
 }
 
@@ -255,7 +263,7 @@ pub(super) struct ClientSessionCallback {
 
 impl ClientSession {
     pub(super) fn new(session: SslSession, peer: SessionPeer, ssl: &SslRef) -> Self {
-        ClientSession {
+        Self {
             session,
             peer,
             verify_peer: verifies_peer(ssl),
@@ -265,14 +273,14 @@ impl ClientSession {
     }
 
     /// Returns the underlying session.
-    #[must_use]
+    #[must_use = "Use the returned session reference to inspect the resumption state."]
     pub fn session(&self) -> &SslSessionRef {
         &self.session
     }
 
     /// Checks the session against the connection `ssl` will make to `domain`.
     ///
-    /// BoringSSL rejects another session ID context only after the server resumes, and skips
+    /// `BoringSSL` rejects another session ID context only after the server resumes, and skips
     /// certificate checks on resumption unless reverify-on-resume runs a custom verifier.
     fn resumes(&self, ssl: &SslRef, domain: &str, sni: bool, verify_hostname: bool) -> bool {
         let scope = self.session.id_context();
@@ -310,6 +318,8 @@ fn chain_not_after(ssl: &SslRef) -> Option<i64> {
     if chain.is_null() {
         return None;
     }
+    // SAFETY: a non-null chain is borrowed from the live native SSL session;
+    // the reference is used only while `ssl` keeps its owner alive.
     let chain = unsafe { StackRef::<X509>::from_ptr(chain) };
     earliest_not_after(chain)
 }
@@ -325,7 +335,8 @@ where
         .filter_map(|cert| {
             let mut not_after = 0;
             // SAFETY: `cert` is valid, and `not_after` is a valid output.
-            let ok = unsafe { ffi::ASN1_TIME_to_posix(cert.not_after().as_ptr(), &mut not_after) };
+            let ok =
+                unsafe { ffi::ASN1_TIME_to_posix(cert.not_after().as_ptr(), &raw mut not_after) };
             (ok == 1).then_some(not_after)
         })
         .min()
@@ -334,7 +345,7 @@ where
 /// Returns the token of the client session callback installed on `context`.
 fn issuer(context: &SslContextRef) -> Option<u64> {
     context
-        .ex_data(*CLIENT_SESSION_INDEX)
+        .slot_data(&CLIENT_SESSION_INDEX)
         .map(|callback| callback.issuer)
 }
 
@@ -347,8 +358,8 @@ fn verifies_peer(ssl: &SslRef) -> bool {
 
 impl ConnectConfiguration {
     /// A builder-style version of `set_use_server_name_indication`.
-    #[must_use]
-    pub fn use_server_name_indication(mut self, use_sni: bool) -> ConnectConfiguration {
+    #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
+    pub const fn use_server_name_indication(mut self, use_sni: bool) -> Self {
         self.set_use_server_name_indication(use_sni);
         self
     }
@@ -356,13 +367,13 @@ impl ConnectConfiguration {
     /// Configures the use of Server Name Indication (SNI) when connecting.
     ///
     /// Defaults to `true`.
-    pub fn set_use_server_name_indication(&mut self, use_sni: bool) {
+    pub const fn set_use_server_name_indication(&mut self, use_sni: bool) {
         self.sni = use_sni;
     }
 
     /// A builder-style version of `set_verify_hostname`.
-    #[must_use]
-    pub fn verify_hostname(mut self, verify_hostname: bool) -> ConnectConfiguration {
+    #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
+    pub const fn verify_hostname(mut self, verify_hostname: bool) -> Self {
         self.set_verify_hostname(verify_hostname);
         self
     }
@@ -376,13 +387,13 @@ impl ConnectConfiguration {
     /// You should think very carefully before you use this method. If hostname verification is not
     /// used, *any* valid certificate for *any* site will be trusted for use from any other. This
     /// introduces a significant vulnerability to man-in-the-middle attacks.
-    pub fn set_verify_hostname(&mut self, verify_hostname: bool) {
+    pub const fn set_verify_hostname(&mut self, verify_hostname: bool) {
         self.verify_hostname = verify_hostname;
     }
 
     /// A builder-style version of `set_client_session`.
-    #[must_use]
-    pub fn client_session(mut self, session: ClientSession) -> ConnectConfiguration {
+    #[must_use = "Retain the returned configuration; this builder operation consumes the original."]
+    pub fn client_session(mut self, session: ClientSession) -> Self {
         self.set_client_session(session);
         self
     }
@@ -398,6 +409,10 @@ impl ConnectConfiguration {
     /// Returns an [`Ssl`] configured to connect to the provided domain.
     ///
     /// The domain is used for SNI (if it is not an IP address) and hostname verification if enabled.
+    ///
+    /// # Errors
+    ///
+    /// The domain cannot be configured, extra-data allocation fails, or session installation fails.
     pub fn into_ssl(mut self, domain: &str) -> Result<Ssl, ErrorStack> {
         let sni = self.sni && domain.parse::<IpAddr>().is_err();
         if sni {
@@ -410,15 +425,15 @@ impl ConnectConfiguration {
 
         let reports_sessions = self
             .ssl
-            .ex_data(*SESSION_CTX_INDEX)
-            .is_some_and(|context| context.ex_data(*CLIENT_SESSION_INDEX).is_some());
+            .session_context()
+            .is_some_and(|context| context.slot_data(&CLIENT_SESSION_INDEX).is_some());
         if reports_sessions {
             let peer = SessionPeer {
                 domain: domain.into(),
                 sni,
                 verify_hostname: self.verify_hostname,
             };
-            self.ssl.set_ex_data(*SESSION_PEER_INDEX, peer);
+            self.ssl.set_ex_data(SESSION_PEER_INDEX.register()?, peer)?;
         }
 
         if let Some(session) = self
@@ -440,6 +455,10 @@ impl ConnectConfiguration {
     ///
     /// This is a convenience method which combines [`Self::into_ssl`] and
     /// [`Ssl::setup_connect`].
+    ///
+    /// # Errors
+    ///
+    /// Domain verification setup or stream attachment fails.
     pub fn setup_connect<S>(
         self,
         domain: &str,
@@ -448,7 +467,7 @@ impl ConnectConfiguration {
     where
         S: Read + Write,
     {
-        Ok(self.into_ssl(domain)?.setup_connect(stream))
+        self.into_ssl(domain)?.setup_connect(stream)
     }
 
     /// Attempts a client-side TLS session on a stream.
@@ -457,6 +476,10 @@ impl ConnectConfiguration {
     ///
     /// This is a convenience method which combines [`Self::setup_connect`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// Connection setup or the TLS handshake fails.
     pub fn connect<S>(self, domain: &str, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
@@ -496,6 +519,10 @@ impl SslAcceptor {
     /// recommendations. See its [documentation][docs] for more details on specifics.
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
+    ///
+    /// # Errors
+    ///
+    /// Native context, Diffie–Hellman parameters, or cipher configuration is invalid.
     pub fn mozilla_intermediate_v5(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1);
@@ -517,6 +544,10 @@ impl SslAcceptor {
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
     // FIXME remove in next major version
+    ///
+    /// # Errors
+    ///
+    /// Native context, Diffie–Hellman parameters, or cipher configuration is invalid.
     pub fn mozilla_intermediate(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
@@ -543,6 +574,10 @@ impl SslAcceptor {
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
     // FIXME remove in next major version
+    ///
+    /// # Errors
+    ///
+    /// Native context creation or cipher configuration fails.
     pub fn mozilla_modern(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(
@@ -560,19 +595,27 @@ impl SslAcceptor {
     /// Initiates a server-side TLS handshake on a stream.
     ///
     /// See [`Ssl::setup_accept`] for more details.
+    ///
+    /// # Errors
+    ///
+    /// The native SSL connection cannot be allocated or attached to the stream.
     pub fn setup_accept<S>(&self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
         let ssl = Ssl::new(&self.0)?;
 
-        Ok(ssl.setup_accept(stream))
+        ssl.setup_accept(stream)
     }
 
     /// Attempts a server-side TLS handshake on a stream.
     ///
     /// This is a convenience method which combines [`Self::setup_accept`] and
     /// [`MidHandshakeSslStream::handshake`].
+    ///
+    /// # Errors
+    ///
+    /// Server-side connection setup or the TLS handshake fails.
     pub fn accept<S>(&self, stream: S) -> Result<SslStream<S>, HandshakeError<S>>
     where
         S: Read + Write,
@@ -583,13 +626,13 @@ impl SslAcceptor {
     }
 
     /// Consumes the `SslAcceptor`, returning the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn into_context(self) -> SslContext {
         self.0
     }
 
     /// Returns a shared reference to the inner raw `SslContext`.
-    #[must_use]
+    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn context(&self) -> &SslContextRef {
         &self.0
     }
@@ -600,7 +643,7 @@ pub struct SslAcceptorBuilder(SslContextBuilder);
 
 impl SslAcceptorBuilder {
     /// Consumes the builder, returning a `SslAcceptor`.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> SslAcceptor {
         SslAcceptor(self.0.build())
     }

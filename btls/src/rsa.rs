@@ -34,7 +34,6 @@ use crate::bn::{BigNum, BigNumRef};
 use crate::error::ErrorStack;
 use crate::ffi;
 use crate::pkey::{HasPrivate, HasPublic, Private, Public};
-use crate::try_int;
 use crate::{cvt, cvt_n, cvt_p};
 
 pub const EVP_PKEY_OP_SIGN: c_int = 1 << 3;
@@ -62,21 +61,20 @@ pub const EVP_PKEY_OP_TYPE_CRYPT: c_int = EVP_PKEY_OP_ENCRYPT | EVP_PKEY_OP_DECR
 pub struct Padding(c_int);
 
 impl Padding {
-    pub const NONE: Padding = Padding(ffi::RSA_NO_PADDING);
-    pub const PKCS1: Padding = Padding(ffi::RSA_PKCS1_PADDING);
-    pub const PKCS1_OAEP: Padding = Padding(ffi::RSA_PKCS1_OAEP_PADDING);
-    pub const PKCS1_PSS: Padding = Padding(ffi::RSA_PKCS1_PSS_PADDING);
+    pub const NONE: Self = Self(ffi::RSA_NO_PADDING);
+    pub const PKCS1: Self = Self(ffi::RSA_PKCS1_PADDING);
+    pub const PKCS1_OAEP: Self = Self(ffi::RSA_PKCS1_OAEP_PADDING);
+    pub const PKCS1_PSS: Self = Self(ffi::RSA_PKCS1_PSS_PADDING);
 
     /// Creates a `Padding` from an integer representation.
-    #[must_use]
-    pub fn from_raw(value: c_int) -> Padding {
-        Padding(value)
+    #[must_use = "Use the wrapper returned for the supplied native representation."]
+    pub const fn from_raw(value: c_int) -> Self {
+        Self(value)
     }
 
     /// Returns the integer representation of `Padding`.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
-    #[must_use]
-    pub fn as_raw(&self) -> c_int {
+    #[must_use = "The returned native representation is needed by the caller."]
+    pub const fn as_raw(self) -> c_int {
         self.0
     }
 }
@@ -93,7 +91,7 @@ generic_foreign_type_and_impl_send_sync! {
 }
 
 impl<T> Clone for Rsa<T> {
-    fn clone(&self) -> Rsa<T> {
+    fn clone(&self) -> Self {
         (**self).to_owned()
     }
 }
@@ -102,10 +100,67 @@ impl<T> ToOwned for RsaRef<T> {
     type Owned = Rsa<T>;
 
     fn to_owned(&self) -> Rsa<T> {
+        // SAFETY: this live native RSA key supports shared atomic reference
+        // increments; the new Rust owner holds its own native reference.
         unsafe {
             ffi::RSA_up_ref(self.as_ptr());
             Rsa::from_ptr(self.as_ptr())
         }
+    }
+}
+
+// Each capability-specific entry point delegates to the same bounds-checked
+// transform. The caller selects only operations supported by its key type.
+macro_rules! rsa_transform {
+    ($(#[$meta:meta])* $name:ident, $native:path) => {
+        $(#[$meta])*
+        ///
+        /// # Errors
+        ///
+        /// The input is invalid, the padding is unsupported, or the output is too small.
+        pub fn $name(
+            &self,
+            from: &[u8],
+            to: &mut [u8],
+            padding: Padding,
+        ) -> Result<usize, ErrorStack> {
+            self.transform(from, to, padding, $native)
+        }
+    };
+}
+
+impl<T: HasPublic> RsaRef<T> {
+    fn transform(
+        &self,
+        from: &[u8],
+        to: &mut [u8],
+        padding: Padding,
+        operation: unsafe extern "C" fn(usize, *const u8, *mut u8, *mut ffi::RSA, c_int) -> c_int,
+    ) -> Result<usize, ErrorStack> {
+        if to.len() < usize::try_from(self.size()).map_err(ErrorStack::internal_error)? {
+            return Err(ErrorStack::internal_error_str(
+                "RSA output buffer too small",
+            ));
+        }
+        // SAFETY: The live key has the components required by the public
+        // wrapper's capability bound. The output buffer is at least RSA_size,
+        // and the complete readable input slice is described by its length.
+        let written = unsafe {
+            cvt_n(operation(
+                from.len(),
+                from.as_ptr(),
+                to.as_mut_ptr(),
+                self.as_ptr(),
+                padding.0,
+            ))?
+        };
+        let written = usize::try_from(written).map_err(ErrorStack::internal_error)?;
+        if written > to.len() {
+            return Err(ErrorStack::internal_error_str(
+                "invalid native RSA output size",
+            ));
+        }
+        Ok(written)
     }
 }
 
@@ -134,78 +189,36 @@ where
         ffi::i2d_RSAPrivateKey
     }
 
-    /// Decrypts data using the private key, returning the number of decrypted bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self` has no private components, or if `to` is smaller
-    /// than `self.size()`.
-    pub fn private_decrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_private_decrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+    rsa_transform! {
+        /// Decrypts data using the private key, returning the number of output bytes.
+        private_decrypt, ffi::RSA_private_decrypt
     }
 
-    /// Encrypts data using the private key, returning the number of encrypted bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `self` has no private components, or if `to` is smaller
-    /// than `self.size()`.
-    pub fn private_encrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_private_encrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+    rsa_transform! {
+        /// Encrypts data using the private key, returning the number of output bytes.
+        private_encrypt, ffi::RSA_private_encrypt
     }
 
     /// Returns a reference to the private exponent of the key.
     #[corresponds(RSA_get0_key)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn d(&self) -> &BigNumRef {
+        // SAFETY: The live private RSA key contains the private exponent; native returns a borrowed component tied to the key.
         unsafe {
             let mut d = ptr::null();
-            RSA_get0_key(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &mut d);
+            RSA_get0_key(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut d);
             BigNumRef::from_ptr(d.cast_mut())
         }
     }
 
     /// Returns a reference to the first factor of the exponent of the key.
     #[corresponds(RSA_get0_factors)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn p(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA prime factor tied to this key.
         unsafe {
             let mut p = ptr::null();
-            RSA_get0_factors(self.as_ptr(), &mut p, ptr::null_mut());
+            RSA_get0_factors(self.as_ptr(), &raw mut p, ptr::null_mut());
             if p.is_null() {
                 None
             } else {
@@ -216,11 +229,12 @@ where
 
     /// Returns a reference to the second factor of the exponent of the key.
     #[corresponds(RSA_get0_factors)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn q(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA prime factor tied to this key.
         unsafe {
             let mut q = ptr::null();
-            RSA_get0_factors(self.as_ptr(), ptr::null_mut(), &mut q);
+            RSA_get0_factors(self.as_ptr(), ptr::null_mut(), &raw mut q);
             if q.is_null() {
                 None
             } else {
@@ -231,11 +245,12 @@ where
 
     /// Returns a reference to the first exponent used for CRT calculations.
     #[corresponds(RSA_get0_crt_params)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn dmp1(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA CRT exponent tied to this key.
         unsafe {
             let mut dp = ptr::null();
-            RSA_get0_crt_params(self.as_ptr(), &mut dp, ptr::null_mut(), ptr::null_mut());
+            RSA_get0_crt_params(self.as_ptr(), &raw mut dp, ptr::null_mut(), ptr::null_mut());
             if dp.is_null() {
                 None
             } else {
@@ -246,11 +261,12 @@ where
 
     /// Returns a reference to the second exponent used for CRT calculations.
     #[corresponds(RSA_get0_crt_params)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn dmq1(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA CRT exponent tied to this key.
         unsafe {
             let mut dq = ptr::null();
-            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), &mut dq, ptr::null_mut());
+            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), &raw mut dq, ptr::null_mut());
             if dq.is_null() {
                 None
             } else {
@@ -261,11 +277,12 @@ where
 
     /// Returns a reference to the coefficient used for CRT calculations.
     #[corresponds(RSA_get0_crt_params)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn iqmp(&self) -> Option<&BigNumRef> {
+        // SAFETY: Native returns an optional borrowed RSA CRT coefficient tied to this key.
         unsafe {
             let mut qi = ptr::null();
-            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &mut qi);
+            RSA_get0_crt_params(self.as_ptr(), ptr::null_mut(), ptr::null_mut(), &raw mut qi);
             if qi.is_null() {
                 None
             } else {
@@ -276,10 +293,10 @@ where
 
     /// Validates RSA parameters for correctness
     #[corresponds(RSA_check_key)]
-    #[allow(clippy::unnecessary_cast)]
     pub fn check_key(&self) -> Result<bool, ErrorStack> {
+        // SAFETY: The native RSA validation call observes the borrowed private key and returns a status code.
         unsafe {
-            let result = ffi::RSA_check_key(self.as_ptr()) as i32;
+            let result = ffi::RSA_check_key(self.as_ptr());
             if result == -1 {
                 Err(ErrorStack::get())
             } else {
@@ -327,82 +344,42 @@ where
 
     /// Returns the size of the modulus in bytes.
     #[corresponds(RSA_size)]
-    #[allow(clippy::unnecessary_cast)]
-    #[must_use]
+    #[must_use = "Use the returned cryptographic size or bit count to validate parameters."]
     pub fn size(&self) -> u32 {
-        unsafe { ffi::RSA_size(self.as_ptr()) as u32 }
+        // SAFETY: the native RSA key remains live for this read-only size query.
+        unsafe { ffi::RSA_size(self.as_ptr()) }
     }
 
-    /// Decrypts data using the public key, returning the number of decrypted bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `to` is smaller than `self.size()`.
-    pub fn public_decrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_public_decrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+    rsa_transform! {
+        /// Decrypts data using the public key, returning the number of output bytes.
+        public_decrypt, ffi::RSA_public_decrypt
     }
 
-    /// Encrypts data using the public key, returning the number of encrypted bytes.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `to` is smaller than `self.size()`.
-    pub fn public_encrypt(
-        &self,
-        from: &[u8],
-        to: &mut [u8],
-        padding: Padding,
-    ) -> Result<usize, ErrorStack> {
-        assert!(i32::try_from(from.len()).is_ok());
-        assert!(to.len() >= self.size() as usize);
-
-        unsafe {
-            let len = cvt_n(ffi::RSA_public_encrypt(
-                from.len(),
-                from.as_ptr(),
-                to.as_mut_ptr(),
-                self.as_ptr(),
-                padding.0,
-            ))?;
-            Ok(len as usize)
-        }
+    rsa_transform! {
+        /// Encrypts data using the public key, returning the number of output bytes.
+        public_encrypt, ffi::RSA_public_encrypt
     }
 
     /// Returns a reference to the modulus of the key.
     #[corresponds(RSA_get0_key)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn n(&self) -> &BigNumRef {
+        // SAFETY: The live public RSA key contains its modulus; native returns a borrowed component.
         unsafe {
             let mut n = ptr::null();
-            RSA_get0_key(self.as_ptr(), &mut n, ptr::null_mut(), ptr::null_mut());
+            RSA_get0_key(self.as_ptr(), &raw mut n, ptr::null_mut(), ptr::null_mut());
             BigNumRef::from_ptr(n.cast_mut())
         }
     }
 
     /// Returns a reference to the public exponent of the key.
     #[corresponds(RSA_get0_key)]
-    #[must_use]
+    #[must_use = "The returned key component is the result of this accessor."]
     pub fn e(&self) -> &BigNumRef {
+        // SAFETY: The live public RSA key contains its exponent; native returns a borrowed component.
         unsafe {
             let mut e = ptr::null();
-            RSA_get0_key(self.as_ptr(), ptr::null_mut(), &mut e, ptr::null_mut());
+            RSA_get0_key(self.as_ptr(), ptr::null_mut(), &raw mut e, ptr::null_mut());
             BigNumRef::from_ptr(e.cast_mut())
         }
     }
@@ -414,12 +391,19 @@ impl Rsa<Public> {
     /// `n` is the modulus common to both public and private key.
     /// `e` is the public exponent.
     #[corresponds(RSA_new)]
-    pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Rsa<Public>, ErrorStack> {
+    pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: the RSA allocation is owned immediately, so any native
+        // setter failure drops it. The setter transfers the BigNums only on success.
         unsafe {
-            let rsa = cvt_p(ffi::RSA_new())?;
-            cvt(RSA_set0_key(rsa, n.as_ptr(), e.as_ptr(), ptr::null_mut()))?;
+            let rsa = Self::from_ptr(cvt_p(ffi::RSA_new())?);
+            cvt(RSA_set0_key(
+                rsa.as_ptr(),
+                n.as_ptr(),
+                e.as_ptr(),
+                ptr::null_mut(),
+            ))?;
             mem::forget((n, e));
-            Ok(Rsa::from_ptr(rsa))
+            Ok(rsa)
         }
     }
 
@@ -472,14 +456,19 @@ impl RsaPrivateKeyBuilder {
     /// `n` is the modulus common to both public and private key.
     /// `e` is the public exponent and `d` is the private exponent.
     #[corresponds(RSA_new)]
-    pub fn new(n: BigNum, e: BigNum, d: BigNum) -> Result<RsaPrivateKeyBuilder, ErrorStack> {
+    pub fn new(n: BigNum, e: BigNum, d: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: own the new RSA allocation before calling its setter.
+        // Native consumes all provided BigNums only after a successful return.
         unsafe {
-            let rsa = cvt_p(ffi::RSA_new())?;
-            cvt(RSA_set0_key(rsa, n.as_ptr(), e.as_ptr(), d.as_ptr()))?;
+            let rsa = Rsa::from_ptr(cvt_p(ffi::RSA_new())?);
+            cvt(RSA_set0_key(
+                rsa.as_ptr(),
+                n.as_ptr(),
+                e.as_ptr(),
+                d.as_ptr(),
+            ))?;
             mem::forget((n, e, d));
-            Ok(RsaPrivateKeyBuilder {
-                rsa: Rsa::from_ptr(rsa),
-            })
+            Ok(Self { rsa })
         }
     }
 
@@ -487,7 +476,9 @@ impl RsaPrivateKeyBuilder {
     ///
     /// `p` and `q` are the first and second factors of `n`.
     #[corresponds(RSA_set0_factors)]
-    pub fn set_factors(self, p: BigNum, q: BigNum) -> Result<RsaPrivateKeyBuilder, ErrorStack> {
+    pub fn set_factors(self, p: BigNum, q: BigNum) -> Result<Self, ErrorStack> {
+        // SAFETY: this builder owns its RSA object exclusively; native accepts
+        // the two factors only on success, when Rust relinquishes ownership.
         unsafe {
             cvt(RSA_set0_factors(self.rsa.as_ptr(), p.as_ptr(), q.as_ptr()))?;
             mem::forget((p, q));
@@ -502,70 +493,54 @@ impl RsaPrivateKeyBuilder {
     #[corresponds(RSA_set0_crt_params)]
     pub fn set_crt_params(
         self,
-        dmp1: BigNum,
-        dmq1: BigNum,
-        iqmp: BigNum,
-    ) -> Result<RsaPrivateKeyBuilder, ErrorStack> {
+        exponent_p: BigNum,
+        exponent_q: BigNum,
+        inverse_q: BigNum,
+    ) -> Result<Self, ErrorStack> {
+        // SAFETY: the exclusive builder gives native ownership of its three
+        // CRT values only after the native setter reports success.
         unsafe {
             cvt(RSA_set0_crt_params(
                 self.rsa.as_ptr(),
-                dmp1.as_ptr(),
-                dmq1.as_ptr(),
-                iqmp.as_ptr(),
+                exponent_p.as_ptr(),
+                exponent_q.as_ptr(),
+                inverse_q.as_ptr(),
             ))?;
-            mem::forget((dmp1, dmq1, iqmp));
+            mem::forget((exponent_p, exponent_q, inverse_q));
         }
         Ok(self)
     }
 
     /// Returns the Rsa key.
-    #[must_use]
+    #[must_use = "The returned owned value is the result of consuming the original owner."]
     pub fn build(self) -> Rsa<Private> {
         self.rsa
     }
 }
 
 impl Rsa<Private> {
-    /// Creates a new RSA key with private components (public components are assumed).
-    ///
-    /// This a convenience method over
-    /// `Rsa::build(n, e, d)?.set_factors(p, q)?.set_crt_params(dmp1, dmq1, iqmp)?.build()`
-    #[allow(clippy::too_many_arguments, clippy::many_single_char_names)]
-    pub fn from_private_components(
-        n: BigNum,
-        e: BigNum,
-        d: BigNum,
-        p: BigNum,
-        q: BigNum,
-        dmp1: BigNum,
-        dmq1: BigNum,
-        iqmp: BigNum,
-    ) -> Result<Rsa<Private>, ErrorStack> {
-        Ok(RsaPrivateKeyBuilder::new(n, e, d)?
-            .set_factors(p, q)?
-            .set_crt_params(dmp1, dmq1, iqmp)?
-            .build())
-    }
-
     /// Generates a public/private key pair with the specified size.
     ///
     /// The public exponent will be 65537.
     #[corresponds(RSA_generate_key_ex)]
-    pub fn generate(bits: u32) -> Result<Rsa<Private>, ErrorStack> {
+    pub fn generate(bits: u32) -> Result<Self, ErrorStack> {
         let e = BigNum::from_u32(ffi::RSA_F4 as u32)?;
-        Rsa::generate_with_e(bits, &e)
+        Self::generate_with_e(bits, &e)
     }
 
     /// Generates a public/private key pair with the specified size and a custom exponent.
     ///
     /// Unless you have specific needs and know what you're doing, use `Rsa::generate` instead.
     #[corresponds(RSA_generate_key_ex)]
-    pub fn generate_with_e(bits: u32, e: &BigNumRef) -> Result<Rsa<Private>, ErrorStack> {
+    pub fn generate_with_e(bits: u32, e: &BigNumRef) -> Result<Self, ErrorStack> {
+        let bits = c_int::try_from(bits).map_err(ErrorStack::internal_error)?;
+        // SAFETY: own the native key before starting generation. The readable
+        // public exponent remains borrowed for the complete native invocation.
         unsafe {
-            let rsa = Rsa::from_ptr(cvt_p(ffi::RSA_new())?);
+            let rsa = Self::from_ptr(cvt_p(ffi::RSA_new())?);
             cvt(ffi::RSA_generate_key_ex(
                 rsa.0,
-                bits as c_int,
+                bits,
                 e.as_ptr(),
                 ptr::null_mut(),
             ))?;
@@ -640,6 +615,11 @@ mod test {
     }
 
     #[test]
+    fn rejects_modulus_bits_outside_native_integer_range() {
+        assert!(Rsa::generate(u32::MAX).is_err());
+    }
+
+    #[test]
     fn test_to_password() {
         let key = Rsa::generate(2048).unwrap();
         let pem = key
@@ -647,6 +627,18 @@ mod test {
             .unwrap();
         Rsa::private_key_from_pem_passphrase(&pem, b"foobar").unwrap();
         assert!(Rsa::private_key_from_pem_passphrase(&pem, b"fizzbuzz").is_err());
+    }
+
+    #[test]
+    fn rejects_small_output_and_trailing_der() {
+        let key = Rsa::private_key_from_pem(include_bytes!("../test/rsa.pem")).unwrap();
+        assert!(key
+            .public_encrypt(b"message", &mut [0; 1], Padding::PKCS1)
+            .is_err());
+        let mut der = key.private_key_to_der().unwrap();
+        assert!(Rsa::private_key_from_der(&der).is_ok());
+        der.push(0);
+        assert!(Rsa::private_key_from_der(&der).is_err());
     }
 
     #[test]
@@ -713,10 +705,9 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
-    fn test_public_key_from_pem_pkcs1_file_panic() {
+    fn rejects_spki_when_pkcs1_public_key_expected() {
         let key = include_bytes!("../test/key.pem.pub");
-        Rsa::public_key_from_pem_pkcs1(key).unwrap();
+        assert!(Rsa::public_key_from_pem_pkcs1(key).is_err());
     }
 
     #[test]
@@ -727,11 +718,10 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
-    fn test_public_key_from_pem_pkcs1_generate_panic() {
+    fn rejects_generated_spki_when_pkcs1_public_key_expected() {
         let keypair = Rsa::generate(512).unwrap();
         let pubkey_pem = keypair.public_key_to_pem().unwrap();
-        Rsa::public_key_from_pem_pkcs1(&pubkey_pem).unwrap();
+        assert!(Rsa::public_key_from_pem_pkcs1(&pubkey_pem).is_err());
     }
 
     #[test]
@@ -775,10 +765,12 @@ mod test {
     }
 
     #[test]
-    #[allow(clippy::redundant_clone)]
     fn clone() {
         let key = Rsa::generate(2048).unwrap();
-        drop(key.clone());
+        let shared = key.clone();
+        assert_eq!(key.n().to_vec(), shared.n().to_vec());
+        drop(key);
+        assert!(shared.check_key().unwrap());
     }
 
     #[test]

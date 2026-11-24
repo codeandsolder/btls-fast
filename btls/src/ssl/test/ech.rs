@@ -25,7 +25,7 @@ fn bootstrap_ech(config: &[u8], key: &[u8], list: Option<&[u8]>) -> (Server, Cli
     let server = {
         let key = HpkeKey::dhkem_p256_sha256(key).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
-        ech_keys_builder.add_key(true, config, key).unwrap();
+        ech_keys_builder.add_key(true, config, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
 
         let mut builder = Server::builder();
@@ -58,7 +58,7 @@ fn ech_disable_from_select_certificate_callback() {
     let server = {
         let key = HpkeKey::dhkem_p256_sha256(ECH_KEY).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
-        ech_keys_builder.add_key(true, ECH_CONFIG, key).unwrap();
+        ech_keys_builder.add_key(true, ECH_CONFIG, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
 
         let mut builder = Server::builder();
@@ -81,7 +81,8 @@ fn ech_disable_from_select_certificate_callback() {
                 } else {
                     Ok(SelectCertAction::Success)
                 }
-            });
+            })
+            .unwrap();
 
         builder.build()
     };
@@ -111,7 +112,7 @@ fn ech_disable_repeatedly_fails_after_outer_client_hello() {
     let server = {
         let key = HpkeKey::dhkem_p256_sha256(ECH_KEY).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
-        ech_keys_builder.add_key(true, ECH_CONFIG, key).unwrap();
+        ech_keys_builder.add_key(true, ECH_CONFIG, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
 
         let mut builder = Server::builder();
@@ -126,7 +127,8 @@ fn ech_disable_repeatedly_fails_after_outer_client_hello() {
                 } else {
                     Err(SelectCertError::ERROR)
                 }
-            });
+            })
+            .unwrap();
 
         builder.build()
     };
@@ -145,7 +147,7 @@ fn ech_disable_from_async_select_certificate_callback() {
     let server = {
         let key = HpkeKey::dhkem_p256_sha256(ECH_KEY).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
-        ech_keys_builder.add_key(true, ECH_CONFIG, key).unwrap();
+        ech_keys_builder.add_key(true, ECH_CONFIG, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
 
         let mut builder = Server::builder();
@@ -164,8 +166,9 @@ fn ech_disable_from_async_select_certificate_callback() {
                         }
                     }) as BoxSelectCertActionFinish)
                 }))
-            });
-        builder.ssl_cb(|ssl| ssl.set_task_waker(Some(Waker::noop().clone())));
+            })
+            .unwrap();
+        builder.ssl_cb(|ssl| ssl.set_task_waker(Some(Waker::noop().clone())).unwrap());
 
         builder.build()
     };

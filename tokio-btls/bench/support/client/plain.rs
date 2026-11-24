@@ -13,7 +13,7 @@ impl ClientAdapter for Adapter {
     type Stream<S>
         = S
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 
     const NAME: &'static str = "plaintext";
     const TLS: Tls = Tls::Disabled;
@@ -22,10 +22,13 @@ impl ClientAdapter for Adapter {
         Ok(())
     }
 
-    async fn connect<S>(_: &Self::Connector, transport: S) -> Result<Self::Stream<S>, BoxError>
+    fn connect<S>(
+        (): &Self::Connector,
+        transport: S,
+    ) -> impl std::future::Future<Output = Result<Self::Stream<S>, BoxError>> + Send
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
     {
-        Ok(transport)
+        std::future::ready(Ok(transport))
     }
 }

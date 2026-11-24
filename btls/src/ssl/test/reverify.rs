@@ -40,11 +40,13 @@ fn verify_peer_cert_chain_reverifies_resumed_sessions() {
         ctx.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
             verified.fetch_add(1, Ordering::SeqCst);
             Ok(ssl.verify_peer_cert_chain()?)
-        });
+        })
+        .unwrap();
         ctx.set_reverify_on_resume(true);
         ctx.set_session_cache_mode(SslSessionCacheMode::CLIENT);
         let sessions = sessions.clone();
-        ctx.set_new_session_callback(move |_, session| sessions.lock().unwrap().push(session));
+        ctx.set_new_session_callback(move |_, session| sessions.lock().unwrap().push(session))
+            .unwrap();
         ctx.build()
     };
     let connect = |ctx: &SslContext, host: &str, session: Option<SslSession>| {
