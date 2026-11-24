@@ -87,12 +87,14 @@ struct Batches {
 /// TLS 1.3 with `TLS_AES_128_GCM_SHA256` and skips certificate checks; the server asserts the suite.
 trait ClientAdapter {
     /// Client configuration built once per registered benchmark.
-    type Connector;
+    // Connections and their handshake futures are safe to move between
+    // executor threads, although measured runs use a current-thread runtime.
+    type Connector: Sync;
 
     /// Stream returned by [`Self::connect`] over transport `S`.
-    type Stream<S>: AsyncRead + AsyncWrite + Unpin
+    type Stream<S>: AsyncRead + AsyncWrite + Unpin + Send
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 
     /// Stable name appended to the Criterion benchmark ID.
     const NAME: &'static str;
@@ -107,9 +109,9 @@ trait ClientAdapter {
     fn connect<S>(
         connector: &Self::Connector,
         transport: S,
-    ) -> impl Future<Output = Result<Self::Stream<S>, BoxError>>
+    ) -> impl Future<Output = Result<Self::Stream<S>, BoxError>> + Send
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 }
 
 // ===== impl ClientBenchCase =====
@@ -310,23 +312,17 @@ impl Peer {
     }
 
     /// Has the server send `copies` of `part` and returns the bytes then queued for the client.
-    fn send<'a>(
-        &'a mut self,
-        part: &'a [u8],
-        copies: usize,
-    ) -> impl Future<Output = Result<usize, BoxError>> + 'a {
-        async move {
-            match self {
-                Self::Memory(peer) => {
-                    peer.send(part, copies).await?;
-                    Ok(peer.in_flight())
-                }
-                Self::Tcp(peer) => {
-                    let queued = peer.send(part.len(), copies)?;
-                    // The runtime takes in the socket's readiness here instead of in the timed reads.
-                    tokio::task::yield_now().await;
-                    Ok(queued)
-                }
+    async fn send(&mut self, part: &[u8], copies: usize) -> Result<usize, BoxError> {
+        match self {
+            Self::Memory(peer) => {
+                peer.send(part, copies).await?;
+                Ok(peer.in_flight())
+            }
+            Self::Tcp(peer) => {
+                let queued = peer.send(part.len(), copies)?;
+                // The runtime takes in the socket's readiness here instead of in the timed reads.
+                tokio::task::yield_now().await;
+                Ok(queued)
             }
         }
     }
@@ -340,20 +336,14 @@ impl Peer {
     }
 
     /// Has the server receive `copies` of `part` and compare them with it.
-    fn receive<'a>(
-        &'a mut self,
-        part: &'a [u8],
-        copies: usize,
-    ) -> impl Future<Output = Result<(), BoxError>> + 'a {
-        async move {
-            match self {
-                Self::Memory(peer) => peer.receive(part, copies).await,
-                Self::Tcp(peer) => {
-                    peer.receive(part.len() * copies)?;
-                    // As in `send`: socket events from the server's reads are handled off the clock.
-                    tokio::task::yield_now().await;
-                    Ok(())
-                }
+    async fn receive(&mut self, part: &[u8], copies: usize) -> Result<(), BoxError> {
+        match self {
+            Self::Memory(peer) => peer.receive(part, copies).await,
+            Self::Tcp(peer) => {
+                peer.receive(part.len() * copies)?;
+                // As in `send`: socket events from the server's reads are handled off the clock.
+                tokio::task::yield_now().await;
+                Ok(())
             }
         }
     }
@@ -446,52 +436,48 @@ where
 }
 
 /// Handshakes over a fresh memory transport, both sides on this task, and checks one body.
-fn open_memory<A>(
+async fn open_memory<A>(
     connector: &A::Connector,
     case: ClientCase,
-) -> impl Future<Output = Result<Connection<A::Stream<MemoryStream>>, BoxError>> + '_
+) -> Result<Connection<A::Stream<MemoryStream>>, BoxError>
 where
     A: ClientAdapter,
 {
-    async move {
-        let (client, server) = memory::pair();
-        let acceptor = server::acceptor()?;
-        let (stream, peer) = tokio::try_join!(
-            A::connect(connector, client),
-            server::accept(&acceptor, server)
-        )?;
-        let peer = MemoryPeer::new(peer, case.target.direction, case.body.len)?;
-        let mut connection = Connection::new(stream, case, Peer::Memory(peer));
-        connection.check(case).await?;
-        Ok(connection)
-    }
+    let (client, server) = memory::pair();
+    let acceptor = server::acceptor()?;
+    let (stream, peer) = tokio::try_join!(
+        A::connect(connector, client),
+        server::accept(&acceptor, server)
+    )?;
+    let peer = MemoryPeer::new(peer, case.target.direction, case.body.len)?;
+    let mut connection = Connection::new(stream, case, Peer::Memory(peer));
+    connection.check(case).await?;
+    Ok(connection)
 }
 
 /// Connects to a fresh loopback server thread, handshakes, and checks one body.
-fn open_tcp<A>(
+async fn open_tcp<A>(
     connector: &A::Connector,
     case: ClientCase,
-) -> impl Future<Output = Result<Connection<A::Stream<TcpStream>>, BoxError>> + '_
+) -> Result<Connection<A::Stream<TcpStream>>, BoxError>
 where
     A: ClientAdapter,
 {
-    async move {
-        // Wall-time rows stream end to end; CPU-time rows time only the client's side of a batch.
-        let pace = match case.target.clock {
-            Clock::Wall => Pace::Stream,
-            Clock::Cpu => Pace::Batch,
-        };
-        let (tcp, mut peer) =
-            TcpPeer::open(A::TLS, pace, case.target.direction, case.body.bytes()).await?;
-        let stream = match A::connect(connector, tcp).await {
-            Ok(stream) => stream,
-            Err(error) => return Err(peer.explain(error)),
-        };
-        let mut connection = Connection::new(stream, case, Peer::Tcp(peer));
-        match connection.check(case).await {
-            Ok(()) => Ok(connection),
-            Err(error) => Err(connection.explain(error)),
-        }
+    // Wall-time rows stream end to end; CPU-time rows time only the client's side of a batch.
+    let pace = match case.target.clock {
+        Clock::Wall => Pace::Stream,
+        Clock::Cpu => Pace::Batch,
+    };
+    let (tcp, mut peer) =
+        TcpPeer::open(A::TLS, pace, case.target.direction, case.body.bytes()).await?;
+    let stream = match A::connect(connector, tcp).await {
+        Ok(stream) => stream,
+        Err(error) => return Err(peer.explain(error)),
+    };
+    let mut connection = Connection::new(stream, case, Peer::Tcp(peer));
+    match connection.check(case).await {
+        Ok(()) => Ok(connection),
+        Err(error) => Err(connection.explain(error)),
     }
 }
 

@@ -1,10 +1,9 @@
 //! In-memory transport and the tokio-btls server driven over it between timed batches.
 
 use std::{
-    cell::RefCell,
     io::{self, IoSlice},
     pin::Pin,
-    rc::Rc,
+    sync::{Arc, Mutex, MutexGuard, PoisonError},
     task::{Context, Poll, Waker},
 };
 
@@ -30,13 +29,13 @@ struct Shared {
     handshake: bool,
 }
 
-/// One end of an in-memory duplex transport for a single-thread runtime.
+/// One end of an in-memory duplex transport, shared safely across threads.
 ///
 /// Writes never block and are kept until read. During the handshake a read of an empty pipe
 /// waits for the other end; afterwards it fails with `UnexpectedEof`, so a stray poll fails at
 /// once instead of hanging the only task.
 pub(super) struct MemoryStream {
-    shared: Rc<RefCell<Shared>>,
+    shared: Arc<Mutex<Shared>>,
     // This end reads `pipes[rx]` and writes the other pipe.
     rx: usize,
 }
@@ -51,7 +50,7 @@ pub(super) struct MemoryPeer {
 
 /// Creates the two connected ends of a transport in its handshake phase.
 pub(super) fn pair() -> (MemoryStream, MemoryStream) {
-    let shared = Rc::new(RefCell::new(Shared {
+    let shared = Arc::new(Mutex::new(Shared {
         pipes: Default::default(),
         handshake: true,
     }));
@@ -65,16 +64,23 @@ pub(super) fn pair() -> (MemoryStream, MemoryStream) {
 // ===== impl MemoryStream =====
 
 impl MemoryStream {
+    // The shared in-memory pipes can also be moved to another executor thread.
+    // Recover a poisoned lock for diagnostic cleanup after a failed benchmark;
+    // the pipe's bytes and read offset are updated transactionally.
+    fn lock_shared(&self) -> MutexGuard<'_, Shared> {
+        self.shared.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Bytes waiting for this end to read.
     fn unread(&self) -> usize {
-        let shared = self.shared.borrow();
+        let shared = self.lock_shared();
         let pipe = &shared.pipes[self.rx];
         pipe.bytes.len() - pipe.pos
     }
 
     /// Bytes this end wrote that the other end has not read.
     fn in_flight(&self) -> usize {
-        let shared = self.shared.borrow();
+        let shared = self.lock_shared();
         let pipe = &shared.pipes[1 - self.rx];
         pipe.bytes.len() - pipe.pos
     }
@@ -82,7 +88,7 @@ impl MemoryStream {
     /// Appends `bufs` to the pipe the other end reads.
     fn append(&self, bufs: &[IoSlice<'_>]) -> usize {
         let (written, reader) = {
-            let mut shared = self.shared.borrow_mut();
+            let mut shared = self.lock_shared();
             let pipe = &mut shared.pipes[1 - self.rx];
             let start = pipe.bytes.len();
             for buf in bufs {
@@ -103,7 +109,7 @@ impl AsyncRead for MemoryStream {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        let mut shared = self.shared.borrow_mut();
+        let mut shared = self.lock_shared();
         let handshake = shared.handshake;
         let pipe = &mut shared.pipes[self.rx];
         let available = &pipe.bytes[pipe.pos..];
@@ -173,7 +179,7 @@ impl MemoryPeer {
         len: usize,
     ) -> Result<Self, BoxError> {
         let transport = stream.get_ref();
-        transport.shared.borrow_mut().handshake = false;
+        transport.lock_shared().handshake = false;
         if transport.in_flight() != 0 || transport.unread() != 0 {
             return Err("memory transport holds data after the handshake".into());
         }
@@ -195,46 +201,60 @@ impl MemoryPeer {
     }
 
     /// Seals `copies` of `part` into the transport.
-    pub(super) fn send<'a>(
-        &'a mut self,
-        part: &'a [u8],
-        copies: usize,
-    ) -> impl std::future::Future<Output = io::Result<()>> + 'a {
-        async move {
-            for _ in 0..copies {
-                self.stream.write_all(part).await?;
-            }
-            self.stream.flush().await
+    pub(super) async fn send(&mut self, part: &[u8], copies: usize) -> io::Result<()> {
+        for _ in 0..copies {
+            self.stream.write_all(part).await?;
         }
+        self.stream.flush().await
     }
 
     /// Opens `copies` of `part` and compares each with it.
     ///
     /// The client's ciphertext must cover them, and nothing may follow. Only a lower bound holds
-    /// for its length, since rustls adds a KeyUpdate record every 2^24 records.
-    pub(super) fn receive<'a>(
-        &'a mut self,
-        part: &'a [u8],
-        copies: usize,
-    ) -> impl std::future::Future<Output = Result<(), BoxError>> + 'a {
-        async move {
-            let sealed = Tls::Enabled.wire_len(part.len()) * copies;
-            if self.unread() < sealed {
-                return Err(
-                    format!("client wrote {} bytes, expected {sealed}", self.unread()).into(),
-                );
-            }
-            let buf = &mut self.buf[..part.len()];
-            for _ in 0..copies {
-                self.stream.read_exact(buf).await?;
-                if *buf != *part {
-                    return Err("server received a different body".into());
-                }
-            }
-            match self.unread() {
-                0 => Ok(()),
-                left => Err(format!("client wrote {left} bytes beyond its bodies").into()),
+    /// for its length, since `rustls` adds a KeyUpdate record every 2^24 records.
+    pub(super) async fn receive(&mut self, part: &[u8], copies: usize) -> Result<(), BoxError> {
+        let sealed = Tls::Enabled.wire_len(part.len()) * copies;
+        if self.unread() < sealed {
+            return Err(format!("client wrote {} bytes, expected {sealed}", self.unread()).into());
+        }
+        let buf = &mut self.buf[..part.len()];
+        for _ in 0..copies {
+            self.stream.read_exact(buf).await?;
+            if *buf != *part {
+                return Err("server received a different body".into());
             }
         }
+        match self.unread() {
+            0 => Ok(()),
+            left => Err(format!("client wrote {left} bytes beyond its bodies").into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplex_memory_transport_is_send_and_wakes_cross_thread_reader() {
+        let (mut writer, mut reader) = pair();
+        let body: Vec<u8> = (0..2048).map(|i| (i % 251) as u8).collect();
+        let expected = body.clone();
+        let sender = tokio::spawn(async move {
+            for _ in 0..128 {
+                writer.write_all(&body).await?;
+            }
+            Ok::<(), io::Error>(())
+        });
+        let receiver = tokio::spawn(async move {
+            let mut output = vec![0; expected.len()];
+            for _ in 0..128 {
+                reader.read_exact(&mut output).await?;
+                assert_eq!(output, expected);
+            }
+            Ok::<(), io::Error>(())
+        });
+        sender.await.unwrap().unwrap();
+        receiver.await.unwrap().unwrap();
     }
 }

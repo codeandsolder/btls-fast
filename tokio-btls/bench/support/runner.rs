@@ -19,6 +19,7 @@ const RELAXED_FRAMING: &str = "TOKIO_BTLS_BENCH_RELAXED_FRAMING";
 const REVERSE_ORDER: &str = "TOKIO_BTLS_BENCH_REVERSE_ORDER";
 
 /// Builds the Criterion configuration shared by every target.
+#[must_use = "Use this configuration to register and run benchmark cases."]
 pub fn criterion() -> Criterion {
     Criterion::default()
         .sample_size(10)
@@ -27,7 +28,9 @@ pub fn criterion() -> Criterion {
 
 /// Runs the complete body matrix for one benchmark target.
 ///
-/// Returns any throughput conversion, server, client, or data check error from setup.
+/// # Errors
+///
+/// Throughput conversion, server setup, client negotiation, or data checks fail.
 pub fn bench(criterion: &mut Criterion, target: BenchTarget) -> Result<(), BoxError> {
     const OS: &str = std::env::consts::OS;
     const ARCH: &str = std::env::consts::ARCH;
@@ -55,7 +58,7 @@ pub fn bench(criterion: &mut Criterion, target: BenchTarget) -> Result<(), BoxEr
             ClientBenchCase::new(target, body_case, exact_framing),
             reverse_order,
         )?;
-        if let Transport::Memory = target.transport {
+        if matches!(target.transport, Transport::Memory) {
             bench_aead(&mut group, target, body_case.bytes(), reverse_order)?;
         }
         group.finish();

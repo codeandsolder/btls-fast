@@ -70,7 +70,7 @@ impl ClientAdapter for Adapter {
     type Stream<S>
         = TlsStream<S>
     where
-        S: AsyncRead + AsyncWrite + Unpin;
+        S: AsyncRead + AsyncWrite + Unpin + Send;
 
     const NAME: &'static str = "tokio-rustls";
     const TLS: Tls = Tls::Enabled;
@@ -92,7 +92,7 @@ impl ClientAdapter for Adapter {
         transport: S,
     ) -> Result<Self::Stream<S>, BoxError>
     where
-        S: AsyncRead + AsyncWrite + Unpin,
+        S: AsyncRead + AsyncWrite + Unpin + Send,
     {
         let server_name = ServerName::try_from("localhost")?;
         Ok(connector.connect(server_name, transport).await?)

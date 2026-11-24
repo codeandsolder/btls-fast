@@ -98,7 +98,7 @@ impl TcpPeer {
     ) -> Result<(TcpStream, Self), BoxError> {
         let listener = TcpSocket::new_v4()?;
         let client = TcpSocket::new_v4()?;
-        if let Pace::Batch = pace {
+        if matches!(pace, Pace::Batch) {
             // Set before connecting, so the window scale fits; accepted sockets inherit them.
             for socket in [&listener, &client] {
                 socket.set_recv_buffer_size(SOCKET_BUF_LEN)?;
@@ -121,7 +121,7 @@ impl TcpPeer {
         let (requests, request_rx) = mpsc::channel();
         let (reply_tx, replies) = mpsc::channel();
         let thread =
-            thread::spawn(move || serve(socket, tls, direction, body, request_rx, reply_tx));
+            thread::spawn(move || serve(socket, tls, direction, body, request_rx, &reply_tx));
         let peer = Self {
             tls,
             pace,
@@ -355,7 +355,7 @@ where
         Ok(n)
     }
 
-    fn advance(&mut self, n: usize) {
+    const fn advance(&mut self, n: usize) {
         self.moved += n as u64;
         self.offset = (self.offset + n) % self.body.len();
     }
@@ -412,7 +412,7 @@ fn serve(
     direction: Direction,
     body: &'static [u8],
     requests: Receiver<Request>,
-    replies: Sender<()>,
+    replies: &Sender<()>,
 ) -> Result<u64, BoxError> {
     let runtime = tokio_runtime()?;
     let socket = {
@@ -422,9 +422,9 @@ fn serve(
     match tls {
         Tls::Enabled => {
             let stream = runtime.block_on(async { accept(&acceptor()?, socket).await })?;
-            Server::new(stream, direction, body).run(&runtime, requests, &replies)
+            Server::new(stream, direction, body).run(&runtime, requests, replies)
         }
-        Tls::Disabled => Server::new(socket, direction, body).run(&runtime, requests, &replies),
+        Tls::Disabled => Server::new(socket, direction, body).run(&runtime, requests, replies),
     }
 }
 
