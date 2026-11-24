@@ -173,8 +173,8 @@ impl SslContextBuilder {
     /// itself a closure that will be passed [`ClientHello`] to configure
     /// the connection based on the computations done in the future.
     ///
-    /// A task waker must be set on `Ssl` values associated with the resulting
-    /// `SslContext` with [`SslRef::set_task_waker`].
+    /// Drive the connection using [`super::SslStream::with_task_waker`], as
+    /// tokio-btls does, or set a task waker with [`SslRef::set_task_waker`].
     ///
     /// See [`SslContextBuilder::set_select_certificate_callback`] for the sync
     /// setter of this callback.
@@ -212,8 +212,8 @@ impl SslContextBuilder {
     /// will be passed [`ClientHello`] to configure the connection based on the computations done
     /// in the future.
     ///
-    /// A task waker must be set on `Ssl` values associated with the resulting `SslContext` with
-    /// [`SslRef::set_task_waker`]. Returning [`SelectCertAction::DisableEch`] discards an inner
+    /// Drive the connection using [`super::SslStream::with_task_waker`], as
+    /// tokio-btls does, or set a task waker with [`SslRef::set_task_waker`]. Returning [`SelectCertAction::DisableEch`] discards an inner
     /// `ClientHello`, invokes the callback again with the outer `ClientHello`, and continues without
     /// retry configs. It is only valid when ECH has been accepted; returning it otherwise fails
     /// the handshake.
@@ -249,8 +249,8 @@ impl SslContextBuilder {
 
     /// Configures a custom private key method on the context.
     ///
-    /// A task waker must be set on `Ssl` values associated with the resulting
-    /// `SslContext` with [`SslRef::set_task_waker`].
+    /// Drive the connection using [`super::SslStream::with_task_waker`], as
+    /// tokio-btls does, or set a task waker with [`SslRef::set_task_waker`].
     ///
     /// See [`AsyncPrivateKeyMethod`] for more details.
     ///
@@ -272,8 +272,8 @@ impl SslContextBuilder {
     /// It should return the session corresponding to that ID if available. This is
     /// only used for servers, not clients.
     ///
-    /// A task waker must be set on `Ssl` values associated with the resulting
-    /// `SslContext` with [`SslRef::set_task_waker`].
+    /// Drive the connection using [`super::SslStream::with_task_waker`], as
+    /// tokio-btls does, or set a task waker with [`SslRef::set_task_waker`].
     ///
     /// See [`SslContextBuilder::set_get_session_callback`] for the sync setter
     /// of this callback.
@@ -324,8 +324,8 @@ impl SslContextBuilder {
     /// [`SslAlert::UNKNOWN_CA`], [`SslAlert::BAD_CERTIFICATE`], [`SslAlert::CERTIFICATE_UNKNOWN`],
     /// and [`SslAlert::INTERNAL_ERROR`]. See RFC 5246 section 7.2.2 for their precise meanings.
     ///
-    /// A task waker must be set on `Ssl` values associated with the resulting
-    /// `SslContext` with [`SslRef::set_task_waker`].
+    /// Drive the connection using [`super::SslStream::with_task_waker`], as
+    /// tokio-btls does, or set a task waker with [`SslRef::set_task_waker`].
     ///
     /// See [`SslContextBuilder::set_custom_verify_callback`] for the sync version of this method.
     ///
@@ -349,8 +349,8 @@ impl SslContextBuilder {
 impl SslCredentialBuilder {
     /// Configures a custom private key method on the context.
     ///
-    /// A task waker must be set on `Ssl` values associated with the resulting
-    /// `SslContext` with [`SslRef::set_task_waker`].
+    /// Drive the connection using [`super::SslStream::with_task_waker`], as
+    /// tokio-btls does, or set a task waker with [`SslRef::set_task_waker`].
     ///
     /// See [`AsyncPrivateKeyMethod`] for more details.
     ///

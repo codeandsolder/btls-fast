@@ -132,7 +132,7 @@ impl Error {
 
     /// Whether a Rust async TLS callback was polled and registered the
     /// current scoped task waker before requesting a retry.
-    #[must_use]
+    #[must_use = "Only suspend a runtime poll when its task waker was registered."]
     pub const fn is_async_callback_pending(&self) -> bool {
         self.async_callback_pending
     }
