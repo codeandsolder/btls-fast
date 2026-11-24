@@ -837,9 +837,9 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
 // callback lookup and borrowed input. The closure may only return a boolean:
 // neither a borrowed native SSL value nor an input slice can escape this scope.
 //
-// # Safety
-// Non-null SSL and input pointers must remain live and readable for this
-// synchronous native callback. A null input is allowed only for zero length.
+/// # Safety
+/// Non-null SSL and input pointers must remain live and readable for this
+/// synchronous native callback. A null input is allowed only for zero length.
 unsafe fn with_certificate_compressor<C: CertificateCompressor>(
     ssl: *mut ffi::SSL,
     input: *const u8,

@@ -57,7 +57,7 @@ impl ServerCertVerifier for NoVerifier {
 }
 
 /// Configures the same TLS 1.3 benchmark peer for every benchmark harness.
-pub(crate) fn connector() -> Result<TlsConnector, Error> {
+pub fn connector() -> Result<TlsConnector, Error> {
     let mut provider = aws_lc_rs::default_provider();
     provider.cipher_suites = vec![aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256];
     let verifier = NoVerifier(provider.signature_verification_algorithms);
