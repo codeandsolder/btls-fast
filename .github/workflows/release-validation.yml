@@ -183,7 +183,7 @@ jobs:
         run: rustup show && rustup target add ${{ matrix.target }}
         shell: bash
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version: ">=1.27.0"
       - name: Install target-specific APT dependencies
@@ -197,7 +197,7 @@ jobs:
         shell: cmd
       - name: Setup 32-bit MSYS2
         if: matrix.thing == 'i686-mingw'
-        uses: msys2/setup-msys2@v2
+        uses: msys2/setup-msys2@3c51bf698df1e37b2261f53cb67797b97761185c # v2
         id: msys2
         with:
           msystem: MINGW32
@@ -224,7 +224,7 @@ jobs:
       - name: Install LLVM and Clang
         # Windows ARM64 uses the runner's native LLVM.
         if: startsWith(matrix.os, 'windows') && matrix.target != 'aarch64-pc-windows-msvc'
-        uses: KyleMayes/install-llvm-action@v2
+        uses: KyleMayes/install-llvm-action@ebc0426251bc40c7cd31162802432c68818ab8f0 # v2
         with:
           version: "11.0"
           directory: ${{ runner.temp }}/llvm
@@ -236,8 +236,8 @@ jobs:
         run: echo "CARGO_TARGET_$(echo ${{ matrix.target }} | tr \\-a-z _A-Z)_LINKER=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/$(echo ${{ matrix.target }} | sed s/armv7/armv7a/)21-clang++" >> "$GITHUB_ENV"
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Fetch deps
@@ -268,7 +268,7 @@ jobs:
         run: cargo package --locked --target ${{ matrix.target }} -p btls-sys
         shell: bash
         env: ${{ matrix.custom_env }}
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         if: always()
 
   test-fips:
@@ -282,13 +282,13 @@ jobs:
       run: rustup show
       shell: bash
     - name: Install golang
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
       with:
         go-version: '>=1.27.0'
     - name: Resolve fleet compiler
       id: compiler
-      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
-    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
+    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
       with:
         rust-toolchain: ${{ steps.compiler.outputs.channel }}
     - name: Run tests
@@ -305,7 +305,7 @@ jobs:
       # Both of these may no longer be the case after updating the BoringSSL
       # submodules to a new revision, so it's important to test this on CI.
       run: cargo package --locked -p btls-sys --features fips
-    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
       if: always()
 
   test-boringssl:
@@ -316,7 +316,7 @@ jobs:
       with:
         submodules: 'recursive'
     - name: Install golang
-      uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
       with:
         go-version: '>=1.27.0'
     - name: Install build tools (clang, cmake)
@@ -355,8 +355,8 @@ jobs:
       run: rustup show
     - name: Resolve fleet compiler
       id: compiler
-      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
-    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
+    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
       with:
         rust-toolchain: ${{ steps.compiler.outputs.channel }}
     - name: Configure BoringSSL ASan build
@@ -383,7 +383,7 @@ jobs:
       run: >-
         go test -shim-extra-flags=-seal-app-data
         -test='Basic-*;TLS-*;*KeyUpdate*;*CBCRecordSplitting*;*MaxSendFragment*;Renegotiate-*;*Shutdown*;*EarlyData*;*FalseStart*;*Alert*'
-    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
       if: always()
 
   cross-build:
@@ -401,7 +401,7 @@ jobs:
         run: rustup show && rustup target add ${{ matrix.target }}
         shell: bash
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version: ">=1.27.0"
       - name: Install ${{ matrix.target }} toolchain
@@ -421,13 +421,13 @@ jobs:
         run: echo "CXXFLAGS=-D__STDC_FORMAT_MACROS" >> $GITHUB_ENV
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Build for ${{ matrix.target }}
         run: cargo build --locked --target ${{ matrix.target }} --all-targets
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         if: always()
 
   test-features:
@@ -440,14 +440,14 @@ jobs:
       - name: Install Rust (rustup)
         run: rustup show
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: btls-sys/deps/boringssl/go.mod
           cache-dependency-path: btls-sys/deps/boringssl/go.sum
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Run `rpk` and `underscore-wildcards` tests
@@ -484,7 +484,7 @@ jobs:
           fi
           cat "$log"
           grep -qF '`prefix-symbols` features are mutually exclusive' "$log"
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         if: always()
 
   prefix-symbols:
@@ -553,7 +553,7 @@ jobs:
         with:
           submodules: recursive
       - name: Install golang
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: btls-sys/deps/boringssl/go.mod
           cache-dependency-path: btls-sys/deps/boringssl/go.sum
@@ -577,8 +577,8 @@ jobs:
         run: rustup show
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Create test project
@@ -705,5 +705,5 @@ jobs:
         working-directory: btls-sys
         shell: bash
         run: cargo package --locked --features prefix-symbols
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@c5f5e075e90a4ba4eff0e05924abcad4aa1a17bb # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@e39ba876b351c5ea4bc01ac906305729b2fe7565 # main
         if: always()
