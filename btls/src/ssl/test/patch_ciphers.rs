@@ -1,6 +1,6 @@
 #![cfg(not(feature = "fips"))]
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 

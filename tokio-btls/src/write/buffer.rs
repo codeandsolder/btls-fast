@@ -163,11 +163,11 @@ impl WriteBuffer {
     where
         S: AsyncWrite,
     {
-        if !self.blocked {
-            if let Err(error) = self.drain(transport) {
-                self.blocked = true;
-                self.defer_error(error);
-            }
+        if !self.blocked
+            && let Err(error) = self.drain(transport)
+        {
+            self.blocked = true;
+            self.defer_error(error);
         }
     }
 
@@ -192,7 +192,7 @@ impl WriteBuffer {
                     break Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "transport wrote more bytes than it was given",
-                    ))
+                    ));
                 }
                 Poll::Ready(Err(e)) => break Err(e),
                 Poll::Pending => break Err(io::Error::from(io::ErrorKind::WouldBlock)),

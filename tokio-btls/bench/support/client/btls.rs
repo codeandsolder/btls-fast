@@ -7,7 +7,7 @@ use ::tokio_btls::SslStream;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::ClientAdapter;
-use crate::support::{case::Tls, BoxError};
+use crate::support::{BoxError, case::Tls};
 
 /// Stateless adapter for the tokio-btls client stream.
 pub(super) struct Adapter;

@@ -105,7 +105,7 @@ impl CipherCtxRef {
             }
             (None | Some([]), None) => &[],
             (Some(_), None) => {
-                return Err(ErrorStack::internal_error_str("cipher does not use an IV"))
+                return Err(ErrorStack::internal_error_str("cipher does not use an IV"));
             }
         };
         if key.is_empty() {
@@ -179,11 +179,7 @@ impl Cipher {
     pub fn from_nid(nid: Nid) -> Option<Self> {
         // SAFETY: native lookup returns an immutable static descriptor or null.
         let ptr = unsafe { ffi::EVP_get_cipherbynid(nid.as_raw()) };
-        if ptr.is_null() {
-            None
-        } else {
-            Some(Self(ptr))
-        }
+        if ptr.is_null() { None } else { Some(Self(ptr)) }
     }
 
     #[must_use = "Use the returned algorithm descriptor to configure the cryptographic operation."]
@@ -335,11 +331,7 @@ impl Cipher {
         // SAFETY: self holds a valid immutable cipher descriptor.
         unsafe {
             let len = EVP_CIPHER_iv_length(self.0) as usize;
-            if len == 0 {
-                None
-            } else {
-                Some(len)
-            }
+            if len == 0 { None } else { Some(len) }
         }
     }
 

@@ -30,7 +30,7 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_btls::SslStream;
-use tokio_rustls::{client::TlsStream, rustls::pki_types::ServerName, TlsConnector};
+use tokio_rustls::{TlsConnector, client::TlsStream, rustls::pki_types::ServerName};
 
 #[path = "support/allocator.rs"]
 mod allocator;

@@ -10,7 +10,7 @@ use btls::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName,
     SubjectKeyIdentifier,
 };
-use btls::x509::{X509NameBuilder, X509Ref, X509Req, X509ReqBuilder, X509};
+use btls::x509::{X509, X509NameBuilder, X509Ref, X509Req, X509ReqBuilder};
 
 /// Make a CA certificate and private key
 fn mk_ca_cert() -> Result<(X509, PKey<Private>), Box<dyn std::error::Error>> {

@@ -3,8 +3,8 @@ use std::{
     net::ToSocketAddrs,
     pin::Pin,
     sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
     time::Duration,

@@ -9,6 +9,15 @@ and [Raw Public Key](https://docs.rs/btls/latest/btls/ssl/struct.SslRef.html#met
 
 To use BoringSSL from Rust, prefer the [higher-level safe API](https://docs.rs/btls).
 
+## Native source inputs
+
+For a Git checkout, initialize the vendored source before building with
+`git submodule update --init --recursive`. The build does not fetch it.
+Cargo tracks the native source, headers, and patch inputs for rebuilds.
+A caller-provided `BORING_BSSL{,_FIPS}_SOURCE_PATH` must already contain the
+required patches and be accompanied by `BORING_BSSL{,_FIPS}_ASSUME_PATCHED`.
+The build never applies patches to caller-owned sources.
+
 ## Speeding up the build
 
 Compiling BoringSSL from source is by far the most expensive part of building

@@ -1,7 +1,7 @@
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreign_types::ForeignTypeRef;
@@ -16,11 +16,11 @@ use crate::ssl::{
     SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
 };
 use crate::stack::StackRef;
-use crate::x509::{X509Ref, X509};
+use crate::x509::{X509, X509Ref};
 use std::net::IpAddr;
 
-use super::callbacks::raw_client_session;
 use super::MidHandshakeSslStream;
+use super::callbacks::raw_client_session;
 
 pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);

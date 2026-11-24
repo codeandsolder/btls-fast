@@ -8,8 +8,8 @@ use crate::ssl::{
     Ssl, SslContext, SslContextBuilder, SslFiletype, SslMethod, SslSession, SslSessionCacheMode,
     SslVerifyMode,
 };
-use crate::x509::store::X509StoreBuilder;
 use crate::x509::X509;
+use crate::x509::store::X509StoreBuilder;
 
 #[test]
 fn verify_peer_cert_chain_reverifies_resumed_sessions() {

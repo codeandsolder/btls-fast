@@ -73,7 +73,7 @@ impl fmt::Display for EarlyDataReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.description() {
             Some(description) => f.write_str(description),
-            None => write!(f, "unknown early data reason {}", self.0 .0),
+            None => write!(f, "unknown early data reason {}", self.0.0),
         }
     }
 }

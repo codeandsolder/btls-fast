@@ -16,11 +16,11 @@
 //! `BoringSSL` deliberately reports stable compatibility strings rather than
 //! an OpenSSL release date or configure-time provenance.
 
-use std::ffi::{c_int, c_ulong, CStr};
+use std::ffi::{CStr, c_int, c_ulong};
 
 use crate::ffi::{
-    OpenSSL_version, OpenSSL_version_num, OPENSSL_BUILT_ON, OPENSSL_CFLAGS, OPENSSL_DIR,
-    OPENSSL_PLATFORM, OPENSSL_VERSION,
+    OPENSSL_BUILT_ON, OPENSSL_CFLAGS, OPENSSL_DIR, OPENSSL_PLATFORM, OPENSSL_VERSION,
+    OpenSSL_version, OpenSSL_version_num,
 };
 
 /// Returns the native compatibility version identifier without signed truncation.

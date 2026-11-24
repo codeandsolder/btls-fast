@@ -485,9 +485,10 @@ mod tests {
                         _ => panic!("mismatched parameter set"),
                     }
                     drop(sk);
-                    assert!(pk
-                        .verify(b"after drop", &copy.sign(b"after drop").unwrap())
-                        .is_ok());
+                    assert!(
+                        pk.verify(b"after drop", &copy.sign(b"after drop").unwrap())
+                            .is_ok()
+                    );
                 }
 
                 #[test]

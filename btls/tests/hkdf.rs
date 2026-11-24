@@ -1,4 +1,4 @@
-use btls::hash::{hash, MessageDigest};
+use btls::hash::{MessageDigest, hash};
 use btls::hkdf::HkdfSuite;
 
 const RFC5869_CASE_2_INFO: &str = concat!(

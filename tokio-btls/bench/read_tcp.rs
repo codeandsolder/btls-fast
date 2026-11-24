@@ -2,7 +2,7 @@
 
 use tokio_btls_bench as support;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use support::{BenchTarget, Clock, Direction, Transport};
 
 /// Target dimensions for the loopback TCP read benchmark.

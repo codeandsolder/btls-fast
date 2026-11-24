@@ -86,9 +86,7 @@ macro_rules! aes_schedule {
             pub fn $block(&self, input: &[u8; 16], out: &mut [u8; 16]) {
                 // SAFETY: Both blocks are exactly 16 bytes. The constructor
                 // initializes the schedule for the matching native operation.
-                unsafe {
-                    ffi::$native_block(input.as_ptr(), out.as_mut_ptr(), &raw const self.0 .0)
-                }
+                unsafe { ffi::$native_block(input.as_ptr(), out.as_mut_ptr(), &raw const self.0.0) }
             }
         }
     };
@@ -135,7 +133,7 @@ impl AesEncryptKey {
         // contracts; its optional IV is eight bytes and the schedule is for encryption.
         let written = unsafe {
             ffi::AES_wrap_key(
-                &raw const self.0 .0,
+                &raw const self.0.0,
                 iv.as_ref().map_or(ptr::null(), |iv| iv.as_ptr()),
                 dest.as_mut_ptr(),
                 input.as_ptr(),
@@ -176,7 +174,7 @@ impl AesDecryptKey {
         // IV is eight bytes if supplied, and the schedule is for decryption.
         let written = unsafe {
             ffi::AES_unwrap_key(
-                &raw const self.0 .0,
+                &raw const self.0.0,
                 iv.as_ref().map_or(ptr::null(), |iv| iv.as_ptr()),
                 dest.as_mut_ptr(),
                 input.as_ptr(),
@@ -251,16 +249,18 @@ mod test {
         assert_eq!(enc.wrap_key(None, &mut wrapped, &input).unwrap(), 24);
         assert_eq!(wrapped[24..], [0xa5; 7]);
         let mut out = [0xa5; 23];
-        assert!(dec
-            .unwrap_key(None, &mut out[..15], &wrapped[..24])
-            .is_err());
+        assert!(
+            dec.unwrap_key(None, &mut out[..15], &wrapped[..24])
+                .is_err()
+        );
         assert_eq!(out, [0xa5; 23]);
         assert_eq!(dec.unwrap_key(None, &mut out, &wrapped[..24]).unwrap(), 16);
         assert_eq!(out[..16], input);
         assert_eq!(out[16..], [0xa5; 7]);
-        assert!(dec
-            .unwrap_key(Some([0; 8]), &mut out, &wrapped[..24])
-            .is_err());
+        assert!(
+            dec.unwrap_key(Some([0; 8]), &mut out, &wrapped[..24])
+                .is_err()
+        );
         assert_eq!(out[..16], [0; 16]);
         assert_eq!(out[16..], [0xa5; 7]);
         assert!(enc.wrap_key(None, &mut wrapped, &input[..8]).is_err());

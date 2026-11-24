@@ -22,7 +22,7 @@ use crate::ssl::{
 use crate::ssl::{HandshakeError, SslVersion};
 use crate::x509::store::X509StoreBuilder;
 use crate::x509::verify::X509CheckFlags;
-use crate::x509::{X509Name, X509};
+use crate::x509::{X509, X509Name};
 
 use super::CompliancePolicy;
 
@@ -75,9 +75,10 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     assert!(ctx.set_verify(SslVerifyMode::PEER).is_err());
     assert!(ctx.verify_mode().is_err());
     assert!(ctx.set_verify_depth(1).is_err());
-    assert!(ctx
-        .set_verify_callback(SslVerifyMode::PEER, |_, _| true)
-        .is_err());
+    assert!(
+        ctx.set_verify_callback(SslVerifyMode::PEER, |_, _| true)
+            .is_err()
+    );
     assert!(ctx.set_cert_verify_callback(|_| true).is_err());
     assert!(ctx.set_default_verify_paths().is_err());
     assert!(ctx.ctx.certificate().is_none());
@@ -1115,12 +1116,14 @@ fn connector_no_hostname_still_verifies() {
     let connector = SslConnector::builder(SslMethod::tls()).unwrap().build();
 
     let s = server.connect_tcp();
-    assert!(connector
-        .configure()
-        .unwrap()
-        .verify_hostname(false)
-        .connect("fizzbuzz.com", s)
-        .is_err());
+    assert!(
+        connector
+            .configure()
+            .unwrap()
+            .verify_hostname(false)
+            .connect("fizzbuzz.com", s)
+            .is_err()
+    );
 }
 
 #[test]
@@ -1734,9 +1737,9 @@ fn test_ssl_set_compliance() {
 #[test]
 fn ex_data_drop() {
     use crate::ssl::SslContextBuilder;
+    use std::sync::Arc;
     use std::sync::atomic::AtomicU32;
     use std::sync::atomic::Ordering::Relaxed;
-    use std::sync::Arc;
 
     struct TrackDrop(Arc<AtomicU32>);
     impl Drop for TrackDrop {
@@ -1815,11 +1818,11 @@ fn peer_signature_algorithm_mtls_server_sees_client() {
         server_builder
             .ctx()
             .set_info_callback(move |ssl, mode, _value| {
-                if mode == SslInfoCallbackMode::HANDSHAKE_DONE {
-                    if let Some(sa) = ssl.peer_signature_algorithm() {
-                        assert!(sa.name().is_some(), "client sig scheme should have a name");
-                        captured_cb.store(true, Ordering::SeqCst);
-                    }
+                if mode == SslInfoCallbackMode::HANDSHAKE_DONE
+                    && let Some(sa) = ssl.peer_signature_algorithm()
+                {
+                    assert!(sa.name().is_some(), "client sig scheme should have a name");
+                    captured_cb.store(true, Ordering::SeqCst);
                 }
             })
             .unwrap();
@@ -1855,11 +1858,11 @@ fn signature_algorithm_used_server_default() {
         server_builder
             .ctx()
             .set_info_callback(move |ssl, mode, _value| {
-                if mode == SslInfoCallbackMode::HANDSHAKE_DONE {
-                    if let Some(sa) = ssl.signature_algorithm_used() {
-                        assert!(sa.name().is_some());
-                        captured_cb.store(true, Ordering::SeqCst);
-                    }
+                if mode == SslInfoCallbackMode::HANDSHAKE_DONE
+                    && let Some(sa) = ssl.signature_algorithm_used()
+                {
+                    assert!(sa.name().is_some());
+                    captured_cb.store(true, Ordering::SeqCst);
                 }
             })
             .unwrap();
@@ -1919,11 +1922,11 @@ fn signature_algorithm_used_mtls_client() {
     client_builder
         .ctx()
         .set_info_callback(move |ssl, mode, _value| {
-            if mode == SslInfoCallbackMode::HANDSHAKE_DONE {
-                if let Some(sa) = ssl.signature_algorithm_used() {
-                    assert!(sa.name().is_some());
-                    captured_cb.store(true, Ordering::SeqCst);
-                }
+            if mode == SslInfoCallbackMode::HANDSHAKE_DONE
+                && let Some(sa) = ssl.signature_algorithm_used()
+            {
+                assert!(sa.name().is_some());
+                captured_cb.store(true, Ordering::SeqCst);
             }
         })
         .unwrap();

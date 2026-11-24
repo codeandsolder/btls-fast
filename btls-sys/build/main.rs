@@ -9,7 +9,7 @@ use std::process::{Command, Output};
 
 use crate::config::Config;
 use crate::prefix::{
-    audit_prefixed_symbols, find_archive, regenerate_prefix_symbols, PrefixCallback, PREFIX,
+    PREFIX, PrefixCallback, audit_prefixed_symbols, find_archive, regenerate_prefix_symbols,
 };
 
 mod cache;
@@ -145,12 +145,7 @@ fn prepare_source(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
     let submodule = config.manifest_dir.join("deps/boringssl");
     if !submodule.join("CMakeLists.txt").exists() {
-        println!("cargo:warning=fetching boringssl git submodule");
-        run_command(
-            Command::new("git")
-                .args(["submodule", "update", "--init", "--recursive"])
-                .arg(&submodule),
-        )?;
+        return Err("missing vendored BoringSSL; run git submodule update --init --recursive before building".into());
     }
 
     if config.source_dir.exists() {
@@ -196,7 +191,7 @@ fn msvc_lib_subdir(config: &Config) -> io::Result<Option<&'static str>> {
         other => {
             return Err(io::Error::other(format!(
                 "invalid or missing DEBUG: {other:?}"
-            )))
+            )));
         }
     };
     let subdir = match config
@@ -217,7 +212,7 @@ fn msvc_lib_subdir(config: &Config) -> io::Result<Option<&'static str>> {
         other => {
             return Err(io::Error::other(format!(
                 "invalid or missing OPT_LEVEL: {other:?}"
-            )))
+            )));
         }
     };
     Ok(Some(subdir))
@@ -484,12 +479,6 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
             native BoringSSL is expected to have the patches included"
         );
         return Ok(());
-    } else if config.env.source_path.is_some()
-        && (config.features.rpk
-            || config.features.underscore_wildcards
-            || config.features.relax_cert_validation)
-    {
-        return Err(io::Error::other("BORING_BSSL_ASSUME_PATCHED must be set when setting BORING_BSSL_SOURCE_PATH and using rpk, underscore-wildcards or relax-cert-validation"));
     }
 
     let mut lock_file = LockFile::open(&config.out_dir.join(".patch_lock"))?;
@@ -721,21 +710,22 @@ fn install_artifacts(
 }
 
 fn main() -> ExitCode {
-    if let Err(e) = run() {
-        eprintln!("boring-sys failed: {e}");
-        println!(
-            "cargo::error={}",
-            e.to_string().trim_ascii().replace('\n', "\ncargo::error=")
-        );
-        ExitCode::FAILURE
-    } else {
-        ExitCode::SUCCESS
+    match run() {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("boring-sys failed: {e}");
+            println!(
+                "cargo::error={}",
+                e.to_string().trim_ascii().replace('\n', "\ncargo::error=")
+            );
+            ExitCode::FAILURE
+        }
     }
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::from_env()?;
-    emit_rerun_if_changed();
+    emit_rerun_if_changed(&config);
     prepare_source(&config)?;
     ensure_patches_applied(&config)?;
 
@@ -789,8 +779,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn emit_rerun_if_changed() {
+fn emit_rerun_if_changed(config: &Config) {
     println!("cargo:rerun-if-changed=patches");
+    let native_input = config.env.path.as_ref().or(config.env.source_path.as_ref());
+    if let Some(path) = native_input {
+        println!("cargo:rerun-if-changed={}", path.display());
+    } else {
+        println!("cargo:rerun-if-changed=deps/boringssl");
+    }
+    if let Some(path) = &config.env.include_path {
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
 }
 
 fn emit_link_directives(config: &Config, bssl_dir: &Path) -> io::Result<()> {
@@ -860,11 +859,12 @@ fn get_include_path(config: &Config) -> Result<PathBuf, String> {
 fn generate_bindings(config: &Config) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let include_path = get_include_path(config)?;
 
-    let target_rust_version = bindgen::RustTarget::stable(77, 0)
+    let target_rust_version = bindgen::RustTarget::stable(100, 0)
         .map_err(|e| format!("bindgen does not recognize target rust version: {e}"))?;
 
     let mut builder = bindgen::Builder::default()
-        .rust_target(target_rust_version) // bindgen MSRV is 1.70, so this is enough
+        .rust_target(target_rust_version)
+        .rust_edition(bindgen::RustEdition::Edition2024)
         .derive_copy(true)
         .derive_debug(true)
         .derive_default(true)
@@ -1037,7 +1037,10 @@ fn bindgen_headers(
                     .ok_or("BoringSSL header path is not Unicode")?,
             );
         } else {
-            let err = format!("'openssl/{header}' is missing from '{}'. The include path may be incorrect or contain an outdated version of OpenSSL/BoringSSL", include_path.display());
+            let err = format!(
+                "'openssl/{header}' is missing from '{}'. The include path may be incorrect or contain an outdated version of OpenSSL/BoringSSL",
+                include_path.display()
+            );
             if i < must_have_headers.len() {
                 return Err(err.into());
             }

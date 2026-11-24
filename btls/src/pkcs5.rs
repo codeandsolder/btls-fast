@@ -305,14 +305,16 @@ mod tests {
 
     #[test]
     fn zero_iterations_are_rejected_without_writing_output() {
-        assert!(super::bytes_to_key(
-            Cipher::aes_128_cbc(),
-            MessageDigest::sha256(),
-            b"password",
-            None,
-            0,
-        )
-        .is_err());
+        assert!(
+            super::bytes_to_key(
+                Cipher::aes_128_cbc(),
+                MessageDigest::sha256(),
+                b"password",
+                None,
+                0,
+            )
+            .is_err()
+        );
         let mut out = [0xa5; 32];
         assert!(super::pbkdf2_hmac(b"p", b"s", 0, MessageDigest::sha256(), &mut out).is_err());
         assert_eq!(out, [0xa5; 32]);
@@ -324,8 +326,7 @@ mod tests {
 
         let pass = "pleaseletmein";
         let salt = "SodiumChloride";
-        let expected =
-            "7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d5432955613\
+        let expected = "7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d5432955613\
              f0fcf62d49705242a9af9e61e85dc0d651e40dfcf017b45575887";
 
         let mut actual = [0; 64];

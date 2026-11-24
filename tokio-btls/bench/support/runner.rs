@@ -5,10 +5,10 @@ use std::time::Duration;
 use criterion::{Criterion, Throughput};
 
 use super::{
+    BenchTarget, BoxError, Transport,
     aead::bench_aead,
     case::BODY_CASES,
-    client::{bench_clients, ClientBenchCase},
-    BenchTarget, BoxError, Transport,
+    client::{ClientBenchCase, bench_clients},
 };
 
 /// Set to check only a lower bound of the ciphertext length, for a tokio-btls without vectored

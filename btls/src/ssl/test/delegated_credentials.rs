@@ -23,7 +23,7 @@ use crate::ssl::{
     SslSignatureAlgorithm, SslVerifyMode, SslVersion,
 };
 use crate::x509::extension::KeyUsage;
-use crate::x509::{X509Extension, X509NameBuilder, X509};
+use crate::x509::{X509, X509Extension, X509NameBuilder};
 
 const DC_CERT_VERIFY_ALGORITHM: u16 = ffi::SSL_SIGN_ECDSA_SECP256R1_SHA256 as u16;
 const DC_SIGNATURE_ALGORITHM: u16 = ffi::SSL_SIGN_RSA_PSS_RSAE_SHA256 as u16;

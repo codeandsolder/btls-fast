@@ -555,10 +555,10 @@ where
     // SAFETY: The BoringSSL new-session callback supplies an owned session reference for the Rust callback to consume.
     let session = unsafe { SslSession::from_ptr(session) };
 
-    if let Some(context) = ssl.session_context().map(ToOwned::to_owned) {
-        if let Some(callback) = context.callback::<F>(CallbackRole::NewSession) {
-            catch_native(|| callback(ssl, session));
-        }
+    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
+        && let Some(callback) = context.callback::<F>(CallbackRole::NewSession)
+    {
+        catch_native(|| callback(ssl, session));
     }
     // The Rust owner consumes the reference, even without a callback.
     1

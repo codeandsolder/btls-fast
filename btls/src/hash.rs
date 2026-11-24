@@ -34,11 +34,7 @@ impl MessageDigest {
         // SAFETY: the native lookup returns a static descriptor or null.
         unsafe {
             let ptr = ffi::EVP_get_digestbynid(type_.as_raw());
-            if ptr.is_null() {
-                None
-            } else {
-                Some(Self(ptr))
-            }
+            if ptr.is_null() { None } else { Some(Self(ptr)) }
         }
     }
 

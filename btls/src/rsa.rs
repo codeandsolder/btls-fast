@@ -632,9 +632,10 @@ mod test {
     #[test]
     fn rejects_small_output_and_trailing_der() {
         let key = Rsa::private_key_from_pem(include_bytes!("../test/rsa.pem")).unwrap();
-        assert!(key
-            .public_encrypt(b"message", &mut [0; 1], Padding::PKCS1)
-            .is_err());
+        assert!(
+            key.public_encrypt(b"message", &mut [0; 1], Padding::PKCS1)
+                .is_err()
+        );
         let mut der = key.private_key_to_der().unwrap();
         assert!(Rsa::private_key_from_der(&der).is_ok());
         der.push(0);

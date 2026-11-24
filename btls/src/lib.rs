@@ -35,7 +35,8 @@
 //! folder, make sure to place your headers there.
 //!
 //! In alternative a different path for the `BoringSSL` source code directory can be specified by setting
-//! `BORING_BSSL{,_FIPS}_SOURCE_PATH` which will automatically be compiled during the build process.
+//! `BORING_BSSL{,_FIPS}_SOURCE_PATH` pointing to a prepatched source tree, together with
+//! `BORING_BSSL{,_FIPS}_ASSUME_PATCHED`. The build compiles it without modifying its sources.
 //!
 //! _Warning_: When providing a different version of `BoringSSL` make sure to use a compatible one, the
 //! crate relies on the presence of certain functions.
@@ -209,11 +210,7 @@ fn cvt_nz(r: c_int) -> Result<NonZeroUsize, ErrorStack> {
 }
 
 fn cvt_n(r: c_int) -> Result<c_int, ErrorStack> {
-    if r < 0 {
-        Err(ErrorStack::get())
-    } else {
-        Ok(r)
-    }
+    if r < 0 { Err(ErrorStack::get()) } else { Ok(r) }
 }
 
 fn try_int<F, T>(from: F) -> Result<T, ErrorStack>

@@ -2,8 +2,6 @@ use super::server::Server;
 use crate::asn1::Asn1Time;
 use crate::bn::BigNum;
 use crate::pkey::PKey;
-use crate::ssl::connector::earliest_not_after;
-use crate::ssl::test::MessageDigest;
 use crate::ssl::ClientSession;
 use crate::ssl::ConnectConfiguration;
 use crate::ssl::HmacCtxRef;
@@ -15,15 +13,17 @@ use crate::ssl::SslSessionCacheMode;
 use crate::ssl::SslVerifyError;
 use crate::ssl::SslVerifyMode;
 use crate::ssl::SslVersion;
+use crate::ssl::connector::earliest_not_after;
+use crate::ssl::test::MessageDigest;
 use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
 use crate::symm::Cipher;
 use crate::symm::CipherCtxRef;
 use crate::x509::extension::SubjectAlternativeName;
-use crate::x509::{X509Name, X509};
+use crate::x509::{X509, X509Name};
 use std::fs;
 use std::io::Read;
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -126,9 +126,11 @@ fn client_session_cache_apis() {
 
     let mut sessions = sessions.lock().unwrap();
     assert_eq!(sessions.len(), 2);
-    assert!(sessions
-        .iter()
-        .all(|session| session.should_be_single_use()));
+    assert!(
+        sessions
+            .iter()
+            .all(|session| session.should_be_single_use())
+    );
     let session = sessions.pop().unwrap();
     drop(sessions);
     assert!(session.should_be_single_use());
@@ -172,7 +174,8 @@ fn client_session_resumes_within_scope_and_domain() {
         let mut stream = config.connect("foobar.com", server.connect_tcp()).unwrap();
         // Reading processes the tickets sent after the handshake.
         stream.read_exact(&mut [0]).unwrap();
-        sessions.lock().unwrap().drain(..).next_back().unwrap()
+        let session = sessions.lock().unwrap().drain(..).next_back().unwrap();
+        session
     };
     let offers = |connector: &SslConnector,
                   session: &ClientSession,
