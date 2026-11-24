@@ -42,7 +42,7 @@ pub const SEAL_STACK_LEN: usize = 16 * 1024;
 /// only `BoringSSL`'s own flush inside `SSL_write` ignores `blocked`.
 ///
 /// Returns the plaintext consumed, `Ok(0)` only when `bufs` holds no bytes. Errors after sealing
-/// are dropped, as sealed bytes must not be resent; the next write reports them if they recur.
+/// are deferred until the next operation, as sealed bytes must not be resent.
 pub fn write_records<S>(
     s: &mut SslStreamCore<StreamWrapper<S>>,
     bufs: &[io::IoSlice<'_>],
@@ -67,9 +67,14 @@ where
                 let mut slices = bufs.to_vec();
                 let mut rest = &mut slices[..];
                 io::IoSlice::advance_slices(&mut rest, n);
-                // Sealed plaintext must be reported; an error after it is dropped and reported
-                // by the next call only if it recurs.
-                return Ok(n + write_buffered(s, rest, total - n).unwrap_or(0));
+                // Report the accepted prefix now and preserve any later failure.
+                return match write_buffered(s, rest, total - n) {
+                    Ok(m) => Ok(n + m),
+                    Err(error) => {
+                        s.get_mut().write_buf.defer_error(error);
+                        Ok(n)
+                    }
+                };
             }
             Some(n) => return Ok(n),
             None => {}
@@ -141,8 +146,8 @@ where
     if sealed.consumed < total {
         write_buf.push(records);
     } else {
-        // What the transport does not take stays buffered; an error is dropped, and the next
-        // retry reports it only if it recurs.
+        // What the transport does not take stays buffered; any failure is
+        // deferred until the next outer operation.
         write_buf.write_last(transport, records);
     }
     Ok(Some(sealed.consumed))
@@ -208,10 +213,15 @@ where
         ..
     } = s.get_mut();
     *write_through = false;
-    write_buf.drain_unless_blocked(transport);
-    match err {
+    let result = match err {
         Some(e) if written == 0 => Err(e),
-        // Sealed plaintext must be reported, or a retry would send it twice.
-        _ => Ok(written),
-    }
+        Some(e) => {
+            // Sealed plaintext must be reported, or a retry would send it twice.
+            write_buf.defer_error(e);
+            Ok(written)
+        }
+        None => Ok(written),
+    };
+    write_buf.drain_unless_blocked(transport);
+    result
 }

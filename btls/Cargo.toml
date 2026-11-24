@@ -22,9 +22,6 @@ default = []
 # Use a FIPS-validated version of BoringSSL.
 fips = ["btls-sys/fips"]
 
-# **DO NOT USE** This will be removed without warning in future releases.
-legacy-compat-deprecated = []
-
 # Interface for ML-KEM (FIPS 203) post-quantum key encapsulation. Does not affect ciphers used in TLS.
 mlkem = []
 # ML-DSA (FIPS 204) post-quantum digital signature.
@@ -57,10 +54,6 @@ prefix-symbols = ["btls-sys/prefix-symbols"]
 
 # Restores the historical pre-TLS 1.3 client behaviour for RSA keyUsage mismatches.
 relax-cert-validation = ["btls-sys/relax-cert-validation"]
-
-# **DO NOT USE** This will be removed without warning in future releases.
-# Alias for 'fips', only for backwards compatibility.
-fips-precompiled = ["fips"]
 
 [dependencies]
 bitflags = { workspace = true }

@@ -65,10 +65,7 @@ impl Algorithm {
 
 /// An ML-DSA public key (any parameter set).
 #[derive(Clone)]
-pub struct MlDsaPublicKey {
-    algorithm: Algorithm,
-    inner: PublicKeyInner,
-}
+pub struct MlDsaPublicKey(PublicKeyInner);
 
 #[derive(Clone)]
 enum PublicKeyInner {
@@ -79,10 +76,7 @@ enum PublicKeyInner {
 
 /// A shared ML-DSA private key. Clones reuse the immutable expanded key.
 #[derive(Clone)]
-pub struct MlDsaPrivateKey {
-    algorithm: Algorithm,
-    inner: PrivateKeyInner,
-}
+pub struct MlDsaPrivateKey(PrivateKeyInner);
 
 #[derive(Clone)]
 enum PrivateKeyInner {
@@ -198,13 +192,7 @@ macro_rules! define_mldsa_suite {
             fn generate() -> Result<(MlDsaPublicKey, MlDsaPrivateKey), ErrorStack> {
                 let (bytes, key) = SecretBuilder::<$private>::generate::<$public_bytes>($generate)?;
                 let public = MlDsaPublicKey::from_slice(Algorithm::$variant, &bytes)?;
-                Ok((
-                    public,
-                    MlDsaPrivateKey {
-                        algorithm: Algorithm::$variant,
-                        inner: PrivateKeyInner::$variant(key),
-                    },
-                ))
+                Ok((public, MlDsaPrivateKey(PrivateKeyInner::$variant(key))))
             }
 
             fn from_seed(seed: &MlDsaPrivateKeySeed) -> Result<PrivateKeyInner, ErrorStack> {
@@ -365,19 +353,23 @@ impl MlDsaPrivateKey {
             Algorithm::MlDsa65 => MlDsa65Suite::from_seed(seed)?,
             Algorithm::MlDsa87 => MlDsa87Suite::from_seed(seed)?,
         };
-        Ok(Self { algorithm, inner })
+        Ok(Self(inner))
     }
 
     /// Returns the algorithm for this key.
     #[must_use = "Use the selected ML-DSA parameter set when encoding or validating the key."]
     pub const fn algorithm(&self) -> Algorithm {
-        self.algorithm
+        match &self.0 {
+            PrivateKeyInner::MlDsa44(_) => Algorithm::MlDsa44,
+            PrivateKeyInner::MlDsa65(_) => Algorithm::MlDsa65,
+            PrivateKeyInner::MlDsa87(_) => Algorithm::MlDsa87,
+        }
     }
 
     /// Returns the seed bytes for this private key.
     #[must_use = "Protect and persist the private seed only through the intended key export path."]
     pub fn seed_bytes(&self) -> &MlDsaPrivateKeySeed {
-        match &self.inner {
+        match &self.0 {
             PrivateKeyInner::MlDsa44(key) => &key.seed,
             PrivateKeyInner::MlDsa65(key) => &key.seed,
             PrivateKeyInner::MlDsa87(key) => &key.seed,
@@ -391,15 +383,12 @@ impl MlDsaPrivateKey {
     /// The native public-key derivation fails.
     pub fn public_key(&self) -> Result<MlDsaPublicKey, ErrorStack> {
         ffi::init();
-        let inner = match &self.inner {
+        let inner = match &self.0 {
             PrivateKeyInner::MlDsa44(key) => MlDsa44Suite::public_from_private(key)?,
             PrivateKeyInner::MlDsa65(key) => MlDsa65Suite::public_from_private(key)?,
             PrivateKeyInner::MlDsa87(key) => MlDsa87Suite::public_from_private(key)?,
         };
-        Ok(MlDsaPublicKey {
-            algorithm: self.algorithm,
-            inner,
-        })
+        Ok(MlDsaPublicKey(inner))
     }
 
     /// Signs `msg` and returns the signature bytes.
@@ -409,7 +398,7 @@ impl MlDsaPrivateKey {
     /// Native randomized signature generation fails.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
         ffi::init();
-        match &self.inner {
+        match &self.0 {
             PrivateKeyInner::MlDsa44(key) => MlDsa44Suite::sign(key, msg),
             PrivateKeyInner::MlDsa65(key) => MlDsa65Suite::sign(key, msg),
             PrivateKeyInner::MlDsa87(key) => MlDsa87Suite::sign(key, msg),
@@ -439,13 +428,17 @@ impl MlDsaPublicKey {
             Algorithm::MlDsa65 => MlDsa65Suite::parse(&mut cbs)?,
             Algorithm::MlDsa87 => MlDsa87Suite::parse(&mut cbs)?,
         };
-        Ok(Self { algorithm, inner })
+        Ok(Self(inner))
     }
 
     /// Returns the algorithm for this key.
     #[must_use = "Use the selected ML-DSA parameter set when encoding or validating the key."]
     pub const fn algorithm(&self) -> Algorithm {
-        self.algorithm
+        match &self.0 {
+            PublicKeyInner::MlDsa44(_) => Algorithm::MlDsa44,
+            PublicKeyInner::MlDsa65(_) => Algorithm::MlDsa65,
+            PublicKeyInner::MlDsa87(_) => Algorithm::MlDsa87,
+        }
     }
 
     /// Serializes the public key to its fixed-length wire representation.
@@ -455,7 +448,7 @@ impl MlDsaPublicKey {
     /// Returns an error if native encoding or its length validation fails.
     pub fn to_bytes(&self) -> Result<Vec<u8>, ErrorStack> {
         ffi::init();
-        let mut bytes = vec![0u8; self.algorithm.public_key_bytes()];
+        let mut bytes = vec![0u8; self.algorithm().public_key_bytes()];
         let mut cbb: MaybeUninit<ffi::CBB> = MaybeUninit::zeroed();
         // SAFETY: the fixed output allocation remains exclusively writable;
         // native sets up the builder in the initialized temporary.
@@ -469,7 +462,7 @@ impl MlDsaPublicKey {
         // SAFETY: every variant owns a live matching native public key. The
         // builder is initialized and exclusively borrowed until cleanup.
         let result = unsafe {
-            match &self.inner {
+            match &self.0 {
                 PublicKeyInner::MlDsa44(key) => {
                     MlDsa44Suite::marshal(cbb.as_mut_ptr(), key.as_ref())
                 }
@@ -514,7 +507,7 @@ impl MlDsaPublicKey {
     /// The signature or context is invalid or the native verification fails.
     pub fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
         ffi::init();
-        match &self.inner {
+        match &self.0 {
             PublicKeyInner::MlDsa44(key) => MlDsa44Suite::verify(key, msg, signature),
             PublicKeyInner::MlDsa65(key) => MlDsa65Suite::verify(key, msg, signature),
             PublicKeyInner::MlDsa87(key) => MlDsa87Suite::verify(key, msg, signature),
@@ -525,7 +518,7 @@ impl MlDsaPublicKey {
 impl fmt::Debug for MlDsaPrivateKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MlDsaPrivateKey")
-            .field("algorithm", &self.algorithm)
+            .field("algorithm", &self.algorithm())
             .field("inner", &"[redacted]")
             .finish()
     }
@@ -534,7 +527,7 @@ impl fmt::Debug for MlDsaPrivateKey {
 impl fmt::Debug for MlDsaPublicKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MlDsaPublicKey")
-            .field("algorithm", &self.algorithm)
+            .field("algorithm", &self.algorithm())
             .field("inner", &"[opaque public key]")
             .finish()
     }
@@ -553,7 +546,7 @@ mod tests {
                 fn clone_retains_expanded_private_key_without_regeneration() {
                     let (pk, sk) = MlDsaPrivateKey::generate($alg).unwrap();
                     let copy = sk.clone();
-                    match (&sk.inner, &copy.inner) {
+                    match (&sk.0, &copy.0) {
                         (PrivateKeyInner::MlDsa44(a), PrivateKeyInner::MlDsa44(b)) => {
                             assert!(Arc::ptr_eq(a, b))
                         }

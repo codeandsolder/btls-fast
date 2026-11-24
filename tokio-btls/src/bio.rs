@@ -61,6 +61,9 @@ where
     S: AsyncWrite,
 {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         // Once `write_buf` is blocked, no record goes straight to the transport.
         if self.write_through && !self.write_buf.blocked {
             self.write_buf.write_last(&mut self.transport, buf);

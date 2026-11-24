@@ -908,7 +908,6 @@ pub struct CompliancePolicy(ffi::ssl_compliance_policy_t);
 
 impl CompliancePolicy {
     /// Does nothing, however setting this does not undo other policies, so trying to set this is an error.
-    #[cfg(not(feature = "legacy-compat-deprecated"))]
     pub const NONE: Self = Self(ffi::ssl_compliance_policy_t::ssl_compliance_policy_none);
 
     /// Configures a TLS connection to try and be compliant with NIST requirements, but does not guarantee success.
@@ -918,7 +917,6 @@ impl CompliancePolicy {
 
     /// Partially configures a TLS connection to be compliant with WPA3. Callers must enforce certificate chain requirements themselves.
     /// Use of this policy is less secure than the default and not recommended.
-    #[cfg(not(feature = "legacy-compat-deprecated"))]
     pub const WPA3_192_202304: Self =
         Self(ffi::ssl_compliance_policy_t::ssl_compliance_policy_wpa3_192_202304);
 }
@@ -5244,10 +5242,10 @@ impl SslRef {
     /// Enables ECH GREASE when no supported ECH configuration is available.
     /// Set before the first ClientHello. This does not enable real ECH.
     #[corresponds(SSL_set_enable_ech_grease)]
-    pub fn set_enable_ech_grease(&self, enable: bool) {
+    pub fn set_enable_ech_grease(&mut self, enable: bool) {
         let enable = c_int::from(enable);
 
-        // SAFETY: The live connection receives a scalar ECH
+        // SAFETY: The exclusively borrowed connection receives a scalar ECH
         // GREASE flag with no borrowed Rust data.
         unsafe {
             ffi::SSL_set_enable_ech_grease(self.as_ptr(), enable);

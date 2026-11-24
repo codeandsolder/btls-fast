@@ -1535,7 +1535,6 @@ fn test_set_compliance() {
         assert_eq!(cipher.0.name(), Some(cipher.1));
     }
 
-    #[cfg(not(feature = "legacy-compat-deprecated"))]
     {
         let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
         ctx.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
@@ -1635,7 +1634,6 @@ fn test_ssl_set_compliance() {
         assert_eq!(cipher.0.name(), Some(cipher.1));
     }
 
-    #[cfg(not(feature = "legacy-compat-deprecated"))]
     {
         let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
         let mut ssl = Ssl::new(&ctx).unwrap();

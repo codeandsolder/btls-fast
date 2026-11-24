@@ -37,7 +37,8 @@ use crate::{
 /// An asynchronous version of [`btls::ssl::SslStream`].
 ///
 /// Writes may stay buffered after they complete; call `flush` or `shutdown` before waiting on a
-/// reply or dropping the stream.
+/// reply or dropping the stream. A transport failure after plaintext was
+/// accepted is returned by the next write, flush, or shutdown.
 #[derive(Debug)]
 pub struct SslStream<S>(SslStreamCore<StreamWrapper<S>>);
 
@@ -246,12 +247,21 @@ where
 
     #[inline]
     fn poll_flush(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<io::Result<()>> {
-        self.with_context(ctx, |s| cvt(s.flush()))
+        self.with_context(ctx, |s| {
+            cvt(s
+                .get_mut()
+                .write_buf
+                .take_deferred_error()
+                .and_then(|()| s.flush()))
+        })
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, ctx: &mut Context) -> Poll<io::Result<()>> {
         if !self.0.get_ref().shutdown_sent {
             ready!(self.as_mut().with_context(ctx, |s| {
+                if let Err(error) = s.get_mut().write_buf.take_deferred_error() {
+                    return Poll::Ready(Err(error));
+                }
                 match s.shutdown() {
                     Ok(ShutdownResult::Sent | ShutdownResult::Received) => {}
                     Err(ref e) if e.code() == ErrorCode::ZERO_RETURN => {}
