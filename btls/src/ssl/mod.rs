@@ -4893,10 +4893,6 @@ impl SslRef {
     ///
     /// The native SSL cannot allocate storage for the index.
     #[corresponds(SSL_set_ex_data)]
-    #[expect(
-        clippy::needless_pass_by_ref_mut,
-        reason = "native ex-data replacement mutates the uniquely borrowed SSL object"
-    )]
     pub fn replace_ex_data<T: 'static + Send + Sync>(
         &mut self,
         index: Index<Ssl, T>,
