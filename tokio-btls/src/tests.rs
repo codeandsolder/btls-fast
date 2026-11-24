@@ -174,6 +174,44 @@ async fn tls_pair_from(
     (client, server)
 }
 
+#[tokio::test]
+async fn async_verifier_resumes_only_after_its_future_wakes() {
+    let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
+    let created = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+    let counts = (Arc::clone(&created), Arc::clone(&finished));
+    connector
+        .set_async_custom_verify_callback(ssl::SslVerifyMode::PEER, move |_| {
+            counts.0.fetch_add(1, Ordering::Relaxed);
+            let finished = Arc::clone(&counts.1);
+            Ok(Box::pin(async move {
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+                let finish: ssl::BoxCustomVerifyFinish = Box::new(move |_| {
+                    finished.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                });
+                Ok(finish)
+            }))
+        })
+        .unwrap();
+
+    let (mut client, mut server) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tls_pair_from(connector, SslVersion::TLS1_2, None, None),
+    )
+    .await
+    .expect("async verifier failed to wake the handshake");
+
+    assert_eq!(created.load(Ordering::Relaxed), 1);
+    assert_eq!(finished.load(Ordering::Relaxed), 1);
+    client.write_all(b"ok").await.unwrap();
+    client.flush().await.unwrap();
+    let mut received = [0; 2];
+    server.read_exact(&mut received).await.unwrap();
+    assert_eq!(&received, b"ok");
+}
+
 /// Content types and lengths, headers included, of the TLS records in `wire`.
 fn records(wire: &[u8]) -> Vec<(u8, usize)> {
     let mut records = Vec::new();
