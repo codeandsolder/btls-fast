@@ -23,6 +23,7 @@ use crate::cvt;
 use crate::error::ErrorStack;
 use crate::ffi;
 use crate::ffi::cbs_init;
+use crate::secret_material::SecretMaterial;
 
 /// Private key seed size (64 bytes).
 pub const PRIVATE_KEY_SEED_BYTES: usize = ffi::MLKEM_SEED_BYTES as usize;
@@ -171,12 +172,12 @@ impl MlKemPrivateKey {
         private_seed: &MlKemPrivateKeySeed,
     ) -> Result<Self, ErrorStack> {
         match algorithm {
-            Algorithm::MlKem768 => Ok(Self(Either::MlKem768(Arc::new(
-                MlKem768PrivateKey::from_seed(private_seed)?,
-            )))),
-            Algorithm::MlKem1024 => Ok(Self(Either::MlKem1024(Arc::new(
-                MlKem1024PrivateKey::from_seed(private_seed)?,
-            )))),
+            Algorithm::MlKem768 => Ok(Self(Either::MlKem768(MlKem768PrivateKey::from_seed(
+                private_seed,
+            )?))),
+            Algorithm::MlKem1024 => Ok(Self(Either::MlKem1024(MlKem1024PrivateKey::from_seed(
+                private_seed,
+            )?))),
         }
     }
 
@@ -234,51 +235,35 @@ macro_rules! define_mlkem {
         /// Native expanded ML-KEM private key.
         ///
         /// Caches the expanded key for fast decapsulation.
-        struct $private {
-            seed: MlKemPrivateKeySeed,
-            expanded: ffi::$native_private,
-        }
+        type $private = SecretMaterial<ffi::$native_private, PRIVATE_KEY_SEED_BYTES>;
 
         impl $private {
             pub const CIPHERTEXT_BYTES: usize = ffi::$ciphertext_bytes as usize;
 
             /// Generate a new key pair.
             fn generate() -> Result<(Arc<$public>, Arc<Self>), ErrorStack> {
-                // SAFETY: all buffers are out parameters, correctly sized
-                unsafe {
-                    ffi::init();
-                    let mut bytes = [0; $public::PUBLIC_KEY_BYTES];
-                    let mut seed = [0; PRIVATE_KEY_SEED_BYTES];
-                    let mut expanded: MaybeUninit<ffi::$native_private> = MaybeUninit::zeroed();
-
-                    ffi::$generate(
-                        bytes.as_mut_ptr().cast(),
-                        seed.as_mut_ptr(),
-                        expanded.as_mut_ptr(),
-                    );
-
-                    let private = Arc::new(Self {
-                        seed,
-                        expanded: expanded.assume_init(),
-                    });
-                    Ok((Arc::new($public::from_slice(&bytes)?), private))
-                }
+                ffi::init();
+                let mut bytes = [0; $public::PUBLIC_KEY_BYTES];
+                // SAFETY: The public and seed buffers have the exact native
+                // widths, and generation initializes the matching opaque key.
+                let private = unsafe {
+                    Self::initialize(|seed, expanded| {
+                        ffi::$generate(bytes.as_mut_ptr(), seed.as_mut_ptr(), expanded);
+                        Ok(())
+                    })
+                }?;
+                Ok((Arc::new($public::from_slice(&bytes)?), private))
             }
 
             /// Restore private key from seed.
-            fn from_seed(seed: &MlKemPrivateKeySeed) -> Result<Self, ErrorStack> {
-                // SAFETY: seed is 64 bytes, out parameter correctly sized
+            fn from_seed(seed: &MlKemPrivateKeySeed) -> Result<Arc<Self>, ErrorStack> {
+                ffi::init();
+                // SAFETY: The fixed-width seed is copied into the final
+                // allocation; native success initializes the opaque key.
                 unsafe {
-                    ffi::init();
-                    let mut expanded: MaybeUninit<ffi::$native_private> = MaybeUninit::zeroed();
-                    cvt(ffi::$restore(
-                        expanded.as_mut_ptr(),
-                        seed.as_ptr(),
-                        seed.len(),
-                    ))?;
-                    Ok(Self {
-                        seed: *seed,
-                        expanded: expanded.assume_init(),
+                    Self::initialize(|stored, expanded| {
+                        stored.copy_from_slice(seed);
+                        cvt(ffi::$restore(expanded, stored.as_ptr(), stored.len()))
                     })
                 }
             }
@@ -290,7 +275,7 @@ macro_rules! define_mlkem {
                 unsafe {
                     ffi::init();
                     let mut parsed: MaybeUninit<ffi::$native_public> = MaybeUninit::zeroed();
-                    ffi::$derive_public(parsed.as_mut_ptr(), &self.expanded);
+                    ffi::$derive_public(parsed.as_mut_ptr(), self.expanded_ptr());
 
                     let mut bytes = [0u8; $public::PUBLIC_KEY_BYTES];
                     let mut cbb: MaybeUninit<ffi::CBB> = MaybeUninit::zeroed();
@@ -321,31 +306,10 @@ macro_rules! define_mlkem {
                         shared_secret.as_mut_ptr(),
                         ciphertext.as_ptr(),
                         ciphertext.len(),
-                        &raw const self.expanded,
+                        self.expanded_ptr(),
                     );
 
                     shared_secret
-                }
-            }
-        }
-
-        impl fmt::Debug for $private {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.debug_struct(stringify!($private))
-                    .field("key", &"[redacted]")
-                    .finish()
-            }
-        }
-
-        impl Drop for $private {
-            fn drop(&mut self) {
-                // SAFETY: pointers and lengths are valid
-                unsafe {
-                    ffi::OPENSSL_cleanse(self.seed.as_mut_ptr().cast(), self.seed.len());
-                    ffi::OPENSSL_cleanse(
-                        self.expanded.opaque.bytes.as_mut_ptr().cast(),
-                        self.expanded.opaque.bytes.len(),
-                    );
                 }
             }
         }

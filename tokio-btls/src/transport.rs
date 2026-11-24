@@ -36,7 +36,7 @@ impl<S> Transport<S> {
     /// context is installed. Unless `S: Unpin`, `stream` must not move from the
     /// first `parts` call until it is dropped.
     #[inline]
-    pub(crate) unsafe fn set_context(&mut self, cx: &mut Context<'_>) {
+    pub(crate) const unsafe fn set_context(&mut self, cx: &mut Context<'_>) {
         self.context.0 = ptr::from_mut(cx).cast();
     }
 
