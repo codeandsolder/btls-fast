@@ -162,6 +162,10 @@ impl X509StoreContextRef {
     ///
     /// The native container cannot allocate the slot.
     #[corresponds(X509_STORE_CTX_set_ex_data)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the native extra-data setter mutates the context; exclusive access is required"
+    )]
     pub fn set_ex_data<T: 'static + Send + Sync>(
         &mut self,
         index: Index<X509StoreContext, T>,
@@ -246,6 +250,10 @@ impl X509StoreContext {
     /// * `cert` - The certificate that should be verified.
     /// * `cert_chain` - The certificates chain.
     #[corresponds(X509_STORE_CTX_init)]
+    #[expect(
+        clippy::needless_pass_by_ref_mut,
+        reason = "the native context is reinitialized in place and must be exclusively borrowed"
+    )]
     pub fn reset_with_context_data(
         &mut self,
         trust: store::X509Store,
