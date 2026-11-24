@@ -163,11 +163,11 @@ impl WriteBuffer {
     where
         S: AsyncWrite,
     {
-        if !self.blocked {
-            if let Err(error) = self.drain(transport) {
-                self.blocked = true;
-                self.defer_error(error);
-            }
+        if !self.blocked
+            && let Err(error) = self.drain(transport)
+        {
+            self.blocked = true;
+            self.defer_error(error);
         }
     }
 
