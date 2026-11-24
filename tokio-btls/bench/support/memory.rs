@@ -236,9 +236,10 @@ mod tests {
     use super::*;
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn duplex_memory_transport_is_send_and_wakes_cross_thread_reader() {
+    async fn duplex_memory_transport_is_send_and_wakes_cross_thread_reader() -> Result<(), BoxError>
+    {
         let (mut writer, mut reader) = pair();
-        let body: Vec<u8> = (0..2048).map(|i| (i % 251) as u8).collect();
+        let body: Vec<u8> = (0u8..=250).cycle().take(2048).collect();
         let expected = body.clone();
         let sender = tokio::spawn(async move {
             for _ in 0..128 {
@@ -254,7 +255,8 @@ mod tests {
             }
             Ok::<(), io::Error>(())
         });
-        sender.await.unwrap().unwrap();
-        receiver.await.unwrap().unwrap();
+        sender.await??;
+        receiver.await??;
+        Ok(())
     }
 }
