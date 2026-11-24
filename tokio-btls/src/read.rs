@@ -28,24 +28,25 @@ impl ReadBuffer {
 
     /// Copies buffered ciphertext into `buf`, first refilling an empty buffer from `transport`.
     #[inline]
-    pub(crate) fn read<S>(
+    pub(crate) fn read<S, R>(
         &mut self,
         transport: &mut Transport<S>,
-        buf: &mut [u8],
-    ) -> io::Result<usize>
+        capacity: usize,
+        copy: impl FnOnce(&[u8]) -> R,
+    ) -> io::Result<R>
     where
         S: AsyncRead,
     {
-        if buf.is_empty() {
-            return Ok(0);
+        if capacity == 0 {
+            return Ok(copy(&[]));
         }
         if self.bytes.is_empty() {
             self.fill(transport)?;
         }
 
         let buffered = &self.bytes[self.pos..];
-        let n = buffered.len().min(buf.len());
-        buf[..n].copy_from_slice(&buffered[..n]);
+        let n = buffered.len().min(capacity);
+        let result = copy(&buffered[..n]);
         self.pos += n;
 
         // Release the buffer as soon as it is drained, so a connection that stops reading here,
@@ -54,7 +55,7 @@ impl ReadBuffer {
             self.bytes = Vec::new();
             self.pos = 0;
         }
-        Ok(n)
+        Ok(result)
     }
 
     /// Fills the empty buffer with a single read of `transport`.

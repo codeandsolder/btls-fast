@@ -13,6 +13,7 @@ use std::cell::Cell;
 use std::convert::identity;
 use std::future::Future;
 use std::pin::Pin;
+use std::ptr::NonNull;
 use std::task::{Context, Poll, Waker};
 
 /// The type of futures to pass to [`SslContextBuilder::set_async_select_certificate_callback`].
@@ -64,25 +65,25 @@ type SelectCertFutureIndex<T> = Index<
 // The native callback runs synchronously on the thread driving the SSL. Scope
 // the runtime's waker to that connection and poll, without allocating an
 // ex-data slot or cloning the waker on every application-data operation.
-#[derive(Clone, Copy)]
 struct PollScope {
     ssl: *mut crate::ffi::SSL,
     waker: *const Waker,
-    pending: bool,
+    pending: Cell<bool>,
 }
 
 thread_local! {
-    static POLL_SCOPE: Cell<Option<PollScope>> = const { Cell::new(None) };
+    static POLL_SCOPE: Cell<Option<NonNull<PollScope>>> = const { Cell::new(None) };
 }
 
+#[inline]
 pub(super) fn with_task_waker<R>(
     ssl: *mut crate::ffi::SSL,
     waker: &Waker,
     f: impl FnOnce() -> R,
 ) -> R {
     struct Restore<'a> {
-        slot: &'a Cell<Option<PollScope>>,
-        previous: Option<PollScope>,
+        slot: &'a Cell<Option<NonNull<PollScope>>>,
+        previous: Option<NonNull<PollScope>>,
     }
 
     impl Drop for Restore<'_> {
@@ -91,40 +92,40 @@ pub(super) fn with_task_waker<R>(
         }
     }
 
+    let scope = PollScope {
+        ssl,
+        waker,
+        pending: Cell::new(false),
+    };
     POLL_SCOPE.with(|slot| {
-        let previous = slot.replace(Some(PollScope {
-            ssl,
-            waker,
-            pending: false,
-        }));
+        let previous = slot.replace(Some(NonNull::from(&scope)));
         let _restore = Restore { slot, previous };
         f()
     })
 }
 
+// The scope never escapes: only the closure's result, which cannot borrow it,
+// is returned. The thread-local pointer is restored before its stack frame dies.
+fn in_scope<R>(ssl: &SslRef, f: impl FnOnce(&PollScope) -> R) -> Option<R> {
+    POLL_SCOPE.with(|slot| {
+        let ptr = slot.get()?;
+        // SAFETY: the private slot points to a live stack scope on this thread.
+        // The guard restores the previous pointer before that scope is dropped.
+        let scope = unsafe { ptr.as_ref() };
+        (scope.ssl == ssl.as_ptr()).then(|| f(scope))
+    })
+}
+
 fn callback_waker(ssl: &SslRef) -> Option<Waker> {
-    POLL_SCOPE
-        .with(|slot| {
-            slot.get()
-                .filter(|scope| scope.ssl == ssl.as_ptr())
-                .map(|scope| {
-                    // SAFETY: the scope is installed only for the synchronous
-                    // call borrowing this live waker on this thread. The
-                    // private guard restores it on return and unwind. Only
-                    // an owned clone leaves the scope.
-                    unsafe { (&*scope.waker).clone() }
-                })
-        })
-        .or_else(|| ssl.slot_data(&TASK_WAKER_INDEX).cloned().flatten())
+    in_scope(ssl, |scope| {
+        // SAFETY: the scope borrows the waker for the duration of the poll.
+        unsafe { (&*scope.waker).clone() }
+    })
+    .or_else(|| ssl.slot_data(&TASK_WAKER_INDEX).cloned().flatten())
 }
 
 fn mark_pending(ssl: &SslRef) {
-    POLL_SCOPE.with(|slot| {
-        if let Some(mut scope) = slot.get().filter(|scope| scope.ssl == ssl.as_ptr()) {
-            scope.pending = true;
-            slot.set(Some(scope));
-        }
-    });
+    in_scope(ssl, |scope| scope.pending.set(true));
 }
 
 pub(super) fn take_pending(ssl: &SslRef, code: ErrorCode) -> bool {
@@ -137,15 +138,7 @@ pub(super) fn take_pending(ssl: &SslRef, code: ErrorCode) -> bool {
     ) {
         return false;
     }
-    POLL_SCOPE.with(|slot| {
-        let Some(mut scope) = slot.get().filter(|scope| scope.ssl == ssl.as_ptr()) else {
-            return false;
-        };
-        let pending = scope.pending;
-        scope.pending = false;
-        slot.set(Some(scope));
-        pending
-    })
+    in_scope(ssl, |scope| scope.pending.replace(false)).unwrap_or(false)
 }
 
 static TASK_WAKER_INDEX: IndexSlot<Ssl, Option<Waker>> = IndexSlot::new(Ssl::new_ex_index);

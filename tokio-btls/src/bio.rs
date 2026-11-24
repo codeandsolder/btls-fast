@@ -4,6 +4,7 @@ use std::{
     task::Poll,
 };
 
+use btls::ssl::{BioReadBuf, ReadUninit};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{read::ReadBuffer, transport::Transport, write::WriteBuffer};
@@ -52,7 +53,20 @@ where
 {
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.read_buf.read(&mut self.transport, buf)
+        self.read_buf.read(&mut self.transport, buf.len(), |bytes| {
+            buf[..bytes.len()].copy_from_slice(bytes);
+            bytes.len()
+        })
+    }
+}
+
+impl<S: AsyncRead> ReadUninit for StreamWrapper<S> {
+    #[inline]
+    fn read_uninit(&mut self, buf: &mut BioReadBuf<'_>) -> io::Result<()> {
+        self.read_buf
+            .read(&mut self.transport, buf.remaining(), |bytes| {
+                buf.put_slice(bytes);
+            })
     }
 }
 

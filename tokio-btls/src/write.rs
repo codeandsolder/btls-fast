@@ -8,6 +8,7 @@ use std::{
     io::{self, Write},
     mem::{self, MaybeUninit},
     slice,
+    task::Waker,
 };
 
 use btls::ssl::{self, SslStream as SslStreamCore};
@@ -29,9 +30,9 @@ pub const MAX_RECORD: usize = 16 * 1024;
 /// buffer grows when CBC records need more.
 pub const RECORD_OVERHEAD: usize = 64;
 
-/// Maximum stack-buffered ciphertext for a small write. Larger sealed records
-/// fall back to the persistent write buffer, without allocating per attempt.
-pub const SEAL_STACK_LEN: usize = 16 * 1024;
+/// Stack scratch for a full plaintext record plus ciphertext overhead. Larger
+/// sealed sequences fall back to the write buffer.
+pub const SEAL_STACK_LEN: usize = 17 * 1024;
 
 /// Seals `bufs` into records and writes them with as few transport writes as possible.
 ///
@@ -46,6 +47,7 @@ pub const SEAL_STACK_LEN: usize = 16 * 1024;
 pub fn write_records<S>(
     s: &mut SslStreamCore<StreamWrapper<S>>,
     bufs: &[io::IoSlice<'_>],
+    waker: &Waker,
 ) -> io::Result<usize>
 where
     S: AsyncRead + AsyncWrite,
@@ -68,7 +70,7 @@ where
                 let mut rest = &mut slices[..];
                 io::IoSlice::advance_slices(&mut rest, n);
                 // Report the accepted prefix now and preserve any later failure.
-                return match write_buffered(s, rest, total - n) {
+                return match write_buffered(s, rest, total - n, waker) {
                     Ok(m) => Ok(n + m),
                     Err(error) => {
                         s.get_mut().write_buf.defer_error(error);
@@ -80,7 +82,7 @@ where
             None => {}
         }
     }
-    write_buffered(s, bufs, total)
+    write_buffered(s, bufs, total, waker)
 }
 
 /// Seals `bufs` after the buffered records and drains them unless the transport is blocked, or
@@ -89,6 +91,7 @@ fn write_buffered<S>(
     s: &mut SslStreamCore<StreamWrapper<S>>,
     bufs: &[io::IoSlice<'_>],
     total: usize,
+    waker: &Waker,
 ) -> io::Result<usize>
 where
     S: AsyncRead + AsyncWrite,
@@ -110,7 +113,9 @@ where
             return Ok(n);
         }
     }
-    ssl_write_records(s, bufs, total)
+    // Direct sealing and buffered transport writes cannot invoke async TLS callbacks.
+    // Only the SSL_write fallback can drive a handshake or native callback.
+    s.with_task_waker(waker, |s| ssl_write_records(s, bufs, total))
 }
 
 /// Seals a write of at most `MAX_RECORD` bytes on the stack and sends it with one transport
@@ -118,8 +123,12 @@ where
 ///
 /// If small send fragments split the write and not every record fits, the sealed ones are
 /// buffered for the caller to send with the rest. Returns `Ok(None)` if `BoringSSL`
-/// declines or its sealed output exceeds the 16 KiB stack buffer, changing nothing.
-#[inline(never)] // keep the 16 KiB frame out of `write_records`
+/// declines or its sealed output exceeds the 17 KiB stack buffer, changing nothing.
+#[inline(never)] // keep the 17 KiB frame out of `write_records`
+#[expect(
+    clippy::large_stack_arrays,
+    reason = "A full TLS record plus overhead fits this isolated stack frame; heap fallback measurably regresses throughput."
+)]
 fn seal_on_stack<S>(
     s: &mut SslStreamCore<StreamWrapper<S>>,
     bufs: &[io::IoSlice<'_>],

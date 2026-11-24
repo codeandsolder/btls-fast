@@ -20,7 +20,7 @@ use std::{
     future,
     io::{self, Write},
     pin::Pin,
-    task::{Context, Poll, ready},
+    task::{Context, Poll, Waker, ready},
 };
 
 use btls::{
@@ -53,7 +53,7 @@ impl<S: AsyncRead + AsyncWrite> SslStream<S> {
     pub fn new(mut ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
         // Allow `SSL_write` to return after one plaintext fragment.
         ssl.set_mode(SslMode::ENABLE_PARTIAL_WRITE);
-        SslStreamCore::new(ssl, StreamWrapper::new(stream)).map(SslStream)
+        SslStreamCore::new_uninit(ssl, StreamWrapper::new(stream)).map(SslStream)
     }
 
     #[inline]
@@ -150,9 +150,18 @@ impl<S> SslStream<S> {
 
     /// Runs `f` with `ctx` installed for the transport I/O performed in it, clearing it even if
     /// `f` unwinds.
+    #[inline]
     fn with_context<F, R>(self: Pin<&mut Self>, ctx: &mut Context<'_>, f: F) -> R
     where
         F: FnOnce(&mut SslStreamCore<StreamWrapper<S>>) -> R,
+    {
+        self.with_transport_context(ctx, |s, waker| s.with_task_waker(waker, f))
+    }
+
+    #[inline]
+    fn with_transport_context<F, R>(self: Pin<&mut Self>, ctx: &mut Context<'_>, f: F) -> R
+    where
+        F: FnOnce(&mut SslStreamCore<StreamWrapper<S>>, &Waker) -> R,
     {
         /// Clears the installed context when dropped.
         struct Clear<'a, S>(&'a mut SslStreamCore<StreamWrapper<S>>);
@@ -170,7 +179,7 @@ impl<S> SslStream<S> {
         // return or unwind. The stream is structurally pinned in this `SslStream`.
         unsafe { this.0.get_mut().transport.set_context(ctx) };
         let clear = Clear(&mut this.0);
-        clear.0.with_task_waker(waker, f)
+        f(clear.0, waker)
     }
 }
 
@@ -227,8 +236,8 @@ where
 {
     #[inline]
     fn poll_write(self: Pin<&mut Self>, ctx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
-        self.with_context(ctx, |s| {
-            cvt(write::write_records(s, &[io::IoSlice::new(buf)]))
+        self.with_transport_context(ctx, |s, waker| {
+            cvt(write::write_records(s, &[io::IoSlice::new(buf)], waker))
         })
     }
 
@@ -238,7 +247,7 @@ where
         ctx: &mut Context<'_>,
         bufs: &[io::IoSlice<'_>],
     ) -> Poll<io::Result<usize>> {
-        self.with_context(ctx, |s| cvt(write::write_records(s, bufs)))
+        self.with_transport_context(ctx, |s, waker| cvt(write::write_records(s, bufs, waker)))
     }
 
     #[inline]
@@ -248,7 +257,7 @@ where
 
     #[inline]
     fn poll_flush(self: Pin<&mut Self>, ctx: &mut Context) -> Poll<io::Result<()>> {
-        self.with_context(ctx, |s| {
+        self.with_transport_context(ctx, |s, _| {
             cvt(s
                 .get_mut()
                 .write_buf
