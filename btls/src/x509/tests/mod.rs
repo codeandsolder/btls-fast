@@ -355,6 +355,20 @@ fn x509_extension_new() {
 }
 
 #[test]
+fn extension_by_name_and_nid_use_the_same_scoped_context() {
+    let by_name = X509Extension::new(None, None, "basicConstraints", "CA:TRUE").unwrap();
+    let by_nid = X509Extension::new_nid(None, None, Nid::BASIC_CONSTRAINTS, "CA:TRUE").unwrap();
+    assert_eq!(by_name.to_der().unwrap(), by_nid.to_der().unwrap());
+
+    let builder = X509::builder().unwrap();
+    let context = builder.x509v3_context(None, None);
+    let by_name = X509Extension::new(None, Some(&context), "basicConstraints", "CA:FALSE").unwrap();
+    let by_nid =
+        X509Extension::new_nid(None, Some(&context), Nid::BASIC_CONSTRAINTS, "CA:FALSE").unwrap();
+    assert_eq!(by_name.to_der().unwrap(), by_nid.to_der().unwrap());
+}
+
+#[test]
 fn x509_extension_to_der() {
     let builder = X509::builder().unwrap();
 

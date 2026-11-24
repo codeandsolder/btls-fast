@@ -833,6 +833,39 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
     catch_native(|| callback(ssl, SslInfoCallbackMode(mode), value));
 }
 
+// Both native certificate-compression entry points need the same guarded
+// callback lookup and borrowed input. The closure may only return a boolean:
+// neither a borrowed native SSL value nor an input slice can escape this scope.
+//
+/// # Safety
+/// Non-null SSL and input pointers must remain live and readable for this
+/// synchronous native callback. A null input is allowed only for zero length.
+unsafe fn with_certificate_compressor<C: CertificateCompressor>(
+    ssl: *mut ffi::SSL,
+    input: *const u8,
+    input_len: usize,
+    run: impl FnOnce(&C, &[u8]) -> bool,
+) -> bool {
+    if ssl.is_null() {
+        return false;
+    }
+    // SAFETY: BoringSSL supplies a live exclusive SSL borrow for this callback.
+    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
+    let context = ssl.ssl_context();
+    let Some(compressor) = context
+        .callback::<Option<C>>(CallbackRole::Compression)
+        .and_then(Option::as_ref)
+    else {
+        return false;
+    };
+    // SAFETY: The native caller provides the input for this synchronous callback;
+    // native_input checks its bounds and the null/empty representation.
+    let Some(data) = (unsafe { native_input(input, input_len) }) else {
+        return false;
+    };
+    catch_native(|| run(compressor, data)).unwrap_or(false)
+}
+
 pub(super) unsafe extern "C" fn raw_ssl_cert_compress<C>(
     ssl: *mut ffi::SSL,
     out: *mut ffi::CBB,
@@ -849,24 +882,14 @@ where
     if ssl.is_null() || out.is_null() {
         return 0;
     }
-    // SAFETY: BoringSSL supplies a live exclusive SSL borrow and valid
-    // output handle for the duration of this callback.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-
-    let ssl_context = ssl.ssl_context();
-    let Some(compressor) = ssl_context
-        .callback::<Option<C>>(CallbackRole::Compression)
-        .and_then(Option::as_ref)
-    else {
-        return 0;
-    };
-
-    // SAFETY: Certificate compression borrows the native input for the duration of the synchronous callback.
-    let Some(input_slice) = (unsafe { native_input(input, input_len) }) else {
-        return 0;
-    };
     let mut writer = CryptoByteBuilder::from_ptr(out);
-    if !catch_native(|| compressor.compress(input_slice, &mut writer).is_ok()).unwrap_or(false) {
+    // SAFETY: Native SSL and input are live for the synchronous callback;
+    // the output CBB is non-null and exclusively writable during compression.
+    if !unsafe {
+        with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
+            compressor.compress(data, &mut writer).is_ok()
+        })
+    } {
         return 0;
     }
 
@@ -890,43 +913,29 @@ where
     if ssl.is_null() || out.is_null() {
         return 0;
     }
-    // SAFETY: BoringSSL supplies a live exclusive SSL borrow and valid
-    // output handle for the duration of this callback.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-
-    let ssl_context = ssl.ssl_context();
-    let Some(compressor) = ssl_context
-        .callback::<Option<C>>(CallbackRole::Compression)
-        .and_then(Option::as_ref)
-    else {
-        return 0;
-    };
-
-    let Ok(mut decompression_buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
-        return 0;
-    };
-
-    // SAFETY: Certificate decompression borrows a valid native input for the duration of the synchronous callback.
-    let Some(input_slice) = (unsafe { native_input(input, input_len) }) else {
-        return 0;
-    };
-
-    if !catch_native(|| {
-        compressor
-            .decompress(input_slice, &mut decompression_buffer)
-            .is_ok()
-    })
-    .unwrap_or(false)
-    {
+    // SAFETY: Native SSL and input remain live for the synchronous callback.
+    // Constructing the output only after validating the callback and input avoids
+    // allocating the advertised decompressed size for malformed native input.
+    if !unsafe {
+        with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
+            let Ok(mut buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
+                return false;
+            };
+            if compressor.decompress(data, &mut buffer).is_err() {
+                return false;
+            }
+            let Ok(crypto_buffer) = buffer.build() else {
+                return false;
+            };
+            // SAFETY: The enclosing unsafe block covers the live native output
+            // slot, which receives ownership only after full initialization.
+            out.write(crypto_buffer);
+            true
+        })
+    } {
         return 0;
     }
 
-    let Ok(crypto_buffer) = decompression_buffer.build() else {
-        return 0;
-    };
-
-    // SAFETY: The native decompression callback provides a uniquely writable pointer-to-buffer output slot.
-    unsafe { out.write(crypto_buffer) };
     1
 }
 

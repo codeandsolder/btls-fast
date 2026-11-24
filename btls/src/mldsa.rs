@@ -182,6 +182,160 @@ impl<T: Copy> Drop for SecretBuilder<T> {
     }
 }
 
+// The native ML-DSA parameter sets deliberately use different opaque key types
+// and entrypoints. Describe each set once, and generate the same checked
+// operations without erasing native types or moving secrets out of their owner.
+macro_rules! define_mldsa_suite {
+    (
+        $suite:ident, $variant:ident, $label:literal, $private:ty, $public:ty,
+        $public_bytes:expr, $signature_bytes:expr,
+        $generate:path, $seed_fn:path, $derive:path, $sign:path,
+        $parse:path, $marshal:path, $verify:path
+    ) => {
+        struct $suite;
+
+        impl $suite {
+            fn generate() -> Result<(MlDsaPublicKey, MlDsaPrivateKey), ErrorStack> {
+                let (bytes, key) = SecretBuilder::<$private>::generate::<$public_bytes>($generate)?;
+                let public = MlDsaPublicKey::from_slice(Algorithm::$variant, &bytes)?;
+                Ok((
+                    public,
+                    MlDsaPrivateKey {
+                        algorithm: Algorithm::$variant,
+                        inner: PrivateKeyInner::$variant(key),
+                    },
+                ))
+            }
+
+            fn from_seed(seed: &MlDsaPrivateKeySeed) -> Result<PrivateKeyInner, ErrorStack> {
+                Ok(PrivateKeyInner::$variant(
+                    SecretBuilder::<$private>::from_seed(seed, $seed_fn)?,
+                ))
+            }
+
+            fn public_from_private(
+                secret: &SecretMaterial<$private>,
+            ) -> Result<PublicKeyInner, ErrorStack> {
+                let mut public = MaybeUninit::<$public>::zeroed();
+                // SAFETY: The input is live and immutable. The zeroed output
+                // matches the native public key type for this parameter set.
+                cvt(unsafe { $derive(public.as_mut_ptr(), &raw const secret.expanded) })?;
+                // SAFETY: Success initializes the whole opaque native public key.
+                let public = unsafe { public.assume_init() };
+                Ok(PublicKeyInner::$variant(Box::new(public)))
+            }
+
+            fn sign(secret: &SecretMaterial<$private>, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+                let mut sig = vec![0u8; $signature_bytes];
+                // SAFETY: The output has the native signature size; the expanded
+                // key is immutable and the message is borrowed for this call.
+                cvt(unsafe {
+                    $sign(
+                        sig.as_mut_ptr(),
+                        &raw const secret.expanded,
+                        msg.as_ptr(),
+                        msg.len(),
+                        core::ptr::null(),
+                        0,
+                    )
+                })?;
+                Ok(sig)
+            }
+
+            fn parse(cbs: &mut ffi::CBS) -> Result<PublicKeyInner, ErrorStack> {
+                let mut key = MaybeUninit::<$public>::zeroed();
+                // SAFETY: The initialized CBS borrows the checked input slice,
+                // and native writes the matching opaque public-key structure.
+                cvt(unsafe { $parse(key.as_mut_ptr(), cbs) })?;
+                if cbs.len != 0 {
+                    return Err(ErrorStack::internal_error_str(concat!(
+                        "trailing bytes after ",
+                        $label,
+                        " public key"
+                    )));
+                }
+                // SAFETY: Native success wrote an initialized public key.
+                let key = unsafe { key.assume_init() };
+                Ok(PublicKeyInner::$variant(Box::new(key)))
+            }
+
+            /// # Safety
+            /// `cbb` must point to a live, initialized native builder, and the
+            /// borrowed key must remain valid until encoding completes.
+            unsafe fn marshal(cbb: *mut ffi::CBB, key: &$public) -> c_int {
+                // SAFETY: The caller guarantees the builder lifetime, and the
+                // concrete type matches this parameter set's native encoder.
+                unsafe { $marshal(cbb, key) }
+            }
+
+            fn verify(key: &$public, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
+                // SAFETY: The public key and borrowed byte slices are live and
+                // this verifier matches their selected native parameter set.
+                cvt(unsafe {
+                    $verify(
+                        key,
+                        signature.as_ptr(),
+                        signature.len(),
+                        msg.as_ptr(),
+                        msg.len(),
+                        core::ptr::null(),
+                        0,
+                    )
+                })
+            }
+        }
+    };
+}
+
+define_mldsa_suite!(
+    MlDsa44Suite,
+    MlDsa44,
+    "ML-DSA-44",
+    ffi::MLDSA44_private_key,
+    ffi::MLDSA44_public_key,
+    { ffi::MLDSA44_PUBLIC_KEY_BYTES as usize },
+    ffi::MLDSA44_SIGNATURE_BYTES as usize,
+    ffi::MLDSA44_generate_key,
+    ffi::MLDSA44_private_key_from_seed,
+    ffi::MLDSA44_public_from_private,
+    ffi::MLDSA44_sign,
+    ffi::MLDSA44_parse_public_key,
+    ffi::MLDSA44_marshal_public_key,
+    ffi::MLDSA44_verify
+);
+define_mldsa_suite!(
+    MlDsa65Suite,
+    MlDsa65,
+    "ML-DSA-65",
+    ffi::MLDSA65_private_key,
+    ffi::MLDSA65_public_key,
+    { ffi::MLDSA65_PUBLIC_KEY_BYTES as usize },
+    ffi::MLDSA65_SIGNATURE_BYTES as usize,
+    ffi::MLDSA65_generate_key,
+    ffi::MLDSA65_private_key_from_seed,
+    ffi::MLDSA65_public_from_private,
+    ffi::MLDSA65_sign,
+    ffi::MLDSA65_parse_public_key,
+    ffi::MLDSA65_marshal_public_key,
+    ffi::MLDSA65_verify
+);
+define_mldsa_suite!(
+    MlDsa87Suite,
+    MlDsa87,
+    "ML-DSA-87",
+    ffi::MLDSA87_private_key,
+    ffi::MLDSA87_public_key,
+    { ffi::MLDSA87_PUBLIC_KEY_BYTES as usize },
+    ffi::MLDSA87_SIGNATURE_BYTES as usize,
+    ffi::MLDSA87_generate_key,
+    ffi::MLDSA87_private_key_from_seed,
+    ffi::MLDSA87_public_from_private,
+    ffi::MLDSA87_sign,
+    ffi::MLDSA87_parse_public_key,
+    ffi::MLDSA87_marshal_public_key,
+    ffi::MLDSA87_verify
+);
+
 impl MlDsaPrivateKey {
     /// Generates a random ML-DSA key pair.
     ///
@@ -193,45 +347,9 @@ impl MlDsaPrivateKey {
     pub fn generate(algorithm: Algorithm) -> Result<(MlDsaPublicKey, Self), ErrorStack> {
         ffi::init();
         match algorithm {
-            Algorithm::MlDsa44 => {
-                let (bytes, key) = SecretBuilder::<ffi::MLDSA44_private_key>::generate::<
-                    { ffi::MLDSA44_PUBLIC_KEY_BYTES as usize },
-                >(ffi::MLDSA44_generate_key)?;
-                let public = MlDsaPublicKey::from_slice(algorithm, &bytes)?;
-                Ok((
-                    public,
-                    Self {
-                        algorithm,
-                        inner: PrivateKeyInner::MlDsa44(key),
-                    },
-                ))
-            }
-            Algorithm::MlDsa65 => {
-                let (bytes, key) = SecretBuilder::<ffi::MLDSA65_private_key>::generate::<
-                    { ffi::MLDSA65_PUBLIC_KEY_BYTES as usize },
-                >(ffi::MLDSA65_generate_key)?;
-                let public = MlDsaPublicKey::from_slice(algorithm, &bytes)?;
-                Ok((
-                    public,
-                    Self {
-                        algorithm,
-                        inner: PrivateKeyInner::MlDsa65(key),
-                    },
-                ))
-            }
-            Algorithm::MlDsa87 => {
-                let (bytes, key) = SecretBuilder::<ffi::MLDSA87_private_key>::generate::<
-                    { ffi::MLDSA87_PUBLIC_KEY_BYTES as usize },
-                >(ffi::MLDSA87_generate_key)?;
-                let public = MlDsaPublicKey::from_slice(algorithm, &bytes)?;
-                Ok((
-                    public,
-                    Self {
-                        algorithm,
-                        inner: PrivateKeyInner::MlDsa87(key),
-                    },
-                ))
-            }
+            Algorithm::MlDsa44 => MlDsa44Suite::generate(),
+            Algorithm::MlDsa65 => MlDsa65Suite::generate(),
+            Algorithm::MlDsa87 => MlDsa87Suite::generate(),
         }
     }
 
@@ -243,24 +361,9 @@ impl MlDsaPrivateKey {
     pub fn from_seed(algorithm: Algorithm, seed: &MlDsaPrivateKeySeed) -> Result<Self, ErrorStack> {
         ffi::init();
         let inner = match algorithm {
-            Algorithm::MlDsa44 => {
-                PrivateKeyInner::MlDsa44(SecretBuilder::<ffi::MLDSA44_private_key>::from_seed(
-                    seed,
-                    ffi::MLDSA44_private_key_from_seed,
-                )?)
-            }
-            Algorithm::MlDsa65 => {
-                PrivateKeyInner::MlDsa65(SecretBuilder::<ffi::MLDSA65_private_key>::from_seed(
-                    seed,
-                    ffi::MLDSA65_private_key_from_seed,
-                )?)
-            }
-            Algorithm::MlDsa87 => {
-                PrivateKeyInner::MlDsa87(SecretBuilder::<ffi::MLDSA87_private_key>::from_seed(
-                    seed,
-                    ffi::MLDSA87_private_key_from_seed,
-                )?)
-            }
+            Algorithm::MlDsa44 => MlDsa44Suite::from_seed(seed)?,
+            Algorithm::MlDsa65 => MlDsa65Suite::from_seed(seed)?,
+            Algorithm::MlDsa87 => MlDsa87Suite::from_seed(seed)?,
         };
         Ok(Self { algorithm, inner })
     }
@@ -287,45 +390,16 @@ impl MlDsaPrivateKey {
     ///
     /// The native public-key derivation fails.
     pub fn public_key(&self) -> Result<MlDsaPublicKey, ErrorStack> {
-        // SAFETY: The immutable private key remains Arc-owned; each native out-pointer uniquely writes a zeroed public representation of the matching parameter set.
-        unsafe {
-            ffi::init();
-            match &self.inner {
-                PrivateKeyInner::MlDsa44(key) => {
-                    let mut pub_key: MaybeUninit<ffi::MLDSA44_public_key> = MaybeUninit::zeroed();
-                    cvt(ffi::MLDSA44_public_from_private(
-                        pub_key.as_mut_ptr(),
-                        &raw const key.expanded,
-                    ))?;
-                    Ok(MlDsaPublicKey {
-                        algorithm: self.algorithm,
-                        inner: PublicKeyInner::MlDsa44(Box::new(pub_key.assume_init())),
-                    })
-                }
-                PrivateKeyInner::MlDsa65(key) => {
-                    let mut pub_key: MaybeUninit<ffi::MLDSA65_public_key> = MaybeUninit::zeroed();
-                    cvt(ffi::MLDSA65_public_from_private(
-                        pub_key.as_mut_ptr(),
-                        &raw const key.expanded,
-                    ))?;
-                    Ok(MlDsaPublicKey {
-                        algorithm: self.algorithm,
-                        inner: PublicKeyInner::MlDsa65(Box::new(pub_key.assume_init())),
-                    })
-                }
-                PrivateKeyInner::MlDsa87(key) => {
-                    let mut pub_key: MaybeUninit<ffi::MLDSA87_public_key> = MaybeUninit::zeroed();
-                    cvt(ffi::MLDSA87_public_from_private(
-                        pub_key.as_mut_ptr(),
-                        &raw const key.expanded,
-                    ))?;
-                    Ok(MlDsaPublicKey {
-                        algorithm: self.algorithm,
-                        inner: PublicKeyInner::MlDsa87(Box::new(pub_key.assume_init())),
-                    })
-                }
-            }
-        }
+        ffi::init();
+        let inner = match &self.inner {
+            PrivateKeyInner::MlDsa44(key) => MlDsa44Suite::public_from_private(key)?,
+            PrivateKeyInner::MlDsa65(key) => MlDsa65Suite::public_from_private(key)?,
+            PrivateKeyInner::MlDsa87(key) => MlDsa87Suite::public_from_private(key)?,
+        };
+        Ok(MlDsaPublicKey {
+            algorithm: self.algorithm,
+            inner,
+        })
     }
 
     /// Signs `msg` and returns the signature bytes.
@@ -334,47 +408,11 @@ impl MlDsaPrivateKey {
     ///
     /// Native randomized signature generation fails.
     pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
-        // SAFETY: The private key remains Arc-owned; each signature buffer matches the native fixed output size and the message slice is readable for the call.
-        unsafe {
-            ffi::init();
-            match &self.inner {
-                PrivateKeyInner::MlDsa44(key) => {
-                    let mut sig = vec![0u8; ffi::MLDSA44_SIGNATURE_BYTES as usize];
-                    cvt(ffi::MLDSA44_sign(
-                        sig.as_mut_ptr(),
-                        &raw const key.expanded,
-                        msg.as_ptr(),
-                        msg.len(),
-                        core::ptr::null(),
-                        0,
-                    ))?;
-                    Ok(sig)
-                }
-                PrivateKeyInner::MlDsa65(key) => {
-                    let mut sig = vec![0u8; ffi::MLDSA65_SIGNATURE_BYTES as usize];
-                    cvt(ffi::MLDSA65_sign(
-                        sig.as_mut_ptr(),
-                        &raw const key.expanded,
-                        msg.as_ptr(),
-                        msg.len(),
-                        core::ptr::null(),
-                        0,
-                    ))?;
-                    Ok(sig)
-                }
-                PrivateKeyInner::MlDsa87(key) => {
-                    let mut sig = vec![0u8; ffi::MLDSA87_SIGNATURE_BYTES as usize];
-                    cvt(ffi::MLDSA87_sign(
-                        sig.as_mut_ptr(),
-                        &raw const key.expanded,
-                        msg.as_ptr(),
-                        msg.len(),
-                        core::ptr::null(),
-                        0,
-                    ))?;
-                    Ok(sig)
-                }
-            }
+        ffi::init();
+        match &self.inner {
+            PrivateKeyInner::MlDsa44(key) => MlDsa44Suite::sign(key, msg),
+            PrivateKeyInner::MlDsa65(key) => MlDsa65Suite::sign(key, msg),
+            PrivateKeyInner::MlDsa87(key) => MlDsa87Suite::sign(key, msg),
         }
     }
 }
@@ -396,59 +434,12 @@ impl MlDsaPublicKey {
         }
         let mut cbs = cbs_init(serialized_public_key);
 
-        // SAFETY: The input length matches the selected parameter set; native parses the live CBS into a distinct zeroed output buffer.
-        unsafe {
-            match algorithm {
-                Algorithm::MlDsa44 => {
-                    let mut key: MaybeUninit<ffi::MLDSA44_public_key> = MaybeUninit::zeroed();
-                    cvt(ffi::MLDSA44_parse_public_key(
-                        key.as_mut_ptr(),
-                        &raw mut cbs,
-                    ))?;
-                    if cbs.len != 0 {
-                        return Err(ErrorStack::internal_error_str(
-                            "trailing bytes after ML-DSA-44 public key",
-                        ));
-                    }
-                    Ok(Self {
-                        algorithm,
-                        inner: PublicKeyInner::MlDsa44(Box::new(key.assume_init())),
-                    })
-                }
-                Algorithm::MlDsa65 => {
-                    let mut key: MaybeUninit<ffi::MLDSA65_public_key> = MaybeUninit::zeroed();
-                    cvt(ffi::MLDSA65_parse_public_key(
-                        key.as_mut_ptr(),
-                        &raw mut cbs,
-                    ))?;
-                    if cbs.len != 0 {
-                        return Err(ErrorStack::internal_error_str(
-                            "trailing bytes after ML-DSA-65 public key",
-                        ));
-                    }
-                    Ok(Self {
-                        algorithm,
-                        inner: PublicKeyInner::MlDsa65(Box::new(key.assume_init())),
-                    })
-                }
-                Algorithm::MlDsa87 => {
-                    let mut key: MaybeUninit<ffi::MLDSA87_public_key> = MaybeUninit::zeroed();
-                    cvt(ffi::MLDSA87_parse_public_key(
-                        key.as_mut_ptr(),
-                        &raw mut cbs,
-                    ))?;
-                    if cbs.len != 0 {
-                        return Err(ErrorStack::internal_error_str(
-                            "trailing bytes after ML-DSA-87 public key",
-                        ));
-                    }
-                    Ok(Self {
-                        algorithm,
-                        inner: PublicKeyInner::MlDsa87(Box::new(key.assume_init())),
-                    })
-                }
-            }
-        }
+        let inner = match algorithm {
+            Algorithm::MlDsa44 => MlDsa44Suite::parse(&mut cbs)?,
+            Algorithm::MlDsa65 => MlDsa65Suite::parse(&mut cbs)?,
+            Algorithm::MlDsa87 => MlDsa87Suite::parse(&mut cbs)?,
+        };
+        Ok(Self { algorithm, inner })
     }
 
     /// Returns the algorithm for this key.
@@ -480,13 +471,13 @@ impl MlDsaPublicKey {
         let result = unsafe {
             match &self.inner {
                 PublicKeyInner::MlDsa44(key) => {
-                    ffi::MLDSA44_marshal_public_key(cbb.as_mut_ptr(), key.as_ref())
+                    MlDsa44Suite::marshal(cbb.as_mut_ptr(), key.as_ref())
                 }
                 PublicKeyInner::MlDsa65(key) => {
-                    ffi::MLDSA65_marshal_public_key(cbb.as_mut_ptr(), key.as_ref())
+                    MlDsa65Suite::marshal(cbb.as_mut_ptr(), key.as_ref())
                 }
                 PublicKeyInner::MlDsa87(key) => {
-                    ffi::MLDSA87_marshal_public_key(cbb.as_mut_ptr(), key.as_ref())
+                    MlDsa87Suite::marshal(cbb.as_mut_ptr(), key.as_ref())
                 }
             }
         };
@@ -522,45 +513,11 @@ impl MlDsaPublicKey {
     ///
     /// The signature or context is invalid or the native verification fails.
     pub fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
-        // SAFETY: The borrowed native public key and the message and signature slices remain live for synchronous verification.
-        unsafe {
-            ffi::init();
-            match &self.inner {
-                PublicKeyInner::MlDsa44(key) => {
-                    cvt(ffi::MLDSA44_verify(
-                        key.as_ref(),
-                        signature.as_ptr(),
-                        signature.len(),
-                        msg.as_ptr(),
-                        msg.len(),
-                        core::ptr::null(),
-                        0,
-                    ))?;
-                }
-                PublicKeyInner::MlDsa65(key) => {
-                    cvt(ffi::MLDSA65_verify(
-                        key.as_ref(),
-                        signature.as_ptr(),
-                        signature.len(),
-                        msg.as_ptr(),
-                        msg.len(),
-                        core::ptr::null(),
-                        0,
-                    ))?;
-                }
-                PublicKeyInner::MlDsa87(key) => {
-                    cvt(ffi::MLDSA87_verify(
-                        key.as_ref(),
-                        signature.as_ptr(),
-                        signature.len(),
-                        msg.as_ptr(),
-                        msg.len(),
-                        core::ptr::null(),
-                        0,
-                    ))?;
-                }
-            }
-            Ok(())
+        ffi::init();
+        match &self.inner {
+            PublicKeyInner::MlDsa44(key) => MlDsa44Suite::verify(key, msg, signature),
+            PublicKeyInner::MlDsa65(key) => MlDsa65Suite::verify(key, msg, signature),
+            PublicKeyInner::MlDsa87(key) => MlDsa87Suite::verify(key, msg, signature),
         }
     }
 }
@@ -671,6 +628,16 @@ mod tests {
                     let derived = sk.public_key().unwrap();
                     assert_eq!(derived.algorithm(), $alg);
                     assert_eq!(derived.to_bytes().unwrap(), pk.to_bytes().unwrap());
+                }
+
+                #[test]
+                fn public_key_parsing_checks_exact_length() {
+                    let (pk, _) = MlDsaPrivateKey::generate($alg).unwrap();
+                    let bytes = pk.to_bytes().unwrap();
+                    assert!(MlDsaPublicKey::from_slice($alg, &bytes[..bytes.len() - 1]).is_err());
+                    let mut oversized = bytes;
+                    oversized.push(0);
+                    assert!(MlDsaPublicKey::from_slice($alg, &oversized).is_err());
                 }
 
                 #[test]

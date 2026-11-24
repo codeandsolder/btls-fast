@@ -30,19 +30,11 @@ use tokio::{
     task::JoinSet,
 };
 use tokio_btls::SslStream;
-use tokio_rustls::{
-    client::TlsStream,
-    rustls::{
-        client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-        crypto::{aws_lc_rs, WebPkiSupportedAlgorithms},
-        pki_types::{CertificateDer, ServerName, UnixTime},
-        version, ClientConfig, DigitallySignedStruct, Error, SignatureScheme,
-    },
-    TlsConnector,
-};
+use tokio_rustls::{client::TlsStream, rustls::pki_types::ServerName, TlsConnector};
 
 #[path = "support/allocator.rs"]
 mod allocator;
+mod rustls_benchmark;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -215,10 +207,6 @@ struct Rustls(TlsConnector);
 /// Bare `TcpStream`s, the baseline without TLS.
 struct Plain;
 
-/// Accepts any server certificate; the test certificate is a self-signed CA certificate.
-#[derive(Debug)]
-struct NoVerifier(WebPkiSupportedAlgorithms);
-
 // ===== impl Server =====
 
 impl Server {
@@ -313,43 +301,6 @@ impl Connect for Plain {
     }
 }
 
-// ===== impl NoVerifier =====
-
-impl ServerCertVerifier for NoVerifier {
-    fn verify_server_cert(
-        &self,
-        _: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: UnixTime,
-    ) -> Result<ServerCertVerified, Error> {
-        Ok(ServerCertVerified::assertion())
-    }
-
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &DigitallySignedStruct,
-    ) -> Result<HandshakeSignatureValid, Error> {
-        Ok(HandshakeSignatureValid::assertion())
-    }
-
-    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.0.supported_schemes()
-    }
-}
-
 /// Body of a client process: one case, printed as `base idle peak after seconds`.
 fn client() -> Result<(), BoxError> {
     let name = env::var(CLIENT)?;
@@ -364,7 +315,12 @@ fn client() -> Result<(), BoxError> {
     let runtime = runtime()?;
     match name.as_str() {
         "tokio-btls" => runtime.block_on(run(Btls(btls_connector()?), port, conns, body)),
-        "tokio-rustls" => runtime.block_on(run(Rustls(rustls_connector()?), port, conns, body)),
+        "tokio-rustls" => runtime.block_on(run(
+            Rustls(rustls_benchmark::connector()?),
+            port,
+            conns,
+            body,
+        )),
         "plaintext" => runtime.block_on(run(Plain, port, conns, body)),
         _ => Err(format!("unknown client {name}").into()),
     }
@@ -472,18 +428,6 @@ fn btls_connector() -> Result<SslConnector, BoxError> {
     builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
     builder.set_tls13_ciphers(&[Tls13Cipher::AES_128_GCM_SHA256])?;
     Ok(builder.build())
-}
-
-fn rustls_connector() -> Result<TlsConnector, BoxError> {
-    let mut provider = aws_lc_rs::default_provider();
-    provider.cipher_suites = vec![aws_lc_rs::cipher_suite::TLS13_AES_128_GCM_SHA256];
-    let verifier = NoVerifier(provider.signature_verification_algorithms);
-    let config = ClientConfig::builder_with_provider(Arc::new(provider))
-        .with_protocol_versions(&[&version::TLS13])?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth();
-    Ok(TlsConnector::from(Arc::new(config)))
 }
 
 /// Body of the server process: tokio-btls on one port, plain TCP on another.
