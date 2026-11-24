@@ -23,13 +23,14 @@ pub fn cvt_ossl<T>(r: Result<T, ssl::Error>) -> Poll<Result<T, ssl::Error>> {
     }
 }
 
-/// Whether `e` asks to retry after a transport `Pending`, which registered the waker.
+/// Whether a transport or Rust async callback registered the waker and asks to retry.
 ///
 /// btls also retries on `NotConnected`, which nothing will wake the task for.
 pub fn would_block(e: &ssl::Error) -> bool {
-    matches!(e.code(), ErrorCode::WANT_READ | ErrorCode::WANT_WRITE)
-        && e.io_error()
-            .is_none_or(|err| err.kind() == io::ErrorKind::WouldBlock)
+    e.is_async_callback_pending()
+        || (matches!(e.code(), ErrorCode::WANT_READ | ErrorCode::WANT_WRITE)
+            && e.io_error()
+                .is_none_or(|err| err.kind() == io::ErrorKind::WouldBlock))
 }
 
 /// Whether `SSL_shutdown` failed because a fatal alert already closed the write side.

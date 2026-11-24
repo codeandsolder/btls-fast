@@ -5881,7 +5881,7 @@ impl<S: Read + Write> SslStream<S> {
                 }
                 Err(ref e) if e.code() == ErrorCode::WANT_READ && e.io_error().is_none() => {}
                 Err(e) => {
-                    return Err(e.into_io_error().unwrap_or_else(io::Error::other));
+                    return Err(e.into_stream_io_error());
                 }
             }
         }
@@ -6053,6 +6053,19 @@ impl<S: Read + Write> SslStream<S> {
 }
 
 impl<S> SslStream<S> {
+    /// Drives a synchronous TLS operation with a task waker scoped to this
+    /// connection. Async callbacks poll their futures using this waker.
+    ///
+    /// The waker is not retained by the stream after this call (including
+    /// unwinding). Nested operations on another stream have independent scopes.
+    pub fn with_task_waker<R>(
+        &mut self,
+        waker: &std::task::Waker,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        async_callbacks::with_task_waker(self.ssl.as_ptr(), waker, || f(self))
+    }
+
     fn make_error(&mut self, ret: c_int) -> Error {
         self.check_panic();
 
@@ -6074,7 +6087,11 @@ impl<S> SslStream<S> {
             _ => None,
         };
 
-        Error { code, cause }
+        Error {
+            code,
+            cause,
+            async_callback_pending: async_callbacks::take_pending(&self.ssl, code),
+        }
     }
 
     fn check_panic(&mut self) {
@@ -6156,7 +6173,7 @@ impl<S: Read + Write> Write for SslStream<S> {
                 Ok(n) => return Ok(n),
                 Err(ref e) if e.code() == ErrorCode::WANT_READ && e.io_error().is_none() => {}
                 Err(e) => {
-                    return Err(e.into_io_error().unwrap_or_else(io::Error::other));
+                    return Err(e.into_stream_io_error());
                 }
             }
         }
@@ -6192,6 +6209,7 @@ where
             stream: self.inner,
             error: Error {
                 code,
+                async_callback_pending: false,
                 cause: Some(InnerError::Io(io::Error::new(
                     io::ErrorKind::WouldBlock,
                     message,

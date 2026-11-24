@@ -120,6 +120,7 @@ pub enum InnerError {
 pub struct Error {
     pub(crate) code: ErrorCode,
     pub(crate) cause: Option<InnerError>,
+    pub(crate) async_callback_pending: bool,
 }
 
 impl Error {
@@ -127,6 +128,21 @@ impl Error {
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
     pub const fn code(&self) -> ErrorCode {
         self.code
+    }
+
+    /// Whether a Rust async TLS callback was polled and registered the
+    /// current scoped task waker before requesting a retry.
+    #[must_use = "Only suspend a runtime poll when its task waker was registered."]
+    pub const fn is_async_callback_pending(&self) -> bool {
+        self.async_callback_pending
+    }
+
+    pub(super) fn into_stream_io_error(self) -> io::Error {
+        if self.async_callback_pending {
+            io::Error::new(io::ErrorKind::WouldBlock, self)
+        } else {
+            self.into_io_error().unwrap_or_else(io::Error::other)
+        }
     }
 
     #[must_use = "Use the returned diagnostic information to handle or report the result."]
@@ -180,6 +196,7 @@ impl From<ErrorStack> for Error {
         Self {
             code: ErrorCode::SSL,
             cause: Some(InnerError::Ssl(e)),
+            async_callback_pending: false,
         }
     }
 }

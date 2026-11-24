@@ -165,11 +165,12 @@ impl<S> SslStream<S> {
 
         // SAFETY: nothing is moved out of `this`; `Transport::parts` re-pins the stream in place.
         let this = unsafe { self.get_unchecked_mut() };
+        let waker = ctx.waker();
         // SAFETY: `ctx` stays borrowed for this call and is not used again; `clear` clears it on
         // return or unwind. The stream is structurally pinned in this `SslStream`.
         unsafe { this.0.get_mut().transport.set_context(ctx) };
         let clear = Clear(&mut this.0);
-        f(&mut *clear.0)
+        clear.0.with_task_waker(waker, f)
     }
 }
 
