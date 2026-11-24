@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   strict-rust:
-    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@850404feb20042e5225cfbdd5ee397b5fc441392 # main
+    uses: codeandsolder/rust-skills2/.github/workflows/strict-rust.yml@7d0552029497cf094787c3593f804d5bce137c4b # main
     with:
       cargo-args: "--locked --workspace --all-targets --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation"
       checkout-submodules: "recursive"
