@@ -1818,11 +1818,11 @@ fn peer_signature_algorithm_mtls_server_sees_client() {
         server_builder
             .ctx()
             .set_info_callback(move |ssl, mode, _value| {
-                if mode == SslInfoCallbackMode::HANDSHAKE_DONE {
-                    if let Some(sa) = ssl.peer_signature_algorithm() {
-                        assert!(sa.name().is_some(), "client sig scheme should have a name");
-                        captured_cb.store(true, Ordering::SeqCst);
-                    }
+                if mode == SslInfoCallbackMode::HANDSHAKE_DONE
+                    && let Some(sa) = ssl.peer_signature_algorithm()
+                {
+                    assert!(sa.name().is_some(), "client sig scheme should have a name");
+                    captured_cb.store(true, Ordering::SeqCst);
                 }
             })
             .unwrap();
@@ -1858,11 +1858,11 @@ fn signature_algorithm_used_server_default() {
         server_builder
             .ctx()
             .set_info_callback(move |ssl, mode, _value| {
-                if mode == SslInfoCallbackMode::HANDSHAKE_DONE {
-                    if let Some(sa) = ssl.signature_algorithm_used() {
-                        assert!(sa.name().is_some());
-                        captured_cb.store(true, Ordering::SeqCst);
-                    }
+                if mode == SslInfoCallbackMode::HANDSHAKE_DONE
+                    && let Some(sa) = ssl.signature_algorithm_used()
+                {
+                    assert!(sa.name().is_some());
+                    captured_cb.store(true, Ordering::SeqCst);
                 }
             })
             .unwrap();
@@ -1922,11 +1922,11 @@ fn signature_algorithm_used_mtls_client() {
     client_builder
         .ctx()
         .set_info_callback(move |ssl, mode, _value| {
-            if mode == SslInfoCallbackMode::HANDSHAKE_DONE {
-                if let Some(sa) = ssl.signature_algorithm_used() {
-                    assert!(sa.name().is_some());
-                    captured_cb.store(true, Ordering::SeqCst);
-                }
+            if mode == SslInfoCallbackMode::HANDSHAKE_DONE
+                && let Some(sa) = ssl.signature_algorithm_used()
+            {
+                assert!(sa.name().is_some());
+                captured_cb.store(true, Ordering::SeqCst);
             }
         })
         .unwrap();
