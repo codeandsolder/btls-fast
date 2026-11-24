@@ -36,6 +36,9 @@ impl ReadBuffer {
     where
         S: AsyncRead,
     {
+        if buf.is_empty() {
+            return Ok(0);
+        }
         if self.bytes.is_empty() {
             self.fill(transport)?;
         }
@@ -73,7 +76,9 @@ impl ReadBuffer {
                 let filled = buf.filled().len();
                 // SAFETY: `ReadBuf` guarantees its first `filled` bytes are initialized.
                 unsafe { bytes.set_len(filled) };
-                self.bytes = bytes;
+                if filled != 0 {
+                    self.bytes = bytes;
+                }
                 Ok(())
             }
             Poll::Pending => Err(io::Error::from(io::ErrorKind::WouldBlock)),
@@ -108,7 +113,10 @@ mod tests {
     #[test]
     fn read_buf_released_when_drained() {
         let mut wrapper = StreamWrapper::new(Once(vec![1; 100]));
-        wrapper.transport.set_noop_context();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        // SAFETY: The context is local to this test and never otherwise used;
+        // the stream is Unpin and the transport stays on this thread.
+        unsafe { wrapper.transport.set_context(&mut cx) };
 
         let mut buf = [0; 60];
         assert_eq!(wrapper.read(&mut buf).unwrap(), 60);
@@ -120,5 +128,22 @@ mod tests {
         let err = wrapper.read(&mut buf).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(wrapper.read_buf.bytes.capacity(), 0);
+        wrapper.transport.clear_context();
+    }
+
+    #[test]
+    fn empty_read_and_eof_do_not_allocate_or_poll_unnecessarily() {
+        let mut wrapper = StreamWrapper::new(tokio::io::empty());
+        // Without an installed context, any transport poll would fail.
+        assert_eq!(wrapper.read(&mut []).unwrap(), 0);
+        assert_eq!(wrapper.read_buf.bytes.capacity(), 0);
+
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        // SAFETY: The context is local to this test and never otherwise used;
+        // the stream is Unpin and the transport stays on this thread.
+        unsafe { wrapper.transport.set_context(&mut cx) };
+        assert_eq!(wrapper.read(&mut [0]).unwrap(), 0);
+        assert_eq!(wrapper.read_buf.bytes.capacity(), 0);
+        wrapper.transport.clear_context();
     }
 }

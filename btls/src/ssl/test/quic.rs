@@ -125,7 +125,7 @@ fn client_context(sessions: Arc<Mutex<Vec<SslSession>>>) -> SslContext {
     let mut builder = SslContextBuilder::new(SslMethod::tls()).unwrap();
     context(&mut builder);
     builder.set_ca_file("test/root-ca.pem").unwrap();
-    builder.set_verify(SslVerifyMode::PEER);
+    builder.set_verify(SslVerifyMode::PEER).unwrap();
     builder.set_alpn_protos(b"\x02h3").unwrap();
     builder.set_session_cache_mode(SslSessionCacheMode::CLIENT);
     builder

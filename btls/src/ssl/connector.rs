@@ -74,7 +74,7 @@ impl SslConnector {
         ctx.set_cipher_list(
             "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK",
         )?;
-        ctx.set_verify(SslVerifyMode::PEER);
+        ctx.set_verify(SslVerifyMode::PEER)?;
 
         Ok(SslConnectorBuilder(ctx))
     }
@@ -666,7 +666,7 @@ impl DerefMut for SslAcceptorBuilder {
 fn setup_verify_hostname(ssl: &mut SslRef, domain: &str) -> Result<(), ErrorStack> {
     use crate::x509::verify::X509CheckFlags;
 
-    let param = ssl.param_mut();
+    let param = ssl.verify_param_mut()?;
     param.set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
     match domain.parse() {
         Ok(ip) => param.set_ip(ip),

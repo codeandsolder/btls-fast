@@ -21,6 +21,9 @@ pub struct WriteBuffer {
     // buffers its records. `retry` recomputes it as each write starts, so it is stale between
     // writes, and `StreamWrapper::flush` ignores it.
     pub(crate) blocked: bool,
+    // The first real failure after plaintext was accepted. Report it at the
+    // next outer write or flush, not from an internal BIO flush in that write.
+    deferred_error: Option<io::Error>,
 }
 
 impl WriteBuffer {
@@ -125,6 +128,7 @@ impl WriteBuffer {
     where
         S: AsyncWrite,
     {
+        self.take_deferred_error()?;
         if !self.bytes.is_empty() {
             match self.drain(transport) {
                 Err(e) if e.kind() != io::ErrorKind::WouldBlock || self.is_full() => return Err(e),
@@ -137,17 +141,33 @@ impl WriteBuffer {
         Ok(())
     }
 
-    /// Ends a write by draining the records unless `blocked`.
-    ///
-    /// An error is dropped and leaves them buffered; the next `retry` reports it only if it
-    /// recurs.
+    /// Saves a failure that occurred after accepting plaintext. Backpressure
+    /// is not an error to replay: a subsequent poll must drive the transport
+    /// again to register its own waker.
+    pub(super) fn defer_error(&mut self, error: io::Error) {
+        if error.kind() != io::ErrorKind::WouldBlock && self.deferred_error.is_none() {
+            self.deferred_error = Some(error);
+        }
+    }
+
+    /// Reports a previously deferred failure exactly once, before accepting
+    /// more plaintext or flushing queued ciphertext.
+    pub(crate) fn take_deferred_error(&mut self) -> io::Result<()> {
+        self.deferred_error.take().map_or(Ok(()), Err)
+    }
+
+    /// Ends a write by draining the records unless `blocked`. Any failure
+    /// leaves the ciphertext buffered and is reported by the next operation.
     #[inline]
     pub(crate) fn drain_unless_blocked<S>(&mut self, transport: &mut Transport<S>)
     where
         S: AsyncWrite,
     {
         if !self.blocked {
-            let _ = self.drain(transport);
+            if let Err(error) = self.drain(transport) {
+                self.blocked = true;
+                self.defer_error(error);
+            }
         }
     }
 
@@ -188,12 +208,15 @@ impl WriteBuffer {
     /// Writes buffered records and `record` in one transport write and buffers the rest; without
     /// vectored writes, `record` instead waits behind buffered records for the next drain.
     ///
-    /// Sets `blocked` on `Pending`, an error or an overcount, keeping the unwritten bytes (all of
-    /// them on an overcount) buffered; the next drain reports the error if it recurs.
+    /// Sets `blocked` on `Pending` or a failure, keeping the unwritten bytes (all of
+    /// them on an overcount) buffered. A failure is reported by the next outer operation.
     pub(crate) fn write_last<S>(&mut self, transport: &mut Transport<S>, record: &[u8])
     where
         S: AsyncWrite,
     {
+        if record.is_empty() {
+            return;
+        }
         let pending = self.len();
         let res = match transport.parts() {
             Ok((stream, cx)) if pending == 0 => stream.poll_write(cx, record),
@@ -202,13 +225,27 @@ impl WriteBuffer {
                 stream.poll_write_vectored(cx, &bufs)
             }
             // Let the next drain combine the buffer and record into one write.
-            Ok(_) => Poll::Ready(Ok(0)),
+            Ok(_) => {
+                self.push(record);
+                return;
+            }
             Err(e) => Poll::Ready(Err(e)),
         };
-        let n = match res {
-            Poll::Ready(Ok(n)) if n <= pending.saturating_add(record.len()) => n,
-            Poll::Ready(_) | Poll::Pending => {
+        let result = match res {
+            Poll::Ready(Ok(0)) => Err(io::ErrorKind::WriteZero.into()),
+            Poll::Ready(Ok(n)) if n <= pending.saturating_add(record.len()) => Ok(n),
+            Poll::Ready(Ok(_)) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "transport wrote more bytes than it was given",
+            )),
+            Poll::Ready(Err(e)) => Err(e),
+            Poll::Pending => Err(io::ErrorKind::WouldBlock.into()),
+        };
+        let n = match result {
+            Ok(n) => n,
+            Err(error) => {
                 self.blocked = true;
+                self.defer_error(error);
                 0
             }
         };
@@ -216,9 +253,14 @@ impl WriteBuffer {
             self.pos += n;
             self.push(record);
         } else {
-            self.bytes.clear();
             self.pos = 0;
-            self.bytes.extend_from_slice(&record[n - pending..]);
+            let remaining = &record[n - pending..];
+            if remaining.is_empty() {
+                self.bytes = Vec::new();
+            } else {
+                self.bytes.clear();
+                self.bytes.extend_from_slice(remaining);
+            }
         }
     }
 }
@@ -315,7 +357,10 @@ mod tests {
             budget: 0,
             data: Vec::new(),
         });
-        wrapper.transport.set_noop_context();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        // SAFETY: The context is local to this test and never otherwise used;
+        // the stream is Unpin and the transport stays on this thread.
+        unsafe { wrapper.transport.set_context(&mut cx) };
 
         wrapper.write_all(b"0123456789").unwrap();
         let err = wrapper.flush().unwrap_err();
@@ -339,6 +384,7 @@ mod tests {
         wrapper.write_all(b"klm").unwrap();
         assert_eq!(wrapper.transport.stream.data, b"0123456789abcdefghijklm");
         assert_eq!(wrapper.write_buf.bytes.capacity(), 0);
+        wrapper.transport.clear_context();
     }
 
     #[test]
@@ -348,7 +394,10 @@ mod tests {
             budget: 0,
             data: Vec::new(),
         });
-        wrapper.transport.set_noop_context();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        // SAFETY: The context is local to this test and never otherwise used;
+        // the stream is Unpin and the transport stays on this thread.
+        unsafe { wrapper.transport.set_context(&mut cx) };
 
         wrapper.write_all(&[0; 3 * CHUNK]).unwrap();
         for _ in 0..64 {
@@ -360,6 +409,7 @@ mod tests {
         }
         assert_eq!(wrapper.write_buf.len(), 3 * CHUNK);
         assert!(wrapper.write_buf.bytes.capacity() <= 2 * WRITE_BUF_CAPACITY);
+        wrapper.transport.clear_context();
     }
 
     #[test]
@@ -368,7 +418,10 @@ mod tests {
             budget: 0,
             data: Vec::new(),
         });
-        wrapper.transport.set_noop_context();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        // SAFETY: The context is local to this test and never otherwise used;
+        // the stream is Unpin and the transport stays on this thread.
+        unsafe { wrapper.transport.set_context(&mut cx) };
 
         // A backlog that never empties, so the written prefix is only ever dropped by compaction.
         let mut expected = vec![0xff; 1024];
@@ -396,6 +449,7 @@ mod tests {
         wrapper.flush().unwrap();
         assert_eq!(wrapper.transport.stream.data, expected);
         assert_eq!(wrapper.write_buf.bytes.capacity(), 0);
+        wrapper.transport.clear_context();
     }
 
     /// Claims one byte more than each write was given.
@@ -431,9 +485,17 @@ mod tests {
         write_buf.write_last(&mut transport, b"last");
         assert!(write_buf.blocked);
         assert_eq!(write_buf.buffered(), b"recordlast");
+        assert_eq!(
+            write_buf.take_deferred_error().unwrap_err().kind(),
+            io::ErrorKind::Other
+        );
+        assert!(write_buf.take_deferred_error().is_ok());
 
         // An overcount keeps the records, as an error would.
-        transport.set_noop_context();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        // SAFETY: The context is local to this test and never otherwise used;
+        // the stream is Unpin and the transport stays on this thread.
+        unsafe { transport.set_context(&mut cx) };
         let err = write_buf.drain(&mut transport).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert_eq!(write_buf.buffered(), b"recordlast");
@@ -441,6 +503,12 @@ mod tests {
         write_buf.write_last(&mut transport, b"last");
         assert!(write_buf.blocked);
         assert_eq!(write_buf.buffered(), b"last");
+        assert_eq!(
+            write_buf.take_deferred_error().unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(write_buf.take_deferred_error().is_ok());
+        transport.clear_context();
     }
 
     #[test]

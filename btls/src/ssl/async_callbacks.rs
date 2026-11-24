@@ -173,7 +173,7 @@ impl SslContextBuilder {
         method: impl AsyncPrivateKeyMethod,
     ) -> Result<(), ErrorStack> {
         SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX.register()?;
-        self.set_private_key_method(AsyncPrivateKeyMethodBridge(Box::new(method)))
+        self.set_private_key_method(AsyncPrivateKeyMethodBridge(method))
     }
 
     /// Sets a callback that is called when a client proposed to resume a session
@@ -240,10 +240,6 @@ impl SslContextBuilder {
     ///
     /// See [`SslContextBuilder::set_custom_verify_callback`] for the sync version of this method.
     ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
-    ///
     /// # Errors
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
@@ -277,7 +273,7 @@ impl SslCredentialBuilder {
         method: impl AsyncPrivateKeyMethod,
     ) -> Result<(), ErrorStack> {
         SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX.register()?;
-        self.set_private_key_method(AsyncPrivateKeyMethodBridge(Box::new(method)))
+        self.set_private_key_method(AsyncPrivateKeyMethodBridge(method))
     }
 }
 
@@ -387,9 +383,9 @@ pub trait AsyncPrivateKeyMethod: Send + Sync + 'static {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct AsyncPrivateKeyMethodError;
 
-struct AsyncPrivateKeyMethodBridge(Box<dyn AsyncPrivateKeyMethod>);
+struct AsyncPrivateKeyMethodBridge<M>(M);
 
-impl PrivateKeyMethod for AsyncPrivateKeyMethodBridge {
+impl<M: AsyncPrivateKeyMethod> PrivateKeyMethod for AsyncPrivateKeyMethodBridge<M> {
     fn sign(
         &self,
         ssl: &mut SslRef,
@@ -398,7 +394,7 @@ impl PrivateKeyMethod for AsyncPrivateKeyMethodBridge {
         output: &mut [u8],
     ) -> Result<usize, PrivateKeyMethodError> {
         with_private_key_method(ssl, output, |ssl, output| {
-            <dyn AsyncPrivateKeyMethod>::sign(&*self.0, ssl, input, signature_algorithm, output)
+            self.0.sign(ssl, input, signature_algorithm, output)
         })
     }
 
@@ -409,7 +405,7 @@ impl PrivateKeyMethod for AsyncPrivateKeyMethodBridge {
         output: &mut [u8],
     ) -> Result<usize, PrivateKeyMethodError> {
         with_private_key_method(ssl, output, |ssl, output| {
-            <dyn AsyncPrivateKeyMethod>::decrypt(&*self.0, ssl, input, output)
+            self.0.decrypt(ssl, input, output)
         })
     }
 
@@ -470,7 +466,7 @@ where
 /// Creates and drives a private key method future.
 ///
 /// This is a convenience function used by the three `PrivateKeyMethod`
-/// operations implemented for `dyn AsyncPrivateKeyMethod`. It relies on [`with_ex_data_future`] to
+/// operations implemented by the async private key bridge. It relies on [`with_ex_data_future`] to
 /// drive the future and then immediately calls the final [`BoxPrivateKeyMethodFinish`]
 /// when the future is ready.
 fn with_private_key_method(

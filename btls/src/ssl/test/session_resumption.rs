@@ -215,21 +215,21 @@ fn client_session_resumes_within_scope_and_domain() {
     let unscoped = connector(b"");
     let session = issue(&unscoped, |config| {
         config.set_verify_hostname(false);
-        config.set_verify(SslVerifyMode::NONE);
+        config.set_verify(SslVerifyMode::NONE).unwrap();
     });
     assert!(offers(&unscoped, &session, "foobar.com", |config| {
         config.set_verify_hostname(false);
-        config.set_verify(SslVerifyMode::NONE);
+        config.set_verify(SslVerifyMode::NONE).unwrap();
     }));
     assert!(!offers(&unscoped, &session, "foobar.com", |config| {
         config.set_verify_hostname(false)
     }));
     assert!(!offers(&unscoped, &session, "foobar.com", |config| {
-        config.set_verify(SslVerifyMode::NONE)
+        config.set_verify(SslVerifyMode::NONE).unwrap()
     }));
     assert!(!offers(&connector(b""), &session, "foobar.com", |config| {
         config.set_verify_hostname(false);
-        config.set_verify(SslVerifyMode::NONE);
+        config.set_verify(SslVerifyMode::NONE).unwrap();
     }));
 }
 
@@ -283,7 +283,10 @@ fn client_session_is_not_offered_after_its_chain_expires() {
 
     // Verified as of a time inside the validity period.
     let mut config = connector.configure().unwrap();
-    config.param_mut().set_time(now - day - day / 2);
+    config
+        .verify_param_mut()
+        .unwrap()
+        .set_time(now - day - day / 2);
     let mut stream = config.connect("foobar.com", server.connect_tcp()).unwrap();
     stream.read_exact(&mut [0]).unwrap();
     let session = sessions.lock().unwrap().pop().unwrap();
@@ -300,7 +303,9 @@ fn client_session_is_not_offered_after_its_chain_expires() {
         config.into_ssl("foobar.com").unwrap().session().is_some()
     };
     assert!(!offers(|_| {}));
-    assert!(offers(|config| config.set_verify(SslVerifyMode::NONE)));
+    assert!(offers(|config| config
+        .set_verify(SslVerifyMode::NONE)
+        .unwrap()));
 }
 
 #[test]

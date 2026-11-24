@@ -262,10 +262,19 @@ async fn sealed_records_survive_a_failed_drain() {
             .map(|offset| (offset ^ (offset >> 8)) as u8)
             .collect();
 
-        // A one-time error after sealing is dropped: the record is reported and goes out
-        // before the next write.
+        // A one-time error after sealing must be reported without replaying
+        // the plaintext, even though the next transport poll would succeed.
         client.get_mut().interrupt = true;
         assert_eq!(client.write(b"headerpayload").await.unwrap(), 13);
+        let polls = client.get_ref().polls;
+        let buffered = client.0.get_ref().write_buf.len();
+        assert!(buffered > 0);
+        match Pin::new(&mut client).poll_flush(&mut cx) {
+            Poll::Ready(Err(e)) => assert_eq!(e.kind(), io::ErrorKind::Interrupted),
+            result => panic!("expected the one-time deferred error: {result:?}"),
+        }
+        assert_eq!(client.get_ref().polls, polls);
+        assert_eq!(client.0.get_ref().write_buf.len(), buffered);
 
         // The transport takes part of the records, then fails. The sealed plaintext must be
         // reported, or the caller would send it again.
@@ -280,7 +289,7 @@ async fn sealed_records_survive_a_failed_drain() {
         let buffered = client.0.get_ref().write_buf.len();
         assert!(buffered > n - 20_000);
 
-        // The buffered rest stays put; the error persists, so the next call reports it.
+        // The buffered rest stays put; the next call reports the deferred error.
         match Pin::new(&mut client).poll_flush(&mut cx) {
             Poll::Ready(Err(e)) => assert_eq!(e.kind(), io::ErrorKind::TimedOut),
             result => panic!("expected the deferred error: {result:?}"),

@@ -142,6 +142,8 @@ pub mod pkey;
 pub mod prf;
 pub mod rand;
 pub mod rsa;
+#[cfg(any(feature = "mldsa", feature = "mlkem"))]
+mod secret_material;
 pub mod sha;
 pub mod sign;
 pub mod srtp;

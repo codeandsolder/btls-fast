@@ -215,7 +215,7 @@ fn delegated_credential_contexts() -> (SslContextBuilder, SslContextBuilder) {
     client_context
         .set_max_proto_version(Some(SslVersion::TLS1_3))
         .unwrap();
-    client_context.set_verify(SslVerifyMode::NONE);
+    client_context.set_verify(SslVerifyMode::NONE).unwrap();
     client_context
         .set_verify_algorithm_prefs(&[SslSignatureAlgorithm::RSA_PSS_RSAE_SHA256])
         .unwrap();

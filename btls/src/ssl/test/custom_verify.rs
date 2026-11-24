@@ -63,7 +63,7 @@ fn untrusted_with_set_cert() {
     client
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
-            let store = ssl.ssl_context().cert_store();
+            let store = ssl.ssl_context().cert_store().unwrap();
             let cert = ssl.peer_certificate().unwrap();
             let cert_chain = ssl.peer_cert_chain().unwrap();
 
@@ -94,7 +94,7 @@ fn trusted_with_set_cert() {
     client
         .ctx()
         .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
-            let store = ssl.ssl_context().cert_store();
+            let store = ssl.ssl_context().cert_store().unwrap();
             let cert = ssl.peer_certificate().unwrap();
             let cert_chain = ssl.peer_cert_chain().unwrap();
 
