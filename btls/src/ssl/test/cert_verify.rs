@@ -8,7 +8,7 @@ fn error_when_trusted_but_callback_returns_false() {
     server.should_error();
     let server = server.build();
     let mut client = server.client_with_root_ca();
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
     client
         .ctx()
         .set_cert_verify_callback(|x509| {
@@ -28,7 +28,7 @@ fn error_when_trusted_but_callback_returns_false() {
 fn no_error_when_untrusted_but_callback_returns_true() {
     let server = Server::builder().build();
     let mut client = server.client();
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
     client
         .ctx()
         .set_cert_verify_callback(|x509| {
@@ -48,7 +48,7 @@ fn no_error_when_untrusted_but_callback_returns_true() {
 fn no_error_when_trusted_and_callback_returns_true() {
     let server = Server::builder().build();
     let mut client = server.client_with_root_ca();
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
     client
         .ctx()
         .set_cert_verify_callback(|x509| {
@@ -72,7 +72,7 @@ fn callback_receives_correct_certificate() {
     let mut client = server.client();
     let leaf_sha1 = "585e3a58acfd3b4e5e2825659407244ddd93539c";
     let root_sha1 = "1b1ad6250902865aea72bc1e843d45b769e6c553";
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
     client
         .ctx()
         .set_cert_verify_callback(move |x509| {
@@ -124,7 +124,7 @@ fn callback_receives_correct_chain() {
     let mut client = server.client_with_root_ca();
     let leaf_sha1 = "585e3a58acfd3b4e5e2825659407244ddd93539c";
     let root_sha1 = "1b1ad6250902865aea72bc1e843d45b769e6c553";
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
     client
         .ctx()
         .set_cert_verify_callback(move |x509| {

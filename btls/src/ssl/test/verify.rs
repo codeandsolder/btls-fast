@@ -13,7 +13,7 @@ fn untrusted() {
     let server = server.build();
 
     let mut client = server.client();
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
 
     client.connect_err();
 }
@@ -35,7 +35,7 @@ fn trusted_with_set_cert() {
     store.add_cert(&x509).unwrap();
 
     let mut client = server.client();
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
     client.ctx().set_verify_cert_store(store.build()).unwrap();
 
     client.connect();
@@ -192,7 +192,7 @@ fn rsa_key_usage_mismatch() {
 
     let configure_client = |server: &Server| {
         let mut client = server.client();
-        client.ctx().set_verify(SslVerifyMode::PEER);
+        client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
         client
             .ctx()
             .set_ca_file("test/rsa-key-usage-relaxed-ca.pem")

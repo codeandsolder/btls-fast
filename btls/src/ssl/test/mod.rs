@@ -65,6 +65,46 @@ fn context_extra_chain_handles_empty_and_populated_chains() {
 }
 
 #[test]
+fn non_x509_context_rejects_certificate_operations_without_panicking() {
+    // SAFETY: No handshake is driven, and the X.509 wrapper operations
+    // below reject unsupported contexts before invoking native X.509 APIs.
+    let mut ctx = SslContext::builder(unsafe { SslMethod::tls_with_buffer() }).unwrap();
+    assert!(!ctx.ctx.has_x509_support());
+    assert!(ctx.cert_store().is_err());
+    assert!(ctx.cert_store_mut().is_err());
+    assert!(ctx.set_verify(SslVerifyMode::PEER).is_err());
+    assert!(ctx.verify_mode().is_err());
+    assert!(ctx.set_verify_depth(1).is_err());
+    assert!(ctx
+        .set_verify_callback(SslVerifyMode::PEER, |_, _| true)
+        .is_err());
+    assert!(ctx.set_cert_verify_callback(|_| true).is_err());
+    assert!(ctx.set_default_verify_paths().is_err());
+    assert!(ctx.ctx.certificate().is_none());
+    assert!(ctx.ctx.extra_chain_certs().is_none());
+    // Custom verification is explicitly supported by this native method.
+    ctx.set_custom_verify_callback(SslVerifyMode::PEER, |_| {
+        Err(super::SslVerifyError::Invalid(
+            super::SslAlert::BAD_CERTIFICATE,
+        ))
+    })
+    .unwrap();
+    let ctx = ctx.build();
+    assert!(ctx.cert_store().is_err());
+    let mut ssl = Ssl::new(&ctx).unwrap();
+    assert!(ssl.set_verify(SslVerifyMode::PEER).is_err());
+    assert!(ssl.verify_mode().is_err());
+    assert!(ssl.verify_param_mut().is_err());
+    assert!(ssl.peer_certificate().is_none());
+    assert!(ssl.peer_cert_chain().is_none());
+    assert!(ssl.certificate().is_none());
+    assert_eq!(
+        ssl.verify_result(),
+        Err(crate::x509::X509VerifyError::INVALID_CALL)
+    );
+}
+
+#[test]
 fn native_ssl_io_length_is_bounded_without_wrapping() {
     assert_eq!(super::ssl_io_len(0), 0);
     assert_eq!(super::ssl_io_len(usize::MAX), c_int::MAX);
@@ -505,14 +545,21 @@ fn test_mutable_store() {
     let cert2 = X509::from_pem(cert2).unwrap();
 
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.cert_store_mut().add_cert(cert.clone()).unwrap();
-    assert_eq!(1, ctx.cert_store().objects_len());
+    ctx.cert_store_mut()
+        .unwrap()
+        .add_cert(cert.clone())
+        .unwrap();
+    assert_eq!(1, ctx.cert_store().unwrap().objects_len());
 
-    ctx.set_cert_store_builder(X509StoreBuilder::new().unwrap());
-    assert_eq!(0, ctx.cert_store().objects_len());
+    ctx.set_cert_store_builder(X509StoreBuilder::new().unwrap())
+        .unwrap();
+    assert_eq!(0, ctx.cert_store().unwrap().objects_len());
 
-    ctx.cert_store_mut().add_cert(cert.clone()).unwrap();
-    assert_eq!(1, ctx.cert_store().objects_len());
+    ctx.cert_store_mut()
+        .unwrap()
+        .add_cert(cert.clone())
+        .unwrap();
+    assert_eq!(1, ctx.cert_store().unwrap().objects_len());
 
     let mut new_store = X509StoreBuilder::new().unwrap();
     new_store.add_cert(&cert).unwrap();
@@ -520,25 +567,30 @@ fn test_mutable_store() {
     let new_store = new_store.build();
     assert_eq!(2, new_store.objects_len());
 
-    ctx.set_cert_store_ref(&new_store);
-    assert_eq!(2, ctx.cert_store().objects_len());
-    assert!(std::ptr::eq(new_store.as_ptr(), ctx.cert_store().as_ptr()));
+    ctx.set_cert_store(new_store.clone()).unwrap();
+    assert_eq!(2, ctx.cert_store().unwrap().objects_len());
+    assert!(std::ptr::eq(
+        new_store.as_ptr(),
+        ctx.cert_store().unwrap().as_ptr()
+    ));
 
     let ctx = ctx.build();
-    assert!(std::ptr::eq(new_store.as_ptr(), ctx.cert_store().as_ptr()));
+    assert!(std::ptr::eq(
+        new_store.as_ptr(),
+        ctx.cert_store().unwrap().as_ptr()
+    ));
 
     drop(new_store);
-    assert_eq!(2, ctx.cert_store().objects_len());
+    assert_eq!(2, ctx.cert_store().unwrap().objects_len());
 }
 
 #[test]
-#[should_panic(expected = "mutated")]
 fn shared_store_must_not_be_mutated() {
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
 
     let shared = X509StoreBuilder::new().unwrap().build();
-    ctx.set_cert_store_ref(&shared);
-    ctx.cert_store_mut();
+    ctx.set_cert_store(shared.clone()).unwrap();
+    assert!(ctx.cert_store_mut().is_err());
 }
 
 #[test]
@@ -809,7 +861,7 @@ fn refcount_ssl_context() {
 fn default_verify_paths() {
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
     ctx.set_default_verify_paths().unwrap();
-    ctx.set_verify(SslVerifyMode::PEER);
+    ctx.set_verify(SslVerifyMode::PEER).unwrap();
     let ctx = ctx.build();
     let s = match TcpStream::connect("google.com:443") {
         Ok(s) => s,
@@ -840,11 +892,16 @@ fn verify_valid_hostname() {
     let server = Server::builder().build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
 
-    client.ssl().param_mut().set_host("foobar.com").unwrap();
+    client
+        .ssl()
+        .verify_param_mut()
+        .unwrap()
+        .set_host("foobar.com")
+        .unwrap();
     client.connect();
 }
 
@@ -860,10 +917,15 @@ fn verify_valid_hostname_with_wildcard() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
-    client.ssl().param_mut().set_host("yes.foobar.com").unwrap();
+    client
+        .ssl()
+        .verify_param_mut()
+        .unwrap()
+        .set_host("yes.foobar.com")
+        .unwrap();
     client.connect();
 }
 
@@ -880,12 +942,13 @@ fn verify_reject_underscore_hostname_with_wildcard() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
     client
         .ssl()
-        .param_mut()
+        .verify_param_mut()
+        .unwrap()
         .set_host("not_allowed.foobar.com")
         .unwrap();
     client.connect_err();
@@ -904,17 +967,19 @@ fn verify_allow_underscore_hostname_with_wildcard() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
 
     client
         .ssl()
-        .param_mut()
+        .verify_param_mut()
+        .unwrap()
         .set_hostflags(X509CheckFlags::UNDERSCORE_WILDCARDS);
     client
         .ssl()
-        .param_mut()
+        .verify_param_mut()
+        .unwrap()
         .set_host("now_allowed.foobar.com")
         .unwrap();
     client.connect();
@@ -929,14 +994,20 @@ fn verify_invalid_hostname() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER);
+    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
     client
         .ssl()
-        .param_mut()
+        .verify_param_mut()
+        .unwrap()
         .set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
-    client.ssl().param_mut().set_host("bogus.com").unwrap();
+    client
+        .ssl()
+        .verify_param_mut()
+        .unwrap()
+        .set_host("bogus.com")
+        .unwrap();
     client.connect_err();
 }
 
@@ -1057,7 +1128,7 @@ fn connector_no_hostname_can_disable_verify() {
     let server = Server::builder().build();
 
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
-    connector.set_verify(SslVerifyMode::NONE);
+    connector.set_verify(SslVerifyMode::NONE).unwrap();
     let connector = connector.build();
 
     let s = server.connect_tcp();
@@ -1143,7 +1214,7 @@ fn client_ca_list() {
     assert_eq!(names.len(), 1);
 
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.set_client_ca_list(names);
+    ctx.set_client_ca_list(names).unwrap();
 }
 
 #[test]
@@ -1736,7 +1807,10 @@ fn peer_signature_algorithm_mtls_server_sees_client() {
             .ctx()
             .set_verify_cert_store(store.build())
             .unwrap();
-        server_builder.ctx().set_verify(SslVerifyMode::PEER);
+        server_builder
+            .ctx()
+            .set_verify(SslVerifyMode::PEER)
+            .unwrap();
         let captured_cb = Arc::clone(&captured);
         server_builder
             .ctx()
@@ -1823,7 +1897,10 @@ fn signature_algorithm_used_mtls_client() {
             .ctx()
             .set_verify_cert_store(store.build())
             .unwrap();
-        server_builder.ctx().set_verify(SslVerifyMode::PEER);
+        server_builder
+            .ctx()
+            .set_verify(SslVerifyMode::PEER)
+            .unwrap();
     }
     let server = server_builder.build();
 

@@ -231,14 +231,16 @@ fn owned_store_snapshot_survives_mutation_and_destruction() -> Result<(), ErrorS
 }
 
 #[test]
-#[should_panic(expected = "Shared X509Store can't be mutated")]
 fn set_cert_store_prevents_mutability() {
     use crate::ssl::*;
 
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
     let store = X509StoreBuilder::new().unwrap().build();
 
-    ctx.set_cert_store_ref(&store);
-    assert!(std::ptr::eq(ctx.cert_store().as_ptr(), store.as_ptr()));
-    let _aliased_store = ctx.cert_store_mut();
+    ctx.set_cert_store(store.clone()).unwrap();
+    assert!(std::ptr::eq(
+        ctx.cert_store().unwrap().as_ptr(),
+        store.as_ptr()
+    ));
+    assert!(ctx.cert_store_mut().is_err());
 }

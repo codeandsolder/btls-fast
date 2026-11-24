@@ -240,10 +240,6 @@ impl SslContextBuilder {
     ///
     /// See [`SslContextBuilder::set_custom_verify_callback`] for the sync version of this method.
     ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
-    ///
     /// # Errors
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.

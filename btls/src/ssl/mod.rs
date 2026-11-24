@@ -260,12 +260,16 @@ impl SslMethod {
         }
     }
 
-    /// Same as `tls`, but doesn't create X.509 for certificates.
+    /// TLS without native X.509 parsing.
+    ///
+    /// Client handshakes fail unless a custom certificate verifier is installed
+    /// using [`SslContextBuilder::set_custom_verify_callback`] or
+    /// [`SslRef::set_custom_verify_callback`].
     ///
     /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
+    /// The caller must install an appropriate custom certificate verifier
+    /// before using this method for authenticated TLS connections and must
+    /// not use native X.509 operations on the resulting non-X.509 context.
     #[must_use = "Use the selected protocol method to construct the TLS context."]
     pub unsafe fn tls_with_buffer() -> Self {
         // SAFETY: The explicitly requested no-X509 TLS method is a process-lifetime immutable native descriptor.
@@ -1187,11 +1191,9 @@ impl SslContextBuilder {
     // TODO: Add the ability to unset the callback by either adding a new function or wrapping the
     // callback in an `Option`.
     ///
-    /// # Panics
-    ///
-    /// This method panics if this `SslContext` is associated with a RPK context.
-    ///
     /// # Errors
+    /// The context does not support X.509 certificates.
+    ///
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_cert_verify_callback)]
@@ -1199,7 +1201,7 @@ impl SslContextBuilder {
     where
         F: Fn(&mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         let target = self.ensure_slot(&CERT_VERIFY_INDEX)?;
         self.set_ex_data(
@@ -1219,23 +1221,29 @@ impl SslContextBuilder {
     }
 
     /// Configures the certificate verification method for new connections.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_set_verify)]
-    pub fn set_verify(&mut self, mode: SslVerifyMode) {
-        self.ctx.check_x509();
+    pub fn set_verify(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
 
         // SAFETY: The builder exclusively owns a live native context and the verification mode is a scalar bitset.
         unsafe {
             ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), None);
-        }
+        };
+        Ok(())
     }
 
     /// Returns the verify mode set by [`Self::set_verify`] or one of the verify callbacks.
     ///
-    /// An explicit [`SslVerifyMode::NONE`] reads the same as the default. Panics if the context
-    /// is not configured for X.509 certificates.
+    /// An explicit [`SslVerifyMode::NONE`] reads the same as the default.
+    ///
+    /// # Errors
+    /// The context is not configured for X.509 certificates.
     #[corresponds(SSL_CTX_get_verify_mode)]
     #[must_use = "Use the returned flags to inspect current configuration."]
-    pub fn verify_mode(&self) -> SslVerifyMode {
+    pub fn verify_mode(&self) -> Result<SslVerifyMode, ErrorStack> {
         self.ctx.verify_mode()
     }
 
@@ -1252,11 +1260,9 @@ impl SslContextBuilder {
     /// Those callbacks can inspect the peer-sent chain, call [`X509StoreContextRef::verify_cert`]
     /// and inspect the result, or perform other operations more straightforwardly.
     ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
-    ///
     /// # Errors
+    /// The context does not support X.509 certificates.
+    ///
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_verify)]
@@ -1268,7 +1274,7 @@ impl SslContextBuilder {
     where
         F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         // SAFETY: The builder exclusively owns its context; the registered typed callback slot remains live until context teardown.
         unsafe {
@@ -1295,10 +1301,6 @@ impl SslContextBuilder {
     ///
     /// To verify a certificate asynchronously, the callback may return `Err(SslVerifyError::Retry)`.
     /// The handshake will then pause with an error with code [`ErrorCode::WANT_CERTIFICATE_VERIFY`].
-    ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
     ///
     /// # Errors
     ///
@@ -1394,10 +1396,6 @@ impl SslContextBuilder {
     ///
     /// CipherCtx and HmacCtx are guaranteed to be initialized.
     ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
-    ///
     /// # Safety
     ///
     /// The application is responsible for correctly setting the key_name, iv, encryption context
@@ -1406,6 +1404,8 @@ impl SslContextBuilder {
     /// [`SSL_CTX_set_tlsext_ticket_key_cb`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_set_tlsext_ticket_key_cb
     ///
     /// # Errors
+    /// The context does not support X.509 certificates.
+    ///
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_CTX_set_tlsext_ticket_key_cb)]
@@ -1421,7 +1421,7 @@ impl SslContextBuilder {
             + Sync
             + Send,
     {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         // SAFETY: The registered ticket callback is owned in context extra data before the native callback hooks are installed.
         unsafe {
@@ -1442,12 +1442,11 @@ impl SslContextBuilder {
     /// If the peer's certificate chain is longer than this value, verification will fail.
     ///
     /// # Errors
-    ///
-    /// The depth exceeds the signed native integer range.
+    /// The context does not support X.509 certificates or the depth exceeds the signed native integer range.
     #[corresponds(SSL_CTX_set_verify_depth)]
     pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
         let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         // SAFETY: the live context is exclusively borrowed, and the depth is
         // checked against the full native signed integer range.
@@ -1456,9 +1455,12 @@ impl SslContextBuilder {
     }
 
     /// Sets a custom certificate store for verifying peer certificates.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates. Native store installation or extra-data registration fails.
     #[corresponds(SSL_CTX_set1_verify_cert_store)]
     pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
         let index = self.ensure_slot(&VERIFY_STORE_INDEX)?;
         // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
@@ -1472,39 +1474,42 @@ impl SslContextBuilder {
 
     /// Replaces the context's certificate store, and keeps it immutable.
     ///
-    /// This method allows sharing the `X509Store`, but calls to `cert_store_mut` will panic.
+    /// This method allows sharing the `X509Store`, but calls to `cert_store_mut` will return an error.
     ///
     /// Use [`set_cert_store_builder`] to set a mutable cert store
     /// (there's no way to have both sharing and mutability).
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_set_cert_store)]
-    pub fn set_cert_store(&mut self, cert_store: X509Store) {
-        self.ctx.check_x509();
+    pub fn set_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
 
         self.has_shared_cert_store = true;
         // SAFETY: The builder transfers ownership of this certificate store to its live native context exactly once.
         unsafe {
             ffi::SSL_CTX_set_cert_store(self.as_ptr(), cert_store.into_ptr());
-        }
+        };
+        Ok(())
     }
 
     /// Replaces the context's certificate store, and allows mutating the store afterwards.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_set_cert_store)]
-    pub fn set_cert_store_builder(&mut self, cert_store: X509StoreBuilder) {
-        self.ctx.check_x509();
+    pub fn set_cert_store_builder(
+        &mut self,
+        cert_store: X509StoreBuilder,
+    ) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
 
         self.has_shared_cert_store = false;
         // SAFETY: The builder transfers ownership of the replacement store to its native context exactly once.
         unsafe {
             ffi::SSL_CTX_set_cert_store(self.as_ptr(), cert_store.into_ptr());
-        }
-    }
-
-    /// Replaces the context's certificate store, and keeps it immutable.
-    ///
-    /// This method allows sharing the `X509Store`, but calls to `cert_store_mut` will panic.
-    #[corresponds(SSL_CTX_set_cert_store)]
-    pub fn set_cert_store_ref(&mut self, cert_store: &X509Store) {
-        self.set_cert_store(cert_store.to_owned());
+        };
+        Ok(())
     }
 
     /// Controls read ahead behavior.
@@ -1547,9 +1552,12 @@ impl SslContextBuilder {
     ///
     /// These locations are read from the `SSL_CERT_FILE` and `SSL_CERT_DIR` environment variables
     /// if present, or defaults specified at OpenSSL build time otherwise.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates. Native initialization of the default trust paths fails.
     #[corresponds(SSL_CTX_set_default_verify_paths)]
     pub fn set_default_verify_paths(&mut self) -> Result<(), ErrorStack> {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         // SAFETY: The live X509-capable context is exclusively borrowed while native default verification paths are configured.
         unsafe { cvt(ffi::SSL_CTX_set_default_verify_paths(self.as_ptr())) }
@@ -1564,13 +1572,16 @@ impl SslContextBuilder {
     }
 
     /// Loads trusted root certificates from a file and/or a directory.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates. A path contains a NUL byte or native certificate loading fails.
     #[corresponds(SSL_CTX_load_verify_locations)]
     pub fn load_verify_locations(
         &mut self,
         ca_file: Option<&Path>,
         ca_path: Option<&Path>,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         let ca_file = ca_file.map(path_to_cstring).transpose()?;
         let ca_path = ca_path.map(path_to_cstring).transpose()?;
@@ -1589,22 +1600,29 @@ impl SslContextBuilder {
     ///
     /// The CA certificates must still be added to the trust root - they are not automatically set
     /// as trusted by this method.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_set_client_CA_list)]
-    pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) {
-        self.ctx.check_x509();
+    pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
 
         // SAFETY: The native context takes ownership of the client CA stack; `mem::forget` prevents double-free.
         unsafe {
             ffi::SSL_CTX_set_client_CA_list(self.as_ptr(), list.as_ptr());
             mem::forget(list);
-        }
+        };
+        Ok(())
     }
 
     /// Add the provided CA certificate to the list sent by the server to the client when
     /// requesting client-side TLS authentication.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates. Native insertion of the CA name fails.
     #[corresponds(SSL_CTX_add_client_CA)]
     pub fn add_client_ca(&mut self, cacert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         // SAFETY: The CA certificate is borrowed while the live context adds its own retained reference.
         unsafe { cvt(ffi::SSL_CTX_add_client_CA(self.as_ptr(), cacert.as_ptr())) }
@@ -1640,13 +1658,16 @@ impl SslContextBuilder {
     /// Only a single certificate will be loaded - use `add_extra_chain_cert` to add the remainder
     /// of the certificate chain, or `set_certificate_chain_file` to load the entire chain from a
     /// single file.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates, or loading the certificate fails.
     #[corresponds(SSL_CTX_use_certificate_file)]
     pub fn set_certificate_file<P: AsRef<Path>>(
         &mut self,
         file: P,
         file_type: SslFiletype,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         let file = path_to_cstring(file.as_ref())?;
         // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
@@ -1692,9 +1713,12 @@ impl SslContextBuilder {
     ///
     /// This chain should contain all certificates necessary to go from the certificate specified by
     /// `set_certificate` to a trusted root.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates. Native insertion of the certificate fails.
     #[corresponds(SSL_CTX_add_extra_chain_cert)]
     pub fn add_extra_chain_cert(&mut self, cert: X509) -> Result<(), ErrorStack> {
-        self.ctx.check_x509();
+        self.ctx.check_x509()?;
 
         // SAFETY: The owned certificate pointer is consumed by the native context, with no second Rust owner.
         unsafe {
@@ -2115,39 +2139,45 @@ impl SslContextBuilder {
     }
 
     /// Returns a shared reference to the context's certificate store.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_get_cert_store)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
-    pub fn cert_store(&self) -> &X509StoreBuilderRef {
-        self.ctx.check_x509();
+    pub fn cert_store(&self) -> Result<&X509StoreBuilderRef, ErrorStack> {
+        self.ctx.check_x509()?;
 
         // SAFETY: The builder exclusively owns a live X.509 context with an initialized
         // certificate store; the getter returns only a borrowed store pointer.
-        unsafe { X509StoreBuilderRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
+        Ok(unsafe { X509StoreBuilderRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) })
     }
 
     /// Returns a mutable reference to the context's certificate store.
     ///
     /// Newly-created `SslContextBuilder` will have its own default mutable store.
     ///
-    /// ## Panics
+    /// # Errors
     ///
-    /// * If a shared store has been set via [`set_cert_store_ref`]
-    /// * If context has been created for Raw Public Key verification (requires `rpk` Cargo feature)
+    /// The store is shared or the context does not support X.509 certificates.
     ///
     #[corresponds(SSL_CTX_get_cert_store)]
-    pub fn cert_store_mut(&mut self) -> &mut X509StoreBuilderRef {
-        self.ctx.check_x509();
+    pub fn cert_store_mut(&mut self) -> Result<&mut X509StoreBuilderRef, ErrorStack> {
+        self.ctx.check_x509()?;
 
-        assert!(
-            !self.has_shared_cert_store,
-            "Shared X509Store can't be mutated. Use set_cert_store_builder() instead of set_cert_store()
-                or completely finish building the cert store setting it."
-        );
+        if self.has_shared_cert_store {
+            return Err(ErrorStack::internal_error_str(
+                "shared certificate store is immutable",
+            ));
+        }
         // OTOH, it's not safe to return a shared &X509Store when the builder owns it exclusively
 
         // SAFETY: The builder owns the only mutable certificate store, checked above
         // against an installed shared store; the native pointer stays live.
-        unsafe { X509StoreBuilderRef::from_ptr_mut(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
+        Ok(
+            unsafe {
+                X509StoreBuilderRef::from_ptr_mut(ffi::SSL_CTX_get_cert_store(self.as_ptr()))
+            },
+        )
     }
 
     /// Sets the callback dealing with OCSP stapling.
@@ -2862,7 +2892,9 @@ impl SslContextRef {
     #[corresponds(SSL_CTX_get0_certificate)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn certificate(&self) -> Option<&X509Ref> {
-        self.check_x509();
+        if !self.has_x509_support() {
+            return None;
+        }
 
         // SAFETY: The live X.509 context owns its optional certificate; the
         // getter returns a borrowed pointer checked for null before dereference.
@@ -2893,14 +2925,17 @@ impl SslContextRef {
     }
 
     /// Returns a shared reference to the certificate store used for verification.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_get_cert_store)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
-    pub fn cert_store(&self) -> &X509StoreRef {
-        self.check_x509();
+    pub fn cert_store(&self) -> Result<&X509StoreRef, ErrorStack> {
+        self.check_x509()?;
 
         // SAFETY: The live X.509 context holds its initialized certificate store,
         // and this native getter returns only a borrowed reference.
-        unsafe { X509StoreRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) }
+        Ok(unsafe { X509StoreRef::from_ptr(ffi::SSL_CTX_get_cert_store(self.as_ptr())) })
     }
 
     /// Returns any extra certificate chain attached to this context.
@@ -2910,7 +2945,9 @@ impl SslContextRef {
     #[corresponds(SSL_CTX_get_extra_chain_certs)]
     #[must_use = "Inspect the borrowed chain or handle its absence."]
     pub fn extra_chain_certs(&self) -> Option<&StackRef<X509>> {
-        self.check_x509();
+        if !self.has_x509_support() {
+            return None;
+        }
         // SAFETY: the native getter writes a nullable, borrowed stack pointer
         // owned by this live context. It may return success with a null chain.
         // Only a non-null successful result is exposed as a shared reference.
@@ -3009,15 +3046,18 @@ impl SslContextRef {
     /// Returns the verify mode that was set on this context from [`SslContextBuilder::set_verify`].
     ///
     /// [`SslContextBuilder::set_verify`]: struct.SslContextBuilder.html#method.set_verify
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_get_verify_mode)]
     #[must_use = "Use the returned flags to inspect current configuration."]
-    pub fn verify_mode(&self) -> SslVerifyMode {
-        self.check_x509();
+    pub fn verify_mode(&self) -> Result<SslVerifyMode, ErrorStack> {
+        self.check_x509()?;
 
         // SAFETY: The context has been checked for X.509 support and
         // remains live while the getter reads its native mode bits.
         let mode = unsafe { ffi::SSL_CTX_get_verify_mode(self.as_ptr()) };
-        SslVerifyMode::from_bits_retain(mode)
+        Ok(SslVerifyMode::from_bits_retain(mode))
     }
 
     /// Assumes that this `SslContext` is configured for X.509 certificates.
@@ -3046,12 +3086,14 @@ impl SslContextRef {
             .unwrap_or_default()
     }
 
-    #[track_caller]
-    fn check_x509(&self) {
-        assert!(
-            self.has_x509_support(),
-            "This context is not configured for X.509 certificates"
-        );
+    fn check_x509(&self) -> Result<(), ErrorStack> {
+        if self.has_x509_support() {
+            Ok(())
+        } else {
+            Err(ErrorStack::internal_error_str(
+                "context does not support x.509 certificates",
+            ))
+        }
     }
 
     /// Registers a list of ECH keys on the context. This list should contain new and old
@@ -3865,13 +3907,17 @@ impl SslRef {
     /// Like [`SslContextBuilder::set_verify`].
     ///
     /// [`SslContextBuilder::set_verify`]: struct.SslContextBuilder.html#method.set_verify
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_set_verify)]
-    pub fn set_verify(&mut self, mode: SslVerifyMode) {
-        self.ssl_context().check_x509();
+    pub fn set_verify(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+        self.ssl_context().check_x509()?;
 
         // SAFETY: The uniquely borrowed connection accepts the scalar verify mode
         // and null callback; no borrowed application state is retained.
-        unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) }
+        unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
+        Ok(())
     }
 
     /// Sets the certificate verification depth.
@@ -3879,12 +3925,11 @@ impl SslRef {
     /// If the peer's certificate chain is longer than this value, verification will fail.
     ///
     /// # Errors
-    ///
-    /// The depth exceeds the signed native integer range.
+    /// The context does not support X.509 certificates or the depth exceeds the signed native integer range.
     #[corresponds(SSL_set_verify_depth)]
     pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
         let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
-        self.ssl_context().check_x509();
+        self.ssl_context().check_x509()?;
 
         // SAFETY: the live SSL connection is exclusively borrowed and depth
         // has been checked against the native signed integer range.
@@ -3893,15 +3938,18 @@ impl SslRef {
     }
 
     /// Returns the verify mode that was set using `set_verify`.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_get_verify_mode)]
     #[must_use = "Use the returned flags to inspect current configuration."]
-    pub fn verify_mode(&self) -> SslVerifyMode {
-        self.ssl_context().check_x509();
+    pub fn verify_mode(&self) -> Result<SslVerifyMode, ErrorStack> {
+        self.ssl_context().check_x509()?;
 
         // SAFETY: The live SSL connection returns its native verify
         // bitset; the wrapper preserves any recognized or future bits.
         let mode = unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) };
-        SslVerifyMode::from_bits_retain(mode)
+        Ok(SslVerifyMode::from_bits_retain(mode))
     }
 
     /// Like [`SslContextBuilder::set_verify_callback`].
@@ -3917,11 +3965,9 @@ impl SslRef {
     /// call [`X509StoreContextRef::verify_cert`] and inspect the result, or perform
     /// other operations more straightforwardly.
     ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
-    ///
     /// # Errors
+    /// The context does not support X.509 certificates.
+    ///
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
     #[corresponds(SSL_set_verify)]
@@ -3933,7 +3979,7 @@ impl SslRef {
     where
         F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
     {
-        self.ssl_context().check_x509();
+        self.ssl_context().check_x509()?;
 
         // SAFETY: The closure is installed in typed native extra-data as an Arc
         // before the live SSL connection receives its static trampoline.
@@ -3953,9 +3999,12 @@ impl SslRef {
     }
 
     /// Sets a custom certificate store for verifying peer certificates.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates. Native store installation or extra-data registration fails.
     #[corresponds(SSL_set1_verify_cert_store)]
     pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
-        self.ssl_context().check_x509();
+        self.ssl_context().check_x509()?;
         let index = SSL_VERIFY_STORE_INDEX.register()?;
         if self.ex_data(index).is_none() {
             self.set_ex_data(index, None)?;
@@ -3971,10 +4020,6 @@ impl SslRef {
     }
 
     /// Like [`SslContextBuilder::set_custom_verify_callback`].
-    ///
-    /// # Panics
-    ///
-    /// This method panics if this `Ssl` is associated with a RPK context.
     ///
     /// # Errors
     ///
@@ -4201,7 +4246,9 @@ impl SslRef {
     #[corresponds(SSL_get_peer_certificate)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_certificate(&self) -> Option<X509> {
-        self.ssl_context().check_x509();
+        if !self.ssl_context().has_x509_support() {
+            return None;
+        }
 
         // SAFETY: The live connection returns an owned certificate
         // reference or null; null is checked before Rust assumes ownership.
@@ -4222,7 +4269,9 @@ impl SslRef {
     #[corresponds(SSL_get_peer_cert_chain)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn peer_cert_chain(&self) -> Option<&StackRef<X509>> {
-        self.ssl_context().check_x509();
+        if !self.ssl_context().has_x509_support() {
+            return None;
+        }
 
         // SAFETY: The live connection owns the peer chain; the
         // borrowed stack pointer is checked for null before use.
@@ -4240,7 +4289,9 @@ impl SslRef {
     #[corresponds(SSL_get_certificate)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
     pub fn certificate(&self) -> Option<&X509Ref> {
-        self.ssl_context().check_x509();
+        if !self.ssl_context().has_x509_support() {
+            return None;
+        }
 
         // SAFETY: The live SSL connection owns the installed
         // certificate; a nullable borrowed pointer is checked before dereference.
@@ -4565,24 +4616,28 @@ impl SslRef {
     }
 
     /// Returns a mutable reference to the X509 verification configuration.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_get0_param)]
-    pub fn verify_param_mut(&mut self) -> &mut X509VerifyParamRef {
-        self.ssl_context().check_x509();
+    pub fn verify_param_mut(&mut self) -> Result<&mut X509VerifyParamRef, ErrorStack> {
+        self.ssl_context().check_x509()?;
 
         // SAFETY: The X.509-enabled SSL object owns this native verification
         // parameter; the exclusive Rust borrow permits mutable access.
-        unsafe { X509VerifyParamRef::from_ptr_mut(ffi::SSL_get0_param(self.as_ptr())) }
-    }
-
-    /// See [`Self::verify_param_mut`].
-    pub fn param_mut(&mut self) -> &mut X509VerifyParamRef {
-        self.verify_param_mut()
+        Ok(unsafe { X509VerifyParamRef::from_ptr_mut(ffi::SSL_get0_param(self.as_ptr())) })
     }
 
     /// Returns the certificate verification result.
+    ///
+    /// # Errors
+    /// A connection without X.509 support returns [`X509VerifyError::INVALID_CALL`].
+    /// Otherwise, returns the native certificate verification error, if any.
     #[corresponds(SSL_get_verify_result)]
     pub fn verify_result(&self) -> X509VerifyResult {
-        self.ssl_context().check_x509();
+        if !self.ssl_context().has_x509_support() {
+            return Err(X509VerifyError::INVALID_CALL);
+        }
 
         // SAFETY: the live X.509 connection supplies a native verification
         // result. Reject out-of-range codes instead of truncating them.
@@ -4628,7 +4683,9 @@ impl SslRef {
             context.slot_data(&VERIFY_STORE_INDEX),
         ) {
             (Some(Some(store)), _) | (_, Some(Some(store))) => store,
-            _ => context.cert_store(),
+            _ => context
+                .cert_store()
+                .map_err(|_| X509VerifyError::INVALID_CALL)?,
         };
 
         let Ok(mut store_ctx) = X509StoreContext::new() else {
@@ -5108,14 +5165,18 @@ impl SslRef {
     ///
     /// The CA certificates must still be added to the trust root - they are not automatically set
     /// as trusted by this method.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
     #[corresponds(SSL_set_client_CA_list)]
-    pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) {
-        self.ssl_context().check_x509();
+    pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) -> Result<(), ErrorStack> {
+        self.ssl_context().check_x509()?;
 
         // SAFETY: The connection takes ownership of the native
         // CA-name stack, and Rust relinquishes the original owner exactly once.
         unsafe { ffi::SSL_set_client_CA_list(self.as_ptr(), list.as_ptr()) }
         mem::forget(list);
+        Ok(())
     }
 
     /// Sets the private key.

@@ -51,7 +51,7 @@ fn verify_peer_cert_chain_reverifies_resumed_sessions() {
     };
     let connect = |ctx: &SslContext, host: &str, session: Option<SslSession>| {
         let mut ssl = Ssl::new(ctx).unwrap();
-        ssl.param_mut().set_host(host).unwrap();
+        ssl.verify_param_mut().unwrap().set_host(host).unwrap();
         if let Some(session) = session {
             // SAFETY: The handshake has not started. The session may target another host on
             // purpose, to show that re-verification rejects it.
