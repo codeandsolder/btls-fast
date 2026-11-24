@@ -1006,6 +1006,39 @@ unsafe impl Stackable for X509Extension {
     type StackType = ffi::stack_st_X509_EXTENSION;
 }
 
+// Native extension constructors synchronously consume their context. Keep the
+// fallback native context on this stack and return only an owned extension so
+// neither the fallback nor a borrowed caller context can escape.
+fn with_extension_context(
+    conf: Option<&ConfRef>,
+    context: Option<&X509v3Context<'_>>,
+    build: impl FnOnce(*mut ffi::CONF, *mut ffi::X509V3_CTX) -> Result<X509Extension, ErrorStack>,
+) -> Result<X509Extension, ErrorStack> {
+    // SAFETY: BoringSSL initializes the zeroed fallback context when needed;
+    // both native context variants remain live until build returns.
+    unsafe {
+        let mut fallback: ffi::X509V3_CTX = mem::zeroed();
+        let native_context = context.map_or_else(
+            || {
+                ffi::X509V3_set_ctx(
+                    &raw mut fallback,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                    0,
+                );
+                &raw mut fallback
+            },
+            X509v3Context::as_ptr,
+        );
+        build(
+            conf.map_or(ptr::null_mut(), ConfRef::as_ptr),
+            native_context,
+        )
+    }
+}
+
 impl X509Extension {
     /// Constructs an X509 extension value. See `man x509v3_config` for information on supported
     /// names and their value formats.
@@ -1029,30 +1062,20 @@ impl X509Extension {
     ) -> Result<Self, ErrorStack> {
         let name = CString::new(name).map_err(ErrorStack::internal_error)?;
         let value = CString::new(value).map_err(ErrorStack::internal_error)?;
-        // SAFETY: The input strings are owned NUL-terminated buffers and the initialized native context lives until extension construction returns.
-        unsafe {
-            ffi::init();
-            let mut ctx = mem::zeroed();
-            let conf = conf.map_or(ptr::null_mut(), ConfRef::as_ptr);
-            let context_ptr = context.map_or_else(
-                || {
-                    ffi::X509V3_set_ctx(
-                        &raw mut ctx,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        0,
-                    );
-                    &raw mut ctx
-                },
-                X509v3Context::as_ptr,
-            );
-            let name = name.as_ptr().cast_mut();
-            let value = value.as_ptr().cast_mut();
-
-            cvt_p(ffi::X509V3_EXT_nconf(conf, context_ptr, name, value)).map(|p| Self::from_ptr(p))
-        }
+        ffi::init();
+        with_extension_context(conf, context, |native_conf, native_context| {
+            // SAFETY: Both NUL-terminated strings remain live through this synchronous
+            // native call; the context helper keeps all native contexts alive.
+            unsafe {
+                cvt_p(ffi::X509V3_EXT_nconf(
+                    native_conf,
+                    native_context,
+                    name.as_ptr().cast_mut(),
+                    value.as_ptr().cast_mut(),
+                ))
+                .map(|p| Self::from_ptr(p))
+            }
+        })
     }
 
     /// Constructs an X509 extension value. See `man x509v3_config` for information on supported
@@ -1076,31 +1099,20 @@ impl X509Extension {
         value: &str,
     ) -> Result<Self, ErrorStack> {
         let value = CString::new(value).map_err(ErrorStack::internal_error)?;
-        // SAFETY: The input string is owned and NUL-terminated, while the native configuration/context pointers are valid during parsing.
-        unsafe {
-            ffi::init();
-            let mut ctx = mem::zeroed();
-            let conf = conf.map_or(ptr::null_mut(), ConfRef::as_ptr);
-            let context_ptr = context.map_or_else(
-                || {
-                    ffi::X509V3_set_ctx(
-                        &raw mut ctx,
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        ptr::null_mut(),
-                        0,
-                    );
-                    &raw mut ctx
-                },
-                X509v3Context::as_ptr,
-            );
-            let name = name.as_raw();
-            let value = value.as_ptr().cast_mut();
-
-            cvt_p(ffi::X509V3_EXT_nconf_nid(conf, context_ptr, name, value))
+        ffi::init();
+        with_extension_context(conf, context, |native_conf, native_context| {
+            // SAFETY: The NUL-terminated value remains live through this synchronous
+            // native call; the context helper keeps all native contexts alive.
+            unsafe {
+                cvt_p(ffi::X509V3_EXT_nconf_nid(
+                    native_conf,
+                    native_context,
+                    name.as_raw(),
+                    value.as_ptr().cast_mut(),
+                ))
                 .map(|p| Self::from_ptr(p))
-        }
+            }
+        })
     }
 
     pub(crate) unsafe fn new_internal(
