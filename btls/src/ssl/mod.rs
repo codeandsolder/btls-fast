@@ -4567,13 +4567,12 @@ impl SslRef {
         // the caller clears stale per-connection verification state.
         unsafe { cvt_p(ffi::SSL_set_SSL_CTX(self.as_ptr(), ctx.as_ptr()))? };
         // BoringSSL copied the new context's certificate settings, dropping a per-connection store.
-        if changed {
-            if let Some(store) = SSL_VERIFY_STORE_INDEX
+        if changed
+            && let Some(store) = SSL_VERIFY_STORE_INDEX
                 .get()
                 .and_then(|index| self.ex_data_mut(index))
-            {
-                *store = None;
-            }
+        {
+            *store = None;
         }
         Ok(())
     }

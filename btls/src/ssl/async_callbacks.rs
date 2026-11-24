@@ -610,17 +610,17 @@ fn with_ex_data_future<H, R: 'static, T, E>(
 
     let mut ctx = Context::from_waker(&waker);
 
-    if let Some(data) = ssl.ex_data_mut(index).map(MutOnly::get_mut) {
-        if let Some(future) = data.as_mut() {
-            match future.as_mut().poll(&mut ctx) {
-                Poll::Ready(result) => {
-                    *data = None;
-                    return Poll::Ready(into_result(result));
-                }
-                Poll::Pending => {
-                    mark_pending(ssl);
-                    return Poll::Pending;
-                }
+    if let Some(data) = ssl.ex_data_mut(index).map(MutOnly::get_mut)
+        && let Some(future) = data.as_mut()
+    {
+        match future.as_mut().poll(&mut ctx) {
+            Poll::Ready(result) => {
+                *data = None;
+                return Poll::Ready(into_result(result));
+            }
+            Poll::Pending => {
+                mark_pending(ssl);
+                return Poll::Pending;
             }
         }
     }
