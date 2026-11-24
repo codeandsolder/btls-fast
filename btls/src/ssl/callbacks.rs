@@ -927,9 +927,9 @@ where
             let Ok(crypto_buffer) = buffer.build() else {
                 return false;
             };
-            // SAFETY: The native callback supplies a writable non-null output
-            // slot. Ownership transfers only after a fully initialized buffer.
-            unsafe { out.write(crypto_buffer) };
+            // SAFETY: The enclosing unsafe block covers the live native output
+            // slot, which receives ownership only after full initialization.
+            out.write(crypto_buffer);
             true
         })
     } {
