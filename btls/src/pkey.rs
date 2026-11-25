@@ -583,6 +583,26 @@ impl PKey<Private> {
 }
 
 impl PKey<Public> {
+    /// Constructs a raw public key for a native raw-key algorithm.
+    ///
+    /// # Errors
+    /// The algorithm or key bytes are not supported.
+    #[corresponds(EVP_PKEY_new_raw_public_key)]
+    pub fn public_key_from_raw_bytes(bytes: &[u8], id: Id) -> Result<Self, ErrorStack> {
+        ffi::init();
+        // SAFETY: the immutable byte slice is readable for its entire length;
+        // the native call returns an owned EVP_PKEY or null.
+        unsafe {
+            cvt_p(ffi::EVP_PKEY_new_raw_public_key(
+                id.as_raw(),
+                ptr::null_mut(),
+                bytes.as_ptr(),
+                bytes.len(),
+            ))
+            .map(|key| Self::from_ptr(key))
+        }
+    }
+
     from_pem! {
         /// Decodes a PEM-encoded SubjectPublicKeyInfo structure.
         ///

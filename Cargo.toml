@@ -4,11 +4,13 @@ members = [
     "btls-sys",
     "tokio-btls",
     "tokio-btls/bench",
+    "jsonwebtoken-btls",
 ]
 default-members = [
     "btls",
     "btls-sys",
     "tokio-btls",
+    "jsonwebtoken-btls",
 ]
 resolver = "3"
 

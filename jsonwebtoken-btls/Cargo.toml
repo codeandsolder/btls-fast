@@ -1,0 +1,16 @@
+[package]
+name = "jsonwebtoken-btls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license = "Apache-2.0"
+description = "BoringSSL crypto provider for jsonwebtoken"
+
+[dependencies]
+btls.workspace = true
+jsonwebtoken = { version = "12", default-features = false }
+signature = "3"
+
+[dev-dependencies]
+serde_json = "1"
+hex.workspace = true
