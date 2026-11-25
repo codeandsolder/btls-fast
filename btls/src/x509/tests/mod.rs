@@ -559,6 +559,81 @@ fn test_verify_cert() {
 }
 
 #[test]
+fn verification_purpose_enforces_extended_key_usage() {
+    use crate::x509::verify::X509Purpose;
+
+    let key = pkey();
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "purpose test")
+        .unwrap();
+    let name = name.build();
+    let mut ca = X509::builder().unwrap();
+    ca.set_version(2).unwrap();
+    ca.set_subject_name(&name).unwrap();
+    ca.set_issuer_name(&name).unwrap();
+    ca.set_pubkey(&key).unwrap();
+    ca.set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    ca.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    ca.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    ca.append_extension(&BasicConstraints::new().critical().ca().build().unwrap())
+        .unwrap();
+    ca.append_extension(&KeyUsage::new().critical().key_cert_sign().build().unwrap())
+        .unwrap();
+    ca.sign(&key, MessageDigest::sha256()).unwrap();
+    let ca = ca.build();
+
+    let leaf_key = pkey();
+    let mut leaf = X509::builder().unwrap();
+    leaf.set_version(2).unwrap();
+    leaf.set_subject_name(&name).unwrap();
+    leaf.set_issuer_name(&name).unwrap();
+    leaf.set_pubkey(&leaf_key).unwrap();
+    leaf.set_serial_number(&BigNum::from_u32(2).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    leaf.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    leaf.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    leaf.append_extension(&BasicConstraints::new().critical().build().unwrap())
+        .unwrap();
+    leaf.append_extension(
+        &KeyUsage::new()
+            .critical()
+            .digital_signature()
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    leaf.append_extension(
+        &ExtendedKeyUsage::new()
+            .critical()
+            .client_auth()
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    leaf.sign(&key, MessageDigest::sha256()).unwrap();
+    let leaf = leaf.build();
+    let chain = Stack::new().unwrap();
+    for (purpose, expected) in [
+        (X509Purpose::TlsClient, true),
+        (X509Purpose::TlsServer, false),
+    ] {
+        let mut store = X509StoreBuilder::new().unwrap();
+        store.add_cert(&ca).unwrap();
+        store.verify_param_mut().set_purpose(purpose).unwrap();
+        let mut context = X509StoreContext::new().unwrap();
+        let verified = context
+            .init(&store.build(), &leaf, &chain, |ctx| ctx.verify_cert())
+            .unwrap();
+        assert_eq!(verified, expected);
+    }
+}
+
+#[test]
 fn uninitialized_context_and_panicking_ex_data_drop() {
     use std::sync::{
         Arc,

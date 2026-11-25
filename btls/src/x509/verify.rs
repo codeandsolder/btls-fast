@@ -7,6 +7,24 @@ use std::net::IpAddr;
 use crate::error::ErrorStack;
 use crate::{cvt, cvt_p};
 
+/// Extended key usage and key usage policy for X.509 path validation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(i32)]
+pub enum X509Purpose {
+    /// TLS client authentication.
+    TlsClient = ffi::X509_PURPOSE_SSL_CLIENT as i32,
+    /// TLS server authentication.
+    TlsServer = ffi::X509_PURPOSE_SSL_SERVER as i32,
+    /// S/MIME signing.
+    SmimeSign = ffi::X509_PURPOSE_SMIME_SIGN as i32,
+    /// S/MIME encryption.
+    SmimeEncrypt = ffi::X509_PURPOSE_SMIME_ENCRYPT as i32,
+    /// CRL signing.
+    CrlSign = ffi::X509_PURPOSE_CRL_SIGN as i32,
+    /// RFC 3161 timestamp signing.
+    TimestampSign = ffi::X509_PURPOSE_TIMESTAMP_SIGN as i32,
+}
+
 bitflags! {
     /// Flags used to check an `X509` certificate.
     #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
@@ -101,6 +119,22 @@ impl X509VerifyParamRef {
             cvt(ffi::X509_VERIFY_PARAM_clear_flags(
                 self.as_ptr(),
                 flags.bits(),
+            ))
+        }
+    }
+
+    /// Require the indicated certificate usage when validating a chain.
+    ///
+    /// # Errors
+    /// The native verification parameters reject the purpose.
+    #[corresponds(X509_VERIFY_PARAM_set_purpose)]
+    pub fn set_purpose(&mut self, purpose: X509Purpose) -> Result<(), ErrorStack> {
+        // SAFETY: the parameter object is exclusively borrowed, and every
+        // enum value corresponds to a supported native purpose.
+        unsafe {
+            cvt(ffi::X509_VERIFY_PARAM_set_purpose(
+                self.as_ptr(),
+                purpose as c_int,
             ))
         }
     }
