@@ -361,6 +361,7 @@ fn compute_digest(data: &[u8], algorithm: ThumbprintHash) -> Result<Vec<u8>> {
         ThumbprintHash::SHA256 => MessageDigest::sha256(),
         ThumbprintHash::SHA384 => MessageDigest::sha384(),
         ThumbprintHash::SHA512 => MessageDigest::sha512(),
+        _ => return Err(new_error(ErrorKind::UnsupportedAlgorithm)),
     };
     Ok(hash::hash(md, data).map_err(native_error)?.to_vec())
 }
