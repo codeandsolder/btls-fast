@@ -5,4 +5,5 @@ cargo fmt --all -- --check
 cargo check --locked --workspace --all-targets --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation
 cargo test --locked -p btls -p btls-sys -p tokio-btls --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation
 cargo test --locked -p tokio-btls-bench --lib
+cargo test --locked -p jsonwebtoken-btls
 cargo doc --locked --no-deps -p btls -p btls-sys -p tokio-btls --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation
