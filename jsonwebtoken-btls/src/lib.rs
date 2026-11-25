@@ -496,7 +496,8 @@ mod tests {
     {
         for algorithm in [Algorithm::ES256, Algorithm::ES384] {
             let (nid, _, width) = curve(algorithm)?;
-            let ec = EcKey::generate(&EcGroup::from_curve_name(nid)?)?;
+            let group = EcGroup::from_curve_name(nid)?;
+            let ec = EcKey::generate(&group)?;
             let key = PKey::from_ec_key(ec)?;
             let private = EncodingKey::from_ec_der(&key.private_key_to_der_pkcs8()?);
             let public = DecodingKey::from_ec_der(&key.public_key_to_der()?);
