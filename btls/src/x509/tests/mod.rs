@@ -566,7 +566,7 @@ fn verification_purpose_enforces_extended_key_usage() {
     let mut name = X509Name::builder().unwrap();
     name.append_entry_by_nid(Nid::COMMONNAME, "purpose test")
         .unwrap();
-    let name = name.build();
+    let name = name.build().unwrap();
     let mut ca = X509::builder().unwrap();
     ca.set_version(2).unwrap();
     ca.set_subject_name(&name).unwrap();
