@@ -14,24 +14,22 @@ permissions:
   contents: read
 
 jobs:
-  quarantine:
-    runs-on: ubuntu-26.04
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          fetch-depth: 2
-          persist-credentials: false
-      - uses: codeandsolder/ci-workflows/.github/actions/cargo-release-quarantine@3b7b40d9c0f9b22a3eba78c698231d2e086369bc # main
-        if: github.event_name == 'pull_request'
-        with:
-          base-ref: ${{ github.event.pull_request.base.sha }}
-          lockfile: auto
-          hours: "72"
   rust:
-    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@3b7b40d9c0f9b22a3eba78c698231d2e086369bc # main
+    uses: codeandsolder/ci-workflows/.github/workflows/rust-sccache.yml@f2b37a67bfe379e8db96731f97ad3c345065b168 # main
     with:
       runner: ubuntu-26.04
       rust-components: "clippy rustfmt"
+      checkout-submodules: recursive
       command: |
-        git submodule update --init --recursive
-        bash .github/scripts/validate-upstream.sh
+        cargo check --locked --workspace --all-targets --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation
+        cargo doc --locked --no-deps -p btls -p btls-sys -p tokio-btls --features mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation
+      strict-suites: |
+        [
+          {"name":"tls-features","cargo":["--locked","--workspace","--all-targets","--features","mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation"],"allow-test-panics":true}
+        ]
+      test-suites: |
+        [
+          {"name":"tls","cargo":["--locked","-p","btls","-p","btls-sys","-p","tokio-btls","--features","mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation"],"doctests":["--locked","-p","btls","-p","btls-sys","-p","tokio-btls","--features","mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation"]},
+          {"name":"benchmark-library","cargo":["--locked","-p","tokio-btls-bench","--lib"]},
+          {"name":"jwt","cargo":["--locked","-p","jsonwebtoken-btls"],"doctests":["--locked","-p","jsonwebtoken-btls"]}
+        ]
