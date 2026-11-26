@@ -12,17 +12,17 @@ use crate::{cvt, cvt_p};
 #[repr(i32)]
 pub enum X509Purpose {
     /// TLS client authentication.
-    TlsClient = ffi::X509_PURPOSE_SSL_CLIENT as i32,
+    TlsClient = ffi::X509_PURPOSE_SSL_CLIENT,
     /// TLS server authentication.
-    TlsServer = ffi::X509_PURPOSE_SSL_SERVER as i32,
+    TlsServer = ffi::X509_PURPOSE_SSL_SERVER,
     /// S/MIME signing.
-    SmimeSign = ffi::X509_PURPOSE_SMIME_SIGN as i32,
+    SmimeSign = ffi::X509_PURPOSE_SMIME_SIGN,
     /// S/MIME encryption.
-    SmimeEncrypt = ffi::X509_PURPOSE_SMIME_ENCRYPT as i32,
+    SmimeEncrypt = ffi::X509_PURPOSE_SMIME_ENCRYPT,
     /// CRL signing.
-    CrlSign = ffi::X509_PURPOSE_CRL_SIGN as i32,
+    CrlSign = ffi::X509_PURPOSE_CRL_SIGN,
     /// RFC 3161 timestamp signing.
-    TimestampSign = ffi::X509_PURPOSE_TIMESTAMP_SIGN as i32,
+    TimestampSign = ffi::X509_PURPOSE_TIMESTAMP_SIGN,
 }
 
 bitflags! {
