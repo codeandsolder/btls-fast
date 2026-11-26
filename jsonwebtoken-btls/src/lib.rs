@@ -443,11 +443,28 @@ mod tests {
     fn hmac_algorithms_and_known_answer() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let key = [0x0b; 20];
         let message = b"Hi There";
-        assert_eq!(
-            hex::encode(hash::hmac_sha384(&key, message)?),
-            "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6"
-        );
-        for algorithm in [Algorithm::HS256, Algorithm::HS384, Algorithm::HS512] {
+        let encoding = EncodingKey::from_secret(&key)?;
+        let decoding = DecodingKey::from_secret(&key)?;
+        // RFC 4231, test case 1: validate the provider, not just the native hash.
+        for (algorithm, expected) in [
+            (
+                Algorithm::HS256,
+                "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
+            ),
+            (
+                Algorithm::HS384,
+                "afd03944d84895626b0825f4ab46907f15f9dadbe4101ec682aa034c7cebc59cfaea9ea9076ede7f4af152e8b2fa9cb6",
+            ),
+            (
+                Algorithm::HS512,
+                "87aa7cdea5ef619d4ff0b4241a1d6cb02379f4e2ce4ec2787ad0b30545e17cdedaa833b7d6b8a702038b274eaea3f4e4be9d914eeb61f1702e696c203a126854",
+            ),
+        ] {
+            let signer = (DEFAULT_PROVIDER.signer_factory)(&algorithm, &encoding)?;
+            let verifier = (DEFAULT_PROVIDER.verifier_factory)(&algorithm, &decoding)?;
+            let expected = hex::decode(expected)?;
+            assert_eq!(signer.try_sign(message)?, expected);
+            verifier.verify(message, &expected)?;
             let key = [0x5a; 64];
             roundtrip(
                 algorithm,
@@ -480,6 +497,20 @@ mod tests {
                 .verify(b"same", &signer.try_sign(b"same")?)
                 .is_err()
         );
+        // JOSE fixes both the salt length and MGF1 hash; otherwise valid
+        // RSA-PSS signatures with different parameters must be rejected.
+        let native_key = PKey::from_rsa(rsa)?;
+        for (salt, mgf) in [
+            (RsaPssSaltlen::custom(20), MessageDigest::sha256()),
+            (RsaPssSaltlen::DIGEST_LENGTH, MessageDigest::sha384()),
+        ] {
+            let mut signer = Signer::new(MessageDigest::sha256(), &native_key)?;
+            signer.set_rsa_padding(Padding::PKCS1_PSS)?;
+            signer.set_rsa_mgf1_md(mgf)?;
+            signer.set_rsa_pss_saltlen(salt)?;
+            let signature = signer.sign_oneshot_to_vec(b"same")?;
+            assert!(verifier.verify(b"same", &signature).is_err());
+        }
         let weak = Rsa::generate(1024)?;
         assert!(
             (DEFAULT_PROVIDER.verifier_factory)(
@@ -520,6 +551,31 @@ mod tests {
         let private = EncodingKey::from_ed_der(&key.private_key_to_der_pkcs8()?);
         let public = DecodingKey::from_ed_der(&key.public_key_to_der()?);
         roundtrip(Algorithm::EdDSA, &private, &public)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ed25519_rfc8032_known_answer() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        // RFC 8032 section 7.1, TEST 1; PKCS#8 wrapping from RFC 8410.
+        let private = hex::decode(
+            "302e020100300506032b6570042204209d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        )?;
+        let public =
+            hex::decode("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a")?;
+        let expected = hex::decode(
+            "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+        )?;
+        let signer = (DEFAULT_PROVIDER.signer_factory)(
+            &Algorithm::EdDSA,
+            &EncodingKey::from_ed_der(&private),
+        )?;
+        let verifier = (DEFAULT_PROVIDER.verifier_factory)(
+            &Algorithm::EdDSA,
+            &DecodingKey::from_ed_der(&public),
+        )?;
+        assert_eq!(signer.try_sign(b"")?, expected);
+        verifier.verify(b"", &expected)?;
+        assert!(verifier.verify(b"changed", &expected).is_err());
         Ok(())
     }
 
