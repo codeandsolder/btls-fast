@@ -1,4 +1,4 @@
-//! BoringSSL crypto provider for jsonwebtoken. Token parsing and validation
+//! `BoringSSL` crypto provider for jsonwebtoken. Token parsing and validation
 //! remain in jsonwebtoken; this crate implements its cryptographic primitives.
 use btls::{
     bn::BigNum,
@@ -21,7 +21,7 @@ use jsonwebtoken::{
 
 type SigResult<T> = std::result::Result<T, signature::Error>;
 
-fn native_error(error: ErrorStack) -> jsonwebtoken::errors::Error {
+fn native_error(error: &ErrorStack) -> jsonwebtoken::errors::Error {
     new_error(ErrorKind::Provider(error.to_string()))
 }
 
@@ -52,7 +52,7 @@ fn mac(algorithm: Algorithm, key: &[u8], message: &[u8]) -> SigResult<Vec<u8>> {
     .map_err(signature_error)
 }
 
-fn rsa_pss(algorithm: Algorithm) -> bool {
+const fn rsa_pss(algorithm: Algorithm) -> bool {
     matches!(
         algorithm,
         Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512
@@ -77,17 +77,17 @@ fn check_rsa<T: btls::pkey::HasPublic>(rsa: &Rsa<T>) -> Result<()> {
 }
 
 fn private_key(algorithm: Algorithm, bytes: &[u8]) -> Result<PKey<Private>> {
-    let key = PKey::private_key_from_der(bytes).map_err(native_error)?;
+    let key = PKey::private_key_from_der(bytes).map_err(|error| native_error(&error))?;
     match algorithm.family() {
         AlgorithmFamily::Rsa if key.id() == Id::RSA => {
-            check_rsa(&key.rsa().map_err(native_error)?)?
+            check_rsa(&key.rsa().map_err(|error| native_error(&error))?)?;
         }
         AlgorithmFamily::Ec if key.id() == Id::EC => {
-            let key = key.ec_key().map_err(native_error)?;
+            let key = key.ec_key().map_err(|error| native_error(&error))?;
             if key.group().curve_name() != Some(curve(algorithm)?.0) {
                 return Err(new_error(ErrorKind::InvalidEcdsaKey));
             }
-            key.check_key().map_err(native_error)?;
+            key.check_key().map_err(|error| native_error(&error))?;
         }
         AlgorithmFamily::Ed if key.id() == Id::ED25519 => {}
         _ => return Err(new_error(ErrorKind::InvalidKeyFormat)),
@@ -98,7 +98,7 @@ fn private_key(algorithm: Algorithm, bytes: &[u8]) -> Result<PKey<Private>> {
 fn rsa_public(bytes: &[u8]) -> Result<Rsa<Public>> {
     let rsa = Rsa::public_key_from_der_pkcs1(bytes)
         .or_else(|_| Rsa::public_key_from_der(bytes))
-        .map_err(native_error)?;
+        .map_err(|error| native_error(&error))?;
     check_rsa(&rsa)?;
     Ok(rsa)
 }
@@ -108,33 +108,34 @@ fn public_key(algorithm: Algorithm, key: &DecodingKey) -> Result<PKey<Public>> {
         AlgorithmFamily::Rsa => {
             let rsa = match key.kind() {
                 DecodingKeyKind::RsaModulusExponent { n, e } => Rsa::from_public_components(
-                    BigNum::from_slice(n).map_err(native_error)?,
-                    BigNum::from_slice(e).map_err(native_error)?,
+                    BigNum::from_slice(n).map_err(|error| native_error(&error))?,
+                    BigNum::from_slice(e).map_err(|error| native_error(&error))?,
                 )
-                .map_err(native_error)?,
+                .map_err(|error| native_error(&error))?,
                 DecodingKeyKind::SecretOrDer(bytes) => rsa_public(bytes)?,
             };
             check_rsa(&rsa)?;
-            PKey::from_rsa(rsa).map_err(native_error)
+            PKey::from_rsa(rsa).map_err(|error| native_error(&error))
         }
         AlgorithmFamily::Ec => {
             let (nid, _, width) = curve(algorithm)?;
             let bytes = key.try_get_as_bytes()?;
             let ec = if bytes.len() == 1 + width * 2 && bytes.first() == Some(&4) {
-                let group = EcGroup::from_curve_name(nid).map_err(native_error)?;
-                let point = EcPoint::from_bytes(&group, bytes).map_err(native_error)?;
-                EcKey::from_public_key(&group, &point).map_err(native_error)?
+                let group = EcGroup::from_curve_name(nid).map_err(|error| native_error(&error))?;
+                let point =
+                    EcPoint::from_bytes(&group, bytes).map_err(|error| native_error(&error))?;
+                EcKey::from_public_key(&group, &point).map_err(|error| native_error(&error))?
             } else {
                 PKey::public_key_from_der(bytes)
-                    .map_err(native_error)?
+                    .map_err(|error| native_error(&error))?
                     .ec_key()
-                    .map_err(native_error)?
+                    .map_err(|error| native_error(&error))?
             };
             if ec.group().curve_name() != Some(nid) {
                 return Err(new_error(ErrorKind::InvalidEcdsaKey));
             }
-            ec.check_key().map_err(native_error)?;
-            PKey::from_ec_key(ec).map_err(native_error)
+            ec.check_key().map_err(|error| native_error(&error))?;
+            PKey::from_ec_key(ec).map_err(|error| native_error(&error))
         }
         AlgorithmFamily::Ed => {
             let bytes = key.try_get_as_bytes()?;
@@ -143,7 +144,7 @@ fn public_key(algorithm: Algorithm, key: &DecodingKey) -> Result<PKey<Public>> {
             } else {
                 PKey::public_key_from_der(bytes)
             }
-            .map_err(native_error)?;
+            .map_err(|error| native_error(&error))?;
             if key.id() != Id::ED25519 {
                 return Err(new_error(ErrorKind::InvalidEddsaKey));
             }
@@ -287,39 +288,33 @@ impl JwtVerifier for BtlsVerifier {
     }
 }
 
-fn new_signer(algorithm: &Algorithm, key: &EncodingKey) -> Result<Box<dyn JwtSigner>> {
+fn new_signer(algorithm: Algorithm, key: &EncodingKey) -> Result<Box<dyn JwtSigner>> {
     if key.family() != algorithm.family() {
         return Err(new_error(ErrorKind::InvalidAlgorithm));
     }
     let key = if key.family() == AlgorithmFamily::Hmac {
         SigningKey::Hmac(key.clone())
     } else {
-        SigningKey::Asymmetric(private_key(*algorithm, key.as_bytes())?)
+        SigningKey::Asymmetric(private_key(algorithm, key.as_bytes())?)
     };
-    Ok(Box::new(BtlsSigner {
-        algorithm: *algorithm,
-        key,
-    }))
+    Ok(Box::new(BtlsSigner { algorithm, key }))
 }
 
-fn new_verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtVerifier>> {
+fn new_verifier(algorithm: Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtVerifier>> {
     if key.family() != algorithm.family() {
         return Err(new_error(ErrorKind::InvalidAlgorithm));
     }
     let key = if key.family() == AlgorithmFamily::Hmac {
         VerificationKey::Hmac(key.clone())
     } else {
-        VerificationKey::Asymmetric(public_key(*algorithm, key)?)
+        VerificationKey::Asymmetric(public_key(algorithm, key)?)
     };
-    Ok(Box::new(BtlsVerifier {
-        algorithm: *algorithm,
-        key,
-    }))
+    Ok(Box::new(BtlsVerifier { algorithm, key }))
 }
 
 fn rsa_components_private(bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     let key = private_key(Algorithm::RS256, bytes)?;
-    let rsa = key.rsa().map_err(native_error)?;
+    let rsa = key.rsa().map_err(|error| native_error(&error))?;
     Ok((rsa.n().to_vec(), rsa.e().to_vec()))
 }
 
@@ -335,11 +330,11 @@ fn ec_components_private(
     let (_, curve, width) = curve(algorithm)?;
     let ec = private_key(algorithm, bytes)?
         .ec_key()
-        .map_err(native_error)?;
+        .map_err(|error| native_error(&error))?;
     let point = ec
         .public_key()
         .to_bytes(ec.group(), PointConversionForm::UNCOMPRESSED)
-        .map_err(native_error)?;
+        .map_err(|error| native_error(&error))?;
     if point.len() != 1 + 2 * width || point.first() != Some(&4) {
         return Err(new_error(ErrorKind::InvalidEcdsaKey));
     }
@@ -353,29 +348,34 @@ fn ed_components_private(bytes: &[u8], curve: &EllipticCurve) -> Result<Vec<u8>>
     }
     let key = private_key(Algorithm::EdDSA, bytes)?;
     let mut raw = [0; 32];
-    Ok(key.raw_public_key(&mut raw).map_err(native_error)?.to_vec())
+    Ok(key
+        .raw_public_key(&mut raw)
+        .map_err(|error| native_error(&error))?
+        .to_vec())
 }
 
-fn compute_digest(data: &[u8], algorithm: ThumbprintHash) -> Result<Vec<u8>> {
+fn compute_digest(data: &[u8], algorithm: &ThumbprintHash) -> Result<Vec<u8>> {
     let md = match algorithm {
         ThumbprintHash::SHA256 => MessageDigest::sha256(),
         ThumbprintHash::SHA384 => MessageDigest::sha384(),
         ThumbprintHash::SHA512 => MessageDigest::sha512(),
         _ => return Err(new_error(ErrorKind::UnsupportedAlgorithm)),
     };
-    Ok(hash::hash(md, data).map_err(native_error)?.to_vec())
+    Ok(hash::hash(md, data)
+        .map_err(|error| native_error(&error))?
+        .to_vec())
 }
 
 /// BoringSSL-backed implementation of all jsonwebtoken 12 signing algorithms.
 pub static DEFAULT_PROVIDER: CryptoProvider = CryptoProvider {
-    signer_factory: new_signer,
-    verifier_factory: new_verifier,
+    signer_factory: |algorithm, key| new_signer(*algorithm, key),
+    verifier_factory: |algorithm, key| new_verifier(*algorithm, key),
     key_utils: KeyUtils {
         rsa_pub_components_from_private_key: rsa_components_private,
         rsa_pub_components_from_public_key: rsa_components_public,
         ec_pub_components_from_private_key: ec_components_private,
         ed_pub_components_from_private_key: ed_components_private,
-        compute_digest,
+        compute_digest: |data, algorithm| compute_digest(data, &algorithm),
     },
 };
 
@@ -386,7 +386,7 @@ pub static DEFAULT_PROVIDER: CryptoProvider = CryptoProvider {
 pub fn install() -> Result<()> {
     let _ = DEFAULT_PROVIDER.install_default();
     if CryptoProvider::try_get_default()
-        .is_some_and(|provider| std::ptr::eq(provider, &DEFAULT_PROVIDER))
+        .is_some_and(|provider| std::ptr::eq(provider, &raw const DEFAULT_PROVIDER))
     {
         Ok(())
     } else {
