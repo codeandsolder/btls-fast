@@ -13,6 +13,7 @@ use crate::prefix::{
 
 mod cache;
 mod config;
+mod copy_tree;
 mod prefix;
 
 fn should_use_cmake_cross_compilation(config: &Config) -> bool {
@@ -150,12 +151,7 @@ fn prepare_source(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     if config.source_dir.exists() {
         fs::remove_dir_all(&config.source_dir)?;
     }
-    fs_extra::dir::copy(
-        &submodule,
-        &config.out_dir,
-        &fs_extra::dir::CopyOptions::default(),
-    )
-    .inspect_err(|_| {
+    copy_tree::copy_tree(&submodule, &config.source_dir).inspect_err(|_| {
         let _ = fs::remove_dir_all(&config.source_dir);
     })?;
 
@@ -701,11 +697,7 @@ fn install_artifacts(
         fs::copy(bssl_build_dir.join(lib), lib_dir.join(lib))?;
     }
 
-    fs_extra::dir::copy(
-        get_include_path(config)?,
-        &install_dir,
-        &fs_extra::dir::CopyOptions::default(),
-    )?;
+    copy_tree::copy_tree(&get_include_path(config)?, &install_dir.join("include"))?;
 
     eprintln!(
         "installed BoringSSL artifacts into {}",
