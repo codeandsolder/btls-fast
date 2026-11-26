@@ -139,7 +139,6 @@ version = "0.5.6"
 dependencies = [
  "bindgen",
  "cmake",
- "fs_extra",
 ]
 
 [[package]]

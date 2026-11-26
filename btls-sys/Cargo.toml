@@ -94,4 +94,3 @@ relax-cert-validation = []
 [build-dependencies]
 bindgen = { workspace = true }
 cmake = { workspace = true }
-fs_extra = { workspace = true }

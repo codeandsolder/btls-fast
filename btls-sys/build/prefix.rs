@@ -148,12 +148,7 @@ fn prepare_generator_workspace(source_root: &Path, generator_root: &Path) -> io:
     // import set is an upstream implementation detail, and a missing package would only show
     // up as an opaque Go build error after a BoringSSL bump.
     for path in ["include", "util"] {
-        fs_extra::dir::copy(
-            source_root.join(path),
-            generator_root,
-            &fs_extra::dir::CopyOptions::default(),
-        )
-        .map_err(io::Error::other)?;
+        crate::copy_tree::copy_tree(&source_root.join(path), &generator_root.join(path))?;
     }
 
     for file in ["go.mod", "go.sum"] {
