@@ -333,6 +333,14 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Result<[u8; 32], ErrorStack> {
     hmac(MessageDigest::sha256(), key, data)
 }
 
+/// Computes HMAC with SHA-384 digest.
+///
+/// # Errors
+/// Native HMAC initialization or computation fails.
+pub fn hmac_sha384(key: &[u8], data: &[u8]) -> Result<[u8; 48], ErrorStack> {
+    hmac(MessageDigest::sha384(), key, data)
+}
+
 /// Computes HMAC with SHA-512 digest.
 ///
 /// # Errors
