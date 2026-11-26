@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 /// Follow source symlinks as the previous copy implementation did, but reject
 /// directory cycles and non-regular files rather than recursing indefinitely
 /// or blocking on a special file. Preserve file permissions via `fs::copy`.
-pub(crate) fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
+pub fn copy_tree(source: &Path, destination: &Path) -> io::Result<()> {
     let source = source.canonicalize()?;
     let parent = destination
         .parent()
