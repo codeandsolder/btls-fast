@@ -95,4 +95,3 @@ relax-cert-validation = []
 bindgen = { workspace = true }
 cmake = { workspace = true }
 fs_extra = { workspace = true }
-fslock = { workspace = true }

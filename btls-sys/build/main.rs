@@ -1,4 +1,3 @@
-use fslock::LockFile;
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -481,11 +480,17 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
         return Ok(());
     }
 
-    let mut lock_file = LockFile::open(&config.out_dir.join(".patch_lock"))?;
+    // Keep the lock handle alive until patch application completes, including
+    // error paths. Do not truncate or replace the shared lockfile inode.
+    let lock_file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(config.out_dir.join(".patch_lock"))?;
+    lock_file.lock()?;
     let src_path = &config.source_dir;
     let has_git = src_path.join(".git").exists();
-
-    lock_file.lock()?;
 
     // NOTE: init git in the copied files, so we can apply patches
     if !has_git {
