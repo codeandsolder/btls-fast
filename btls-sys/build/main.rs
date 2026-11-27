@@ -795,12 +795,15 @@ fn emit_rerun_if_changed(config: &Config) {
 }
 
 fn emit_link_directives(config: &Config, archives: &[PathBuf; 2]) -> io::Result<()> {
-    let [crypto, ssl] = archives.each_ref().map(|archive| archive.parent());
-    let crypto = crypto.ok_or_else(|| io::Error::other("crypto archive has no parent"))?;
-    let ssl = ssl.ok_or_else(|| io::Error::other("ssl archive has no parent"))?;
-    println!("cargo:rustc-link-search=native={}", crypto.display());
-    if ssl != crypto {
-        println!("cargo:rustc-link-search=native={}", ssl.display());
+    let mut previous = None;
+    for archive in archives {
+        let parent = archive
+            .parent()
+            .ok_or_else(|| io::Error::other("native archive has no parent"))?;
+        if previous != Some(parent) {
+            println!("cargo:rustc-link-search=native={}", parent.display());
+            previous = Some(parent);
+        }
     }
 
     if let Some(cpp_lib) = get_cpp_runtime_lib(config) {

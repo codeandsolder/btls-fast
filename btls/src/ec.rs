@@ -598,8 +598,7 @@ impl<T> ToOwned for EcKeyRef<T> {
 impl EcKey<Params> {
     /// Constructs an `EcKey` corresponding to a known curve.
     ///
-    /// It will not have an associated public or private key. This kind of key is primarily useful
-    /// to be provided to the `set_tmp_ecdh` methods on `Ssl` and `SslContextBuilder`.
+    /// It will not have an associated public or private key.
     ///
     /// # Errors
     ///

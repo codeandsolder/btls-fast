@@ -15,7 +15,7 @@ use crate::pkey::PKey;
 use crate::srtp::SrtpProfileId;
 use crate::ssl::test::server::Server;
 use crate::ssl::{
-    self, ExtensionType, NameType, ShutdownResult, ShutdownState, Ssl, SslAcceptor,
+    self, ExtensionType, KeyShare, NameType, ShutdownResult, ShutdownState, Ssl, SslAcceptor,
     SslAcceptorBuilder, SslConnector, SslContext, SslFiletype, SslInfoCallbackMode, SslMethod,
     SslOptions, SslSignatureAlgorithm, SslStream, SslVerifyMode, Tls13Cipher,
 };
@@ -1440,6 +1440,31 @@ fn get_curve() {
 }
 
 #[test]
+fn typed_group_configuration_controls_negotiation() {
+    let mut server = Server::builder();
+    server.ctx().set_groups(&[KeyShare::P256]).unwrap();
+    assert!(
+        server
+            .ctx()
+            .set_groups(&[KeyShare::P256, KeyShare::P256])
+            .is_err()
+    );
+    let server = server.build();
+    let mut client = server.client_with_root_ca().build().builder();
+    client.ssl().set_groups(&[KeyShare::X25519]).unwrap();
+    client.ssl().set_groups(&[]).unwrap();
+    client.ssl().set_groups(&[KeyShare::P256]).unwrap();
+    assert!(
+        client
+            .ssl()
+            .set_groups(&[KeyShare::P256, KeyShare::P256])
+            .is_err()
+    );
+    let stream = client.connect();
+    assert_eq!(stream.ssl().curve(), Some(KeyShare::P256.0));
+}
+
+#[test]
 fn used_hello_retry_request_true() {
     let mut server_builder = Server::builder();
     // Configures the server to prefer it's options over the client
@@ -1448,14 +1473,14 @@ fn used_hello_retry_request_true() {
         .set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
     server_builder
         .ctx()
-        .set_curves_list("P-256:X25519")
+        .set_groups(&[KeyShare::P256, KeyShare::X25519])
         .unwrap();
     let server = server_builder.build();
     let mut client_builder = server.client_with_root_ca();
     // configures the client to send this supported groups
     client_builder
         .ctx()
-        .set_curves_list("X25519:P-256")
+        .set_groups(&[KeyShare::X25519, KeyShare::P256])
         .unwrap();
 
     let client_stream = client_builder.connect();
@@ -1469,14 +1494,14 @@ fn used_hello_retry_request_false() {
     // Server doesn't configure CIPHER_SERVER_PREFERENCE, so it will use the preference of the client
     server_builder
         .ctx()
-        .set_curves_list("P-256:X25519")
+        .set_groups(&[KeyShare::P256, KeyShare::X25519])
         .unwrap();
     let server = server_builder.build();
     let mut client_builder = server.client_with_root_ca();
     // configures the client to send this supported groups
     client_builder
         .ctx()
-        .set_curves_list("X25519:P-256")
+        .set_groups(&[KeyShare::X25519, KeyShare::P256])
         .unwrap();
 
     let client_stream = client_builder.connect();
