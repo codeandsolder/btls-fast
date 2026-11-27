@@ -3,12 +3,28 @@
 //! ChaCha20-Poly1305 encryption is found in [`aead`](crate::aead). The raw keystream here is for
 //! protocols that build on it directly, such as QUIC header protection.
 
-use crate::ffi;
+use crate::{error::ErrorStack, ffi};
 use openssl_macros::corresponds;
 
 /// XORs `data` in place with the keystream of `key` and `nonce`, starting at block `counter`.
+///
+/// The caller must not reuse a key, nonce and counter combination.
+/// # Errors
+///
+/// The input would require wrapping the 32-bit block counter.
 #[corresponds(CRYPTO_chacha_20)]
-pub fn chacha20(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8]) {
+pub fn chacha20(
+    key: &[u8; 32],
+    nonce: &[u8; 12],
+    counter: u32,
+    data: &mut [u8],
+) -> Result<(), ErrorStack> {
+    let available_blocks = u64::from(u32::MAX - counter) + 1;
+    if data.len().div_ceil(64) as u64 > available_blocks {
+        return Err(ErrorStack::internal_error_str(
+            "ChaCha20 block counter would wrap",
+        ));
+    }
     let data_ptr = data.as_mut_ptr();
     // SAFETY: `CRYPTO_chacha_20` allows the input and output to be the same buffer.
     unsafe {
@@ -21,11 +37,21 @@ pub fn chacha20(key: &[u8; 32], nonce: &[u8; 12], counter: u32, data: &mut [u8])
             counter,
         );
     }
+    Ok(())
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn rejects_counter_wrap_without_modifying_input() {
+        let mut data = [0x42; 65];
+        assert!(chacha20(&[0; 32], &[0; 12], u32::MAX, &mut data).is_err());
+        assert_eq!(data, [0x42; 65]);
+        assert!(chacha20(&[0; 32], &[0; 12], u32::MAX, &mut data[..64]).is_ok());
+        assert!(chacha20(&[0; 32], &[0; 12], u32::MAX, &mut []).is_ok());
+    }
 
     /// The header protection mask of RFC 9001, Appendix A.5.
     #[test]
@@ -44,7 +70,8 @@ mod test {
             nonce.try_into().unwrap(),
             u32::from_le_bytes(counter.try_into().unwrap()),
             &mut mask,
-        );
+        )
+        .unwrap();
         assert_eq!(hex::encode(mask), "aefefe7d03");
     }
 }
