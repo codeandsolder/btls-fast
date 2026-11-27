@@ -289,8 +289,8 @@ impl Env {
             cmake_toolchain_file: target_var("CMAKE_TOOLCHAIN_FILE").map(Into::into),
             cpp_runtime_lib: target_var("BORING_BSSL_RUST_CPPLIB"),
             // matches the `cc` crate
-            cc: target_var("CC"),
-            cxx: target_var("CXX"),
+            cc: target_only_var("CC"),
+            cxx: target_only_var("CXX"),
             native_environment,
             docs_rs: var("DOCS_RS").is_some(),
             export_to_install_dir: boringssl_var("BORING_BSSL_INSTALL_DIR").map(PathBuf::from),

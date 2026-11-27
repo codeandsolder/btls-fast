@@ -31,7 +31,7 @@ jobs:
         scripts/test-cxx-runtime static stdc++
         CC=clang CXX=clang++ CXXFLAGS=-stdlib=libc++ scripts/test-cxx-runtime dynamic c++
         CC=clang CXX=clang++ CXXFLAGS=-stdlib=libc++ scripts/test-cxx-runtime static c++
-        CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc scripts/test-cxx-runtime static stdc++ aarch64-unknown-linux-gnu
+        env -u RUSTFLAGS -u CARGO_ENCODED_RUSTFLAGS CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++ CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc scripts/test-cxx-runtime static stdc++ aarch64-unknown-linux-gnu
       strict-suites: |
         [
           {"name":"tls-features","cargo":["--locked","--workspace","--all-targets","--features","mldsa,mlkem,prf,rpk,underscore-wildcards,relax-cert-validation"],"allow-test-panics":true},
