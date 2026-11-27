@@ -29,7 +29,7 @@ enum CallbackFailure {
 }
 
 impl<F> CallbackState<F> {
-    pub fn new(callback: F) -> Self {
+    pub const fn new(callback: F) -> Self {
         Self {
             cb: Some(callback),
             failure: None,
@@ -57,7 +57,7 @@ pub fn copy_passphrase(password: &[u8], out: &mut [u8]) -> Result<usize, ErrorSt
 }
 
 /// Clears exclusively borrowed sensitive storage.
-pub(crate) fn cleanse(bytes: &mut [u8]) {
+fn cleanse(bytes: &mut [u8]) {
     if !bytes.is_empty() {
         // SAFETY: the slice describes exactly the writable bytes.
         unsafe { crate::ffi::OPENSSL_cleanse(bytes.as_mut_ptr().cast(), bytes.len()) };
@@ -67,7 +67,7 @@ pub(crate) fn cleanse(bytes: &mut [u8]) {
 /// Fixed-length initialized heap storage for sensitive intermediate data.
 /// Cleanses the initialized allocation on every exit path. Ownership may be
 /// transferred explicitly after a successful operation.
-pub(crate) struct SecretBytes(Vec<u8>);
+pub struct SecretBytes(Vec<u8>);
 
 impl SecretBytes {
     pub(crate) fn zeroed(len: usize) -> Result<Self, ErrorStack> {
@@ -111,7 +111,7 @@ impl Drop for SecretBytes {
 }
 
 /// A NUL-terminated password for native interfaces that lack an explicit length.
-pub(crate) struct SecretCString(SecretBytes);
+pub struct SecretCString(SecretBytes);
 
 impl SecretCString {
     pub(crate) fn new(password: &[u8]) -> Result<Self, ErrorStack> {
