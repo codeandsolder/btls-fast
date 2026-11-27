@@ -243,4 +243,16 @@ fn set_cert_store_prevents_mutability() {
         store.as_ptr()
     ));
     assert!(ctx.cert_store_mut().is_err());
+    assert!(ctx.set_default_verify_paths().is_err());
+    assert!(ctx.set_ca_file("test/root-ca.pem").is_err());
+    assert!(
+        ctx.load_verify_locations(None, Some(std::path::Path::new("test")))
+            .is_err()
+    );
+    assert_eq!(store.objects_len(), 0);
+    ctx.set_cert_store_builder(X509StoreBuilder::new().unwrap())
+        .unwrap();
+    ctx.set_ca_file("test/root-ca.pem").unwrap();
+    assert_eq!(ctx.cert_store().unwrap().objects_len(), 1);
+    assert_eq!(store.objects_len(), 0);
 }

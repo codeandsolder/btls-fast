@@ -61,7 +61,7 @@ use foreign_types::{ForeignType, ForeignTypeRef, Opaque};
 use openssl_macros::corresponds;
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong};
 use std::fmt;
 use std::io::prelude::*;
 use std::io::{self, IoSlice};
@@ -1525,13 +1525,10 @@ impl SslContextBuilder {
     /// if present, or defaults specified at OpenSSL build time otherwise.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates. Native initialization of the default trust paths fails.
+    /// The store is shared, the context does not support X.509 certificates, or native initialization fails.
     #[corresponds(SSL_CTX_set_default_verify_paths)]
     pub fn set_default_verify_paths(&mut self) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-
-        // SAFETY: The live X509-capable context is exclusively borrowed while native default verification paths are configured.
-        unsafe { cvt(ffi::SSL_CTX_set_default_verify_paths(self.as_ptr())) }
+        self.cert_store_mut()?.set_default_paths()
     }
 
     /// Loads trusted root certificates from a file.
@@ -1545,22 +1542,21 @@ impl SslContextBuilder {
     /// Loads trusted root certificates from a file and/or a directory.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates. A path contains a NUL byte or native certificate loading fails.
+    /// The store is shared, the context does not support X.509 certificates, a path contains a NUL byte, or native loading fails.
     #[corresponds(SSL_CTX_load_verify_locations)]
     pub fn load_verify_locations(
         &mut self,
         ca_file: Option<&Path>,
         ca_path: Option<&Path>,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-
+        let store = self.cert_store_mut()?;
         let ca_file = ca_file.map(path_to_cstring).transpose()?;
         let ca_path = ca_path.map(path_to_cstring).transpose()?;
 
         // SAFETY: Both optional C strings remain live through the native call and null pointers represent missing paths.
         unsafe {
-            cvt(ffi::SSL_CTX_load_verify_locations(
-                self.as_ptr(),
+            cvt(ffi::X509_STORE_load_locations(
+                store.as_ptr(),
                 ca_file.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
                 ca_path.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
             ))
