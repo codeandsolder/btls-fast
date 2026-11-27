@@ -281,7 +281,7 @@ fn retry() {
 #[test]
 fn replacing_pending_async_verifier_discards_old_result() {
     use crate::ssl::BoxCustomVerifyFinish;
-    use std::future::{poll_fn, ready};
+    use std::future::poll_fn;
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
     use std::task::{Poll, Waker};
@@ -329,7 +329,7 @@ fn replacing_pending_async_verifier_discards_old_result() {
         .ssl_mut()
         .set_async_custom_verify_callback(SslVerifyMode::PEER, move |_| {
             calls.fetch_add(1, Ordering::SeqCst);
-            Ok(Box::pin(ready(Err(SslAlert::CERTIFICATE_REVOKED))))
+            Ok(Box::pin(async { Err(SslAlert::CERTIFICATE_REVOKED) }))
         })
         .unwrap();
     assert!(matches!(
