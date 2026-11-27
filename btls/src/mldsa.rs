@@ -1,17 +1,17 @@
 //! ML-DSA (FIPS 204) post-quantum digital signature.
 //!
 //! ```
-//! use btls::mldsa::{Algorithm, MlDsaPrivateKey};
+//! use btls::mldsa::{Algorithm, MlDsaPrivateKey, SignatureContext};
 //!
 //! // Generate a key pair.
 //! let (public_key, private_key) = MlDsaPrivateKey::generate(Algorithm::MlDsa65).unwrap();
 //!
 //! // Sign a message.
 //! let message = b"hello post-quantum world";
-//! let signature = private_key.sign(message).unwrap();
+//! let signature = private_key.sign(message, SignatureContext::EMPTY).unwrap();
 //!
 //! // Verify the signature.
-//! assert!(public_key.verify(message, &signature).is_ok());
+//! assert!(public_key.verify(message, &signature, SignatureContext::EMPTY).is_ok());
 //! ```
 
 use std::ffi::c_int;
@@ -30,6 +30,25 @@ pub const PRIVATE_KEY_SEED_BYTES: usize = ffi::MLDSA_SEED_BYTES as usize;
 
 /// Raw bytes of a private key seed ([`PRIVATE_KEY_SEED_BYTES`] long).
 pub type MlDsaPrivateKeySeed = [u8; PRIVATE_KEY_SEED_BYTES];
+
+/// Domain-separation context authenticated by an ML-DSA signature (FIPS 204).
+/// At most 255 bytes; the verifier must supply the same context as the signer.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SignatureContext<'a>(&'a [u8]);
+
+impl<'a> SignatureContext<'a> {
+    /// Explicitly select an empty context for protocols that require it.
+    pub const EMPTY: Self = Self(&[]);
+
+    /// Validates a domain-separation context.
+    /// # Errors
+    /// The context exceeds 255 bytes.
+    pub fn new(bytes: &'a [u8]) -> Result<Self, ErrorStack> {
+        u8::try_from(bytes.len())
+            .map_err(|_| ErrorStack::internal_error_str("ML-DSA context exceeds 255 bytes"))?;
+        Ok(Self(bytes))
+    }
+}
 
 /// ML-DSA parameter set selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,9 +89,9 @@ pub struct MlDsaPublicKey(PublicKeyInner);
 
 #[derive(Clone)]
 enum PublicKeyInner {
-    MlDsa44(Box<ffi::MLDSA44_public_key>),
-    MlDsa65(Box<ffi::MLDSA65_public_key>),
-    MlDsa87(Box<ffi::MLDSA87_public_key>),
+    MlDsa44(Arc<ffi::MLDSA44_public_key>),
+    MlDsa65(Arc<ffi::MLDSA65_public_key>),
+    MlDsa87(Arc<ffi::MLDSA87_public_key>),
 }
 
 /// A shared ML-DSA private key. Clones reuse the immutable expanded key.
@@ -108,7 +127,7 @@ macro_rules! define_mldsa_suite {
                         cvt($generate(bytes.as_mut_ptr(), seed.as_mut_ptr(), expanded))
                     })
                 }?;
-                let public = MlDsaPublicKey::from_slice(Algorithm::$variant, &bytes)?;
+                let public = MlDsaPublicKey(Self::public_from_private(&key)?);
                 Ok((public, MlDsaPrivateKey(PrivateKeyInner::$variant(key))))
             }
 
@@ -133,12 +152,13 @@ macro_rules! define_mldsa_suite {
                 cvt(unsafe { $derive(public.as_mut_ptr(), secret.expanded_ptr()) })?;
                 // SAFETY: Success initializes the whole opaque native public key.
                 let public = unsafe { public.assume_init() };
-                Ok(PublicKeyInner::$variant(Box::new(public)))
+                Ok(PublicKeyInner::$variant(Arc::new(public)))
             }
 
             fn sign(
                 secret: &SecretMaterial<$private, PRIVATE_KEY_SEED_BYTES>,
                 msg: &[u8],
+                context: SignatureContext<'_>,
             ) -> Result<Vec<u8>, ErrorStack> {
                 let mut sig = vec![0u8; $signature_bytes];
                 // SAFETY: The output has the native signature size; the expanded
@@ -149,8 +169,8 @@ macro_rules! define_mldsa_suite {
                         secret.expanded_ptr(),
                         msg.as_ptr(),
                         msg.len(),
-                        core::ptr::null(),
-                        0,
+                        context.0.as_ptr(),
+                        context.0.len(),
                     )
                 })?;
                 Ok(sig)
@@ -170,7 +190,7 @@ macro_rules! define_mldsa_suite {
                 }
                 // SAFETY: Native success wrote an initialized public key.
                 let key = unsafe { key.assume_init() };
-                Ok(PublicKeyInner::$variant(Box::new(key)))
+                Ok(PublicKeyInner::$variant(Arc::new(key)))
             }
 
             /// # Safety
@@ -182,7 +202,12 @@ macro_rules! define_mldsa_suite {
                 unsafe { $marshal(cbb, key) }
             }
 
-            fn verify(key: &$public, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
+            fn verify(
+                key: &$public,
+                msg: &[u8],
+                signature: &[u8],
+                context: SignatureContext<'_>,
+            ) -> Result<(), ErrorStack> {
                 // SAFETY: The public key and borrowed byte slices are live and
                 // this verifier matches their selected native parameter set.
                 cvt(unsafe {
@@ -192,8 +217,8 @@ macro_rules! define_mldsa_suite {
                         signature.len(),
                         msg.as_ptr(),
                         msg.len(),
-                        core::ptr::null(),
-                        0,
+                        context.0.as_ptr(),
+                        context.0.len(),
                     )
                 })
             }
@@ -317,17 +342,17 @@ impl MlDsaPrivateKey {
         Ok(MlDsaPublicKey(inner))
     }
 
-    /// Signs `msg` and returns the signature bytes.
+    /// Signs `msg` and the selected domain-separation context, returning the signature.
     ///
     /// # Errors
     ///
     /// Native randomized signature generation fails.
-    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+    pub fn sign(&self, msg: &[u8], context: SignatureContext<'_>) -> Result<Vec<u8>, ErrorStack> {
         ffi::init();
         match &self.0 {
-            PrivateKeyInner::MlDsa44(key) => MlDsa44Suite::sign(key, msg),
-            PrivateKeyInner::MlDsa65(key) => MlDsa65Suite::sign(key, msg),
-            PrivateKeyInner::MlDsa87(key) => MlDsa87Suite::sign(key, msg),
+            PrivateKeyInner::MlDsa44(key) => MlDsa44Suite::sign(key, msg, context),
+            PrivateKeyInner::MlDsa65(key) => MlDsa65Suite::sign(key, msg, context),
+            PrivateKeyInner::MlDsa87(key) => MlDsa87Suite::sign(key, msg, context),
         }
     }
 }
@@ -426,17 +451,22 @@ impl MlDsaPublicKey {
         Ok(bytes)
     }
 
-    /// Verifies `signature` over `msg` using this public key.
+    /// Verifies `signature` over `msg` and the selected domain-separation context.
     ///
     /// # Errors
     ///
-    /// The signature or context is invalid or the native verification fails.
-    pub fn verify(&self, msg: &[u8], signature: &[u8]) -> Result<(), ErrorStack> {
+    /// The signature is invalid for this message and context, or native verification fails.
+    pub fn verify(
+        &self,
+        msg: &[u8],
+        signature: &[u8],
+        context: SignatureContext<'_>,
+    ) -> Result<(), ErrorStack> {
         ffi::init();
         match &self.0 {
-            PublicKeyInner::MlDsa44(key) => MlDsa44Suite::verify(key, msg, signature),
-            PublicKeyInner::MlDsa65(key) => MlDsa65Suite::verify(key, msg, signature),
-            PublicKeyInner::MlDsa87(key) => MlDsa87Suite::verify(key, msg, signature),
+            PublicKeyInner::MlDsa44(key) => MlDsa44Suite::verify(key, msg, signature, context),
+            PublicKeyInner::MlDsa65(key) => MlDsa65Suite::verify(key, msg, signature, context),
+            PublicKeyInner::MlDsa87(key) => MlDsa87Suite::verify(key, msg, signature, context),
         }
     }
 }
@@ -486,8 +516,12 @@ mod tests {
                     }
                     drop(sk);
                     assert!(
-                        pk.verify(b"after drop", &copy.sign(b"after drop").unwrap())
-                            .is_ok()
+                        pk.verify(
+                            b"after drop",
+                            &copy.sign(b"after drop", SignatureContext::EMPTY).unwrap(),
+                            SignatureContext::EMPTY
+                        )
+                        .is_ok()
                     );
                 }
 
@@ -495,28 +529,51 @@ mod tests {
                 fn sign_and_verify() {
                     let (pk, sk) = MlDsaPrivateKey::generate($alg).unwrap();
                     let msg = b"test message";
-                    let sig1 = sk.sign(msg).unwrap();
-                    let sig2 = sk.clone().sign(msg).unwrap();
+                    let sig1 = sk.sign(msg, SignatureContext::EMPTY).unwrap();
+                    let sig2 = sk.clone().sign(msg, SignatureContext::EMPTY).unwrap();
                     assert_eq!(sig1.len(), $alg.signature_bytes());
-                    assert!(pk.verify(msg, &sig1).is_ok());
-                    assert!(pk.verify(msg, &sig2).is_ok());
-                    assert!(pk.clone().verify(msg, &sig1).is_ok());
+                    assert!(pk.verify(msg, &sig1, SignatureContext::EMPTY).is_ok());
+                    assert!(pk.verify(msg, &sig2, SignatureContext::EMPTY).is_ok());
+                    assert!(
+                        pk.clone()
+                            .verify(msg, &sig1, SignatureContext::EMPTY)
+                            .is_ok()
+                    );
+                }
+
+                #[test]
+                fn domain_separation_and_context_width() {
+                    let (pk, sk) = MlDsaPrivateKey::generate($alg).unwrap();
+                    let context = SignatureContext::new(b"protocol-a").unwrap();
+                    let other = SignatureContext::new(b"protocol-b").unwrap();
+                    let message = b"same message";
+                    let signature = sk.sign(message, context).unwrap();
+                    assert!(pk.verify(message, &signature, context).is_ok());
+                    assert!(pk.verify(message, &signature, other).is_err());
+                    assert!(
+                        pk.verify(message, &signature, SignatureContext::EMPTY)
+                            .is_err()
+                    );
+                    let max = SignatureContext::new(&[0xAA; 255]).unwrap();
+                    let signature = sk.sign(b"", max).unwrap();
+                    assert!(pk.verify(b"", &signature, max).is_ok());
+                    assert!(SignatureContext::new(&[0; 256]).is_err());
                 }
 
                 #[test]
                 fn bad_signature_fails() {
                     let (pk, sk) = MlDsaPrivateKey::generate($alg).unwrap();
                     let msg = b"test message";
-                    let mut sig = sk.sign(msg).unwrap();
+                    let mut sig = sk.sign(msg, SignatureContext::EMPTY).unwrap();
                     sig[5] ^= 1;
-                    assert!(pk.verify(msg, &sig).is_err());
+                    assert!(pk.verify(msg, &sig, SignatureContext::EMPTY).is_err());
                 }
 
                 #[test]
                 fn wrong_message_fails() {
                     let (pk, sk) = MlDsaPrivateKey::generate($alg).unwrap();
-                    let sig = sk.sign(b"correct").unwrap();
-                    assert!(pk.verify(b"wrong", &sig).is_err());
+                    let sig = sk.sign(b"correct", SignatureContext::EMPTY).unwrap();
+                    assert!(pk.verify(b"wrong", &sig, SignatureContext::EMPTY).is_err());
                 }
 
                 #[test]
@@ -524,10 +581,10 @@ mod tests {
                     let (pk, sk) = MlDsaPrivateKey::generate($alg).unwrap();
                     let sk2 = MlDsaPrivateKey::from_seed($alg, sk.seed_bytes()).unwrap();
                     let msg = b"seed roundtrip";
-                    let sig1 = sk2.sign(msg).unwrap();
-                    let sig2 = sk2.clone().sign(msg).unwrap();
-                    assert!(pk.verify(msg, &sig1).is_ok());
-                    assert!(pk.verify(msg, &sig2).is_ok());
+                    let sig1 = sk2.sign(msg, SignatureContext::EMPTY).unwrap();
+                    let sig2 = sk2.clone().sign(msg, SignatureContext::EMPTY).unwrap();
+                    assert!(pk.verify(msg, &sig1, SignatureContext::EMPTY).is_ok());
+                    assert!(pk.verify(msg, &sig2, SignatureContext::EMPTY).is_ok());
                 }
 
                 #[test]
@@ -538,8 +595,8 @@ mod tests {
                     let pk2 = MlDsaPublicKey::from_slice($alg, &bytes).unwrap();
                     assert_eq!(pk2.to_bytes().unwrap(), bytes);
                     let msg = b"public key roundtrip";
-                    let sig = sk.sign(msg).unwrap();
-                    assert!(pk2.verify(msg, &sig).is_ok());
+                    let sig = sk.sign(msg, SignatureContext::EMPTY).unwrap();
+                    assert!(pk2.verify(msg, &sig, SignatureContext::EMPTY).is_ok());
                 }
 
                 #[test]
