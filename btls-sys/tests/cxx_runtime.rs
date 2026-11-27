@@ -142,3 +142,25 @@ fn reads_cmake_file_api_and_bundles_only_selected_archive() -> io::Result<()> {
     assert!(cxx_runtime::emit(&fixture.0, &selected).is_err());
     Ok(())
 }
+
+#[test]
+fn configure_identity_changes_invalidate_only_native_build() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    cxx_runtime::prepare_configure(&fixture.0, b"gcc")?;
+    let build = fixture.0.join("build");
+    cxx_runtime::request_toolchains(&build)?;
+    let sentinel = build.join("compiled");
+    fs::write(&sentinel, b"object")?;
+    cxx_runtime::prepare_configure(&fixture.0, b"gcc")?;
+    assert!(sentinel.exists());
+    cxx_runtime::prepare_configure(&fixture.0, b"clang libc++")?;
+    assert!(!build.exists());
+    let compiler = fixture.compiler(&["c++"]);
+    assert!(cxx_runtime::dynamic_directory(&compiler, "c++").is_none());
+    fs::write(fixture.0.join("libc++.so"), [])?;
+    assert_eq!(
+        cxx_runtime::dynamic_directory(&compiler, "c++"),
+        Some(fixture.0.as_path())
+    );
+    Ok(())
+}

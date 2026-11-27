@@ -604,6 +604,29 @@ fn build_boringssl_or_get_prebuilt(config: &Config) -> io::Result<PathBuf> {
         // Use an explicit output directory so the CMake query and reply refer
         // to precisely the native build whose archives we link.
         let out = config.out_dir.join("native-cxx");
+        let toolchain = config
+            .env
+            .cmake_toolchain_file
+            .as_ref()
+            .map(|path| {
+                println!("cargo:rerun-if-changed={}", path.display());
+                fs::read(path)
+            })
+            .transpose()?;
+        let identity = format!(
+            "{:?}",
+            (
+                config.source_dir.canonicalize()?,
+                &config.target,
+                &config.host,
+                &config.env.native_environment,
+                &config.env.sysroot,
+                &config.env.compiler_external_toolchain,
+                &config.env.cmake_toolchain_file,
+                toolchain,
+            )
+        );
+        cxx_runtime::prepare_configure(&out, identity.as_bytes())?;
         cfg.out_dir(&out);
         cxx_runtime::request_toolchains(&out.join("build"))?;
     }
@@ -800,6 +823,9 @@ fn emit_link_directives(config: &Config, build: &Path, archives: &[PathBuf; 2]) 
     {
         let compiler = cxx_runtime::toolchain(build)?;
         let runtime = cxx_runtime::dynamic_name(&compiler)?;
+        if let Some(directory) = cxx_runtime::dynamic_directory(&compiler, runtime) {
+            println!("cargo:rustc-link-search=native={}", directory.display());
+        }
         println!("cargo:rustc-link-lib={runtime}");
     } else if let Some(cpp_lib) = get_cpp_runtime_lib(config)? {
         println!("cargo:rustc-link-lib={cpp_lib}");

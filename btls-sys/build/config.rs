@@ -49,6 +49,7 @@ pub struct Env {
     /// C compiler (ignored if using FIPS)
     pub cc: Option<OsString>,
     pub cxx: Option<OsString>,
+    pub native_environment: Vec<(String, Option<OsString>)>,
     pub docs_rs: bool,
     /// If set, built artifacts (libraries and patched headers) will be copied
     /// into this directory. The directory must exist and be empty.
@@ -212,6 +213,47 @@ impl Env {
                 .or_else(|| var(&format!("{var_prefix}_{name}")))
         };
         let target_var = |name: &str| target_only_var(name).or_else(|| var(name));
+        // Track the inputs read by cmake/cc as well as our own configuration.
+        // Query all precedence levels, including unset variables: introducing
+        // a higher-priority override must invalidate a previous configure.
+        let native_environment = [
+            "CC",
+            "CXX",
+            "AR",
+            "RANLIB",
+            "CFLAGS",
+            "CXXFLAGS",
+            "ASMFLAGS",
+            "CMAKE",
+            "CMAKE_GENERATOR",
+            "CMAKE_GENERATOR_PLATFORM",
+            "CMAKE_GENERATOR_TOOLSET",
+            "CMAKE_TOOLCHAIN_FILE",
+            "CMAKE_PREFIX_PATH",
+            "CMAKE_MAKE_PROGRAM",
+            "CMAKE_SYSROOT",
+            "CMAKE_C_COMPILER",
+            "CMAKE_CXX_COMPILER",
+            "SDKROOT",
+            "MACOSX_DEPLOYMENT_TARGET",
+            "CROSS_COMPILE",
+            "PATH",
+            "CARGO_ENCODED_RUSTFLAGS",
+        ]
+        .into_iter()
+        .flat_map(|name| {
+            [
+                format!("{name}_{target}"),
+                format!("{name}_{target_with_underscores}"),
+                format!("{var_prefix}_{name}"),
+                name.to_owned(),
+            ]
+        })
+        .map(|name| {
+            let value = var(&name);
+            (name, value)
+        })
+        .collect();
 
         let boringssl_var = |name: &str| {
             const BORING_BSSL_PREFIX: &str = "BORING_BSSL_";
@@ -251,8 +293,9 @@ impl Env {
             cmake_toolchain_file: target_var("CMAKE_TOOLCHAIN_FILE").map(Into::into),
             cpp_runtime_lib: target_var("BORING_BSSL_RUST_CPPLIB"),
             // matches the `cc` crate
-            cc: target_only_var("CC"),
-            cxx: target_only_var("CXX"),
+            cc: target_var("CC"),
+            cxx: target_var("CXX"),
+            native_environment,
             docs_rs: var("DOCS_RS").is_some(),
             export_to_install_dir: boringssl_var("BORING_BSSL_INSTALL_DIR").map(PathBuf::from),
         }

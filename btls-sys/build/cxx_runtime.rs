@@ -17,6 +17,24 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
 
+/// CMake retains its compiler identity and inferred implicit libraries even
+/// when Cargo reruns a build script. Reconfigure when the actual inputs change.
+pub fn prepare_configure(out: &Path, identity: &[u8]) -> io::Result<()> {
+    let stamp = out.join("configure-inputs");
+    match fs::read(&stamp) {
+        Ok(previous) if previous == identity => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let build = out.join("build");
+    if build.exists() {
+        fs::remove_dir_all(build)?;
+    }
+    fs::create_dir_all(out)?;
+    fs::write(stamp, identity)
+}
+
 pub fn request_toolchains(build: &Path) -> io::Result<()> {
     let query = build.join(".cmake/api/v1/query");
     fs::create_dir_all(&query)?;
@@ -163,6 +181,17 @@ pub fn dynamic_name(compiler: &Toolchain) -> io::Result<&'static str> {
         None,
     )?
     .name())
+}
+
+/// Preserve the target compiler's selected search directory for shared linkage.
+pub fn dynamic_directory<'a>(compiler: &'a Toolchain, name: &str) -> Option<&'a Path> {
+    let filename = format!("lib{name}.so");
+    compiler
+        .directories
+        .iter()
+        .filter(|directory| directory.is_absolute())
+        .find(|directory| directory.join(&filename).is_file())
+        .map(PathBuf::as_path)
 }
 
 /// For compiled sources, the actual CMake C++ link line determines the ABI.
