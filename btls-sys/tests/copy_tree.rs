@@ -77,8 +77,9 @@ fn rejects_copy_inside_source() -> io::Result<()> {
 
 #[test]
 fn external_native_input_requires_explicit_patch_confirmation() {
-    let path = Some(Path::new("provided"));
     use native_input::validate_native_input as validate;
+
+    let path = Some(Path::new("provided"));
     assert!(validate(None, None, None, false, None).is_ok());
     assert!(validate(None, None, None, true, None).is_err());
     assert!(validate(path, None, None, false, None).is_err());
