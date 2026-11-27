@@ -26,6 +26,7 @@ pub struct Config {
 )]
 pub struct Features {
     pub fips: bool,
+    pub static_cxx_runtime: bool,
     pub rpk: bool,
     pub underscore_wildcards: bool,
     pub prefix_symbols: bool,
@@ -48,6 +49,7 @@ pub struct Env {
     /// C compiler (ignored if using FIPS)
     pub cc: Option<OsString>,
     pub cxx: Option<OsString>,
+    pub native_environment: Vec<(String, Option<OsString>)>,
     pub docs_rs: bool,
     /// If set, built artifacts (libraries and patched headers) will be copied
     /// into this directory. The directory must exist and be empty.
@@ -115,6 +117,19 @@ impl Config {
         Ok(config)
     }
 
+    pub fn linux_cxx_runtime(&self) -> bool {
+        self.target_os == "linux" && matches!(self.target_env.as_str(), "gnu" | "musl")
+    }
+
+    pub fn static_cxx_runtime(&self) -> bool {
+        self.linux_cxx_runtime()
+            && (self.features.static_cxx_runtime
+                || self
+                    .target_features
+                    .iter()
+                    .any(|feature| feature == "crt-static"))
+    }
+
     fn check_feature_compatibility(&self) -> Result<(), &'static str> {
         if self.features.fips && self.features.rpk {
             return Err("`fips` and `rpk` features are mutually exclusive");
@@ -156,6 +171,7 @@ impl Features {
     const fn from_env() -> Self {
         Self {
             fips: cfg!(feature = "fips"),
+            static_cxx_runtime: cfg!(feature = "static-cxx-runtime"),
             rpk: cfg!(feature = "rpk"),
             underscore_wildcards: cfg!(feature = "underscore-wildcards"),
             prefix_symbols: cfg!(feature = "prefix-symbols"),
@@ -193,6 +209,47 @@ impl Env {
                 .or_else(|| var(&format!("{var_prefix}_{name}")))
         };
         let target_var = |name: &str| target_only_var(name).or_else(|| var(name));
+        // Track the inputs read by cmake/cc as well as our own configuration.
+        // Query all precedence levels, including unset variables: introducing
+        // a higher-priority override must invalidate a previous configure.
+        let native_environment = [
+            "CC",
+            "CXX",
+            "AR",
+            "RANLIB",
+            "CFLAGS",
+            "CXXFLAGS",
+            "ASMFLAGS",
+            "CMAKE",
+            "CMAKE_GENERATOR",
+            "CMAKE_GENERATOR_PLATFORM",
+            "CMAKE_GENERATOR_TOOLSET",
+            "CMAKE_TOOLCHAIN_FILE",
+            "CMAKE_PREFIX_PATH",
+            "CMAKE_MAKE_PROGRAM",
+            "CMAKE_SYSROOT",
+            "CMAKE_C_COMPILER",
+            "CMAKE_CXX_COMPILER",
+            "SDKROOT",
+            "MACOSX_DEPLOYMENT_TARGET",
+            "CROSS_COMPILE",
+            "PATH",
+            "CARGO_ENCODED_RUSTFLAGS",
+        ]
+        .into_iter()
+        .flat_map(|name| {
+            [
+                format!("{name}_{target}"),
+                format!("{name}_{target_with_underscores}"),
+                format!("{var_prefix}_{name}"),
+                name.to_owned(),
+            ]
+        })
+        .map(|name| {
+            let value = var(&name);
+            (name, value)
+        })
+        .collect();
 
         let boringssl_var = |name: &str| {
             const BORING_BSSL_PREFIX: &str = "BORING_BSSL_";
@@ -234,6 +291,7 @@ impl Env {
             // matches the `cc` crate
             cc: target_only_var("CC"),
             cxx: target_only_var("CXX"),
+            native_environment,
             docs_rs: var("DOCS_RS").is_some(),
             export_to_install_dir: boringssl_var("BORING_BSSL_INSTALL_DIR").map(PathBuf::from),
         }

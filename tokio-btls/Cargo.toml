@@ -23,6 +23,8 @@ include = [
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
+static-cxx-runtime = ["btls/static-cxx-runtime"]
+
 default = ["btls/default"]
 
 # Use a FIPS-validated version of boringssl.

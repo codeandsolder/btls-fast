@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Test the final native executable, not just Cargo metadata or an rlib.
+set -euo pipefail
+mode=${1:?expected dynamic or static}
+runtime=${2:?expected stdc++ or c++}
+target=${3:-}
+args=(--locked -p btls --example native_link --message-format=json)
+case "$mode" in
+    dynamic) ;;
+    static) args+=(--features static-cxx-runtime) ;;
+    *) exit 2 ;;
+esac
+[[ -z "$target" ]] || args+=(--target "$target")
+receipt=$(cargo build "${args[@]}" | jq -r 'select(.reason=="compiler-artifact" and .target.name=="native_link" and .executable!=null) | .executable')
+[[ -n "$receipt" && -f "$receipt" ]]
+needed=$(readelf -W --dynamic "$receipt")
+versions=$(readelf -W --version-info "$receipt")
+printf '%s\n' "$needed"
+case "$mode" in
+    static)
+        # Shared C++ standard libraries, ABI libraries and unwinder dependencies
+        # must not escape an explicitly static runtime policy.
+        if rg -q '\(NEEDED\).*\[(libstdc\+\+|libc\+\+|libc\+\+abi|libunwind)\.so' <<<"$needed"; then
+            echo "unexpected shared C++ runtime" >&2
+            exit 1
+        fi
+        if rg -q 'Name: (GLIBCXX_|CXXABI_)' <<<"$versions"; then
+            echo "unexpected dynamically versioned C++ runtime symbols" >&2
+            exit 1
+        fi
+        ;;
+    dynamic)
+        case "$runtime" in
+            stdc++) expected='libstdc\+\+\.so' ;;
+            c++) expected='libc\+\+\.so' ;;
+            *) exit 2 ;;
+        esac
+        rg -q "\\(NEEDED\\).*\\[$expected" <<<"$needed"
+        ;;
+esac
+if [[ -z "$target" ]]; then
+    "$receipt"
+fi

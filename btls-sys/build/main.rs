@@ -12,6 +12,7 @@ use crate::prefix::{PREFIX, PrefixCallback, audit_prefixed_symbols, regenerate_p
 mod cache;
 mod config;
 mod copy_tree;
+mod cxx_runtime;
 mod native_input;
 mod patches;
 mod prefix;
@@ -599,6 +600,36 @@ fn build_boringssl_or_get_prebuilt(config: &Config) -> io::Result<PathBuf> {
     }
 
     cache::apply(config, &mut cfg);
+    if config.linux_cxx_runtime() {
+        // Use an explicit output directory so the CMake query and reply refer
+        // to precisely the native build whose archives we link.
+        let out = config.out_dir.join("native-cxx");
+        let toolchain = config
+            .env
+            .cmake_toolchain_file
+            .as_ref()
+            .map(|path| {
+                println!("cargo:rerun-if-changed={}", path.display());
+                fs::read(path)
+            })
+            .transpose()?;
+        let identity = format!(
+            "{:?}",
+            (
+                config.source_dir.canonicalize()?,
+                &config.target,
+                &config.host,
+                &config.env.native_environment,
+                &config.env.sysroot,
+                &config.env.compiler_external_toolchain,
+                &config.env.cmake_toolchain_file,
+                toolchain,
+            )
+        );
+        cxx_runtime::prepare_configure(&out, identity.as_bytes())?;
+        cfg.out_dir(&out);
+        cxx_runtime::request_toolchains(&out.join("build"))?;
+    }
 
     // BoringSSL's ssl target already depends on crypto.
     let path = cfg.build_target("ssl").build();
@@ -618,7 +649,8 @@ fn get_cpp_runtime_lib(config: &Config) -> io::Result<Option<&str>> {
     }
 
     Ok(match &*config.target_os {
-        "macos" | "ios" | "tvos" | "freebsd" | "openbsd" | "android" => Some("c++"),
+        "macos" | "ios" | "tvos" | "freebsd" | "openbsd" => Some("c++"),
+        "android" => Some("c++_shared"),
         _ if config.unix || config.target_env == "gnu" => Some("stdc++"),
         _ => None,
     })
@@ -648,11 +680,16 @@ fn install_artifacts(
     let lib_dir = install_dir.join("lib");
     fs::create_dir(&lib_dir)?;
 
-    for archive in find_archives(bssl_build_dir, &config.target_env, msvc_lib_subdir(config)?)? {
+    let archives = find_archives(bssl_build_dir, &config.target_env, msvc_lib_subdir(config)?)?;
+    for archive in &archives {
         let name = archive
             .file_name()
             .ok_or("native archive has no file name")?;
-        fs::copy(&archive, lib_dir.join(name))?;
+        fs::copy(archive, lib_dir.join(name))?;
+    }
+    if config.static_cxx_runtime() {
+        let runtime = resolve_static_runtime(config, bssl_build_dir, &archives)?;
+        cxx_runtime::export_archives(&lib_dir, &runtime)?;
     }
     if config.features.fips {
         let module = bssl_build_dir.join("bcm.o");
@@ -714,7 +751,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             .as_deref()
             .ok_or("missing native build directory")?;
         let archives = find_archives(bssl_dir, &config.target_env, msvc_lib_subdir(&config)?)?;
-        emit_link_directives(&config, &archives)?;
+        emit_link_directives(&config, bssl_dir, &archives)?;
         if config.features.prefix_symbols && config.env.path.is_none() {
             // libssl holds the C++ symbols that `prefix_symbols.h` cannot rename, so it
             // needs the audit at least as much as libcrypto does.
@@ -749,7 +786,34 @@ fn emit_rerun_if_changed(config: &Config) {
     }
 }
 
-fn emit_link_directives(config: &Config, archives: &[PathBuf; 2]) -> io::Result<()> {
+fn resolve_static_runtime(
+    config: &Config,
+    build: &Path,
+    archives: &[PathBuf; 2],
+) -> io::Result<Vec<PathBuf>> {
+    let compiler = if config.env.path.is_none() {
+        Some(cxx_runtime::toolchain(build)?)
+    } else {
+        None
+    };
+    let explicit = config
+        .env
+        .cpp_runtime_lib
+        .as_ref()
+        .map(|name| {
+            name.to_str()
+                .ok_or_else(|| io::Error::other("C++ runtime name is not Unicode"))
+        })
+        .transpose()?;
+    let directories = archives
+        .iter()
+        .filter_map(|path| path.parent())
+        .map(Path::canonicalize)
+        .collect::<io::Result<Vec<_>>>()?;
+    cxx_runtime::resolve(compiler.as_ref(), &directories, explicit)
+}
+
+fn emit_link_directives(config: &Config, build: &Path, archives: &[PathBuf; 2]) -> io::Result<()> {
     let mut previous = None;
     for archive in archives {
         let parent = archive
@@ -761,11 +825,24 @@ fn emit_link_directives(config: &Config, archives: &[PathBuf; 2]) -> io::Result<
         }
     }
 
-    if let Some(cpp_lib) = get_cpp_runtime_lib(config)? {
+    println!("cargo:rustc-link-lib=static=ssl");
+    println!("cargo:rustc-link-lib=static=crypto");
+    if config.static_cxx_runtime() {
+        let runtime = resolve_static_runtime(config, build, archives)?;
+        cxx_runtime::emit(&config.out_dir, &runtime)?;
+    } else if config.linux_cxx_runtime()
+        && config.env.path.is_none()
+        && config.env.cpp_runtime_lib.is_none()
+    {
+        let compiler = cxx_runtime::toolchain(build)?;
+        let runtime = cxx_runtime::dynamic_name(&compiler)?;
+        if let Some(directory) = cxx_runtime::dynamic_directory(&compiler, runtime) {
+            println!("cargo:rustc-link-search=native={}", directory.display());
+        }
+        println!("cargo:rustc-link-lib={runtime}");
+    } else if let Some(cpp_lib) = get_cpp_runtime_lib(config)? {
         println!("cargo:rustc-link-lib={cpp_lib}");
     }
-    println!("cargo:rustc-link-lib=static=crypto");
-    println!("cargo:rustc-link-lib=static=ssl");
 
     if config.target_os == "windows" {
         // Rust 1.87.0 compat - https://github.com/rust-lang/rust/pull/138233
