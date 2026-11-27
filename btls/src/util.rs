@@ -57,7 +57,7 @@ pub fn copy_passphrase(password: &[u8], out: &mut [u8]) -> Result<usize, ErrorSt
 }
 
 /// Clears exclusively borrowed sensitive storage.
-fn cleanse(bytes: &mut [u8]) {
+pub(crate) fn cleanse(bytes: &mut [u8]) {
     if !bytes.is_empty() {
         // SAFETY: the slice describes exactly the writable bytes.
         unsafe { crate::ffi::OPENSSL_cleanse(bytes.as_mut_ptr().cast(), bytes.len()) };

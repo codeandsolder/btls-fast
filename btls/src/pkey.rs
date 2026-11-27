@@ -825,12 +825,10 @@ mod tests {
         let alice = PKey::generate(Id::X25519).unwrap();
         let bob = PKey::generate(Id::X25519).unwrap();
 
-        let mut alice_deriver = Deriver::new(&alice).unwrap();
-        alice_deriver.set_peer(&bob).unwrap();
+        let mut alice_deriver = Deriver::new(&alice, &bob).unwrap();
         let shared_alice = alice_deriver.derive_to_vec().unwrap();
 
-        let mut bob_deriver = Deriver::new(&bob).unwrap();
-        bob_deriver.set_peer(&alice).unwrap();
+        let mut bob_deriver = Deriver::new(&bob, &alice).unwrap();
         let shared_bob = bob_deriver.derive_to_vec().unwrap();
 
         assert!(!shared_alice.is_empty());
