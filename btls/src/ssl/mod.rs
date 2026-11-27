@@ -1454,6 +1454,20 @@ impl SslContextBuilder {
         Ok(())
     }
 
+    /// Returns the verification parameters inherited by new connections.
+    ///
+    /// # Errors
+    /// The context does not support X.509 certificates.
+    #[corresponds(SSL_CTX_get0_param)]
+    pub fn verify_param_mut(&mut self) -> Result<&mut X509VerifyParamRef, ErrorStack> {
+        self.ctx.check_x509()?;
+        // SAFETY: the exclusively owned X.509 context retains its initialized parameters.
+        unsafe {
+            cvt_p(ffi::SSL_CTX_get0_param(self.as_ptr()))
+                .map(|param| X509VerifyParamRef::from_ptr_mut(param))
+        }
+    }
+
     /// Sets a custom certificate store for verifying peer certificates.
     ///
     /// # Errors

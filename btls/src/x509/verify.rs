@@ -30,11 +30,7 @@ bitflags! {
     #[derive(Debug, PartialEq, Eq, Clone, Copy, PartialOrd, Ord, Hash)]
     #[repr(transparent)]
     pub struct X509CheckFlags: c_uint {
-        const ALWAYS_CHECK_SUBJECT = ffi::X509_CHECK_FLAG_ALWAYS_CHECK_SUBJECT as _;
         const NO_WILDCARDS = ffi::X509_CHECK_FLAG_NO_WILDCARDS as _;
-        const NO_PARTIAL_WILDCARDS = ffi::X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as _;
-        const MULTI_LABEL_WILDCARDS = ffi::X509_CHECK_FLAG_MULTI_LABEL_WILDCARDS as _;
-        const SINGLE_LABEL_SUBDOMAINS = ffi::X509_CHECK_FLAG_SINGLE_LABEL_SUBDOMAINS as _;
         const NEVER_CHECK_SUBJECT = ffi::X509_CHECK_FLAG_NEVER_CHECK_SUBJECT as _;
         #[cfg(feature = "underscore-wildcards")]
         const UNDERSCORE_WILDCARDS = ffi::X509_CHECK_FLAG_UNDERSCORE_WILDCARDS as _;
@@ -52,19 +48,17 @@ bitflags! {
         const CRL_CHECK = ffi::X509_V_FLAG_CRL_CHECK as _;
         const CRL_CHECK_ALL = ffi::X509_V_FLAG_CRL_CHECK_ALL as _;
         const IGNORE_CRITICAL = ffi::X509_V_FLAG_IGNORE_CRITICAL as _;
-        const X509_STRICT = ffi::X509_V_FLAG_X509_STRICT as _;
-        const ALLOW_PROXY_CERTS = ffi::X509_V_FLAG_ALLOW_PROXY_CERTS as _;
-        const POLICY_CHECK = ffi::X509_V_FLAG_POLICY_CHECK as _;
         const EXPLICIT_POLICY = ffi::X509_V_FLAG_EXPLICIT_POLICY as _;
         const INHIBIT_ANY = ffi::X509_V_FLAG_INHIBIT_ANY as _;
         const INHIBIT_MAP = ffi::X509_V_FLAG_INHIBIT_MAP as _;
-        const NOTIFY_POLICY = ffi::X509_V_FLAG_NOTIFY_POLICY as _;
-        const EXTENDED_CRL_SUPPORT = ffi::X509_V_FLAG_EXTENDED_CRL_SUPPORT as _;
-        const USE_DELTAS = ffi::X509_V_FLAG_USE_DELTAS as _;
         const CHECK_SS_SIGNATURE = ffi::X509_V_FLAG_CHECK_SS_SIGNATURE as _;
-        const TRUSTED_FIRST = ffi::X509_V_FLAG_TRUSTED_FIRST as _;
         const PARTIAL_CHAIN = ffi::X509_V_FLAG_PARTIAL_CHAIN as _;
-        const NO_ALT_CHAINS = ffi::X509_V_FLAG_NO_ALT_CHAINS as _;
+        /// Disables validity-period checks. Use only with an explicit alternative time policy.
+        const NO_CHECK_TIME = ffi::X509_V_FLAG_NO_CHECK_TIME as _;
+        /// Accepts timezone offsets in certificate validity fields.
+        const ALLOW_TIMEZONE_OFFSET = ffi::X509_V_FLAG_ALLOW_TIMEZONE_OFFSET as _;
+        /// Enables the native draft-05 Merkle Tree Certificates verifier.
+        const USE_MTC_DRAFT_PLANTS_05 = ffi::X509_V_FLAG_USE_MTC_DRAFT_PLANTS_05 as _;
     }
 }
 
@@ -157,33 +151,31 @@ impl X509VerifyParamRef {
         X509VerifyFlags::from_bits_retain(bits)
     }
 
-    /// Set the expected DNS hostname.
+    /// Sets the expected DNS hostname. An empty name or embedded NUL is invalid.
+    /// A failed native update poisons this parameter object so verification fails closed.
     #[corresponds(X509_VERIFY_PARAM_set1_host)]
     pub fn set_host(&mut self, host: &str) -> Result<(), ErrorStack> {
         // SAFETY: the exclusively borrowed native object copies this
-        // readable hostname. The sentinel NUL handles the zero-length case.
+        // readable hostname, with the exact length even for an empty slice.
         unsafe {
-            // len == 0 means "run strlen" :(
-            let raw_host = if host.is_empty() { "\0" } else { host };
             cvt(ffi::X509_VERIFY_PARAM_set1_host(
                 self.as_ptr(),
-                raw_host.as_ptr().cast(),
+                host.as_ptr().cast(),
                 host.len(),
             ))
         }
     }
 
-    /// Set the expected email address.
+    /// Sets the expected email address. An empty address or embedded NUL is invalid.
+    /// A failed native update poisons this parameter object so verification fails closed.
     #[corresponds(X509_VERIFY_PARAM_set1_email)]
     pub fn set_email(&mut self, email: &str) -> Result<(), ErrorStack> {
         // SAFETY: the exclusively borrowed native object copies this
-        // readable address. The sentinel NUL handles the zero-length case.
+        // readable address, with the exact length even for an empty slice.
         unsafe {
-            // len == 0 means "run strlen" :(
-            let raw_email = if email.is_empty() { "\0" } else { email };
             cvt(ffi::X509_VERIFY_PARAM_set1_email(
                 self.as_ptr(),
-                raw_email.as_ptr().cast(),
+                email.as_ptr().cast(),
                 email.len(),
             ))
         }
@@ -231,7 +223,8 @@ impl X509VerifyParamRef {
 
     /// Copies parameters from `src`.
     ///
-    /// If a parameter is unset in `src`, the existing value in `self`` is preserved.
+    /// If a parameter is unset in `src`, the existing value in `self` is preserved. Verification flags are combined;
+    /// the first explicitly configured verification time takes precedence.
     #[corresponds(X509_VERIFY_PARAM_set1)]
     pub fn copy_from(&mut self, src: &Self) -> Result<(), ErrorStack> {
         // SAFETY: the destination is exclusively borrowed, the source remains

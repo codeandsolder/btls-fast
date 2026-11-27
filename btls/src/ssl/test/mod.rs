@@ -1002,11 +1002,6 @@ fn verify_invalid_hostname() {
         .ssl()
         .verify_param_mut()
         .unwrap()
-        .set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
-    client
-        .ssl()
-        .verify_param_mut()
-        .unwrap()
         .set_host("bogus.com")
         .unwrap();
     client.connect_err();
@@ -1048,6 +1043,79 @@ fn bare_connector_uses_caller_trust_store() {
         .connect("foobar.com", server.connect_tcp())
         .unwrap();
     stream.read_exact(&mut [0]).unwrap();
+}
+
+#[test]
+fn connector_retains_connection_hostname_policy() {
+    let mut server = Server::builder();
+    server.should_error();
+    server
+        .ctx()
+        .set_certificate_chain_file("test/cert-wildcard.pem")
+        .unwrap();
+    let server = server.build();
+    let mut connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    let connector = connector.build();
+    let mut config = connector.configure().unwrap();
+    config
+        .verify_param_mut()
+        .unwrap()
+        .set_hostflags(X509CheckFlags::NO_WILDCARDS);
+    let result = config.connect("yes.foobar.com", server.connect_tcp());
+    assert!(
+        matches!(result, Err(HandshakeError::Failure(ref mid)) if mid.ssl().verify_result() == Err(crate::x509::X509VerifyError::HOSTNAME_MISMATCH))
+    );
+}
+
+#[test]
+fn connector_retains_store_hostname_policy() {
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+    let mut store = X509StoreBuilder::new().unwrap();
+    store.add_cert(X509::from_pem(ROOT_CERT).unwrap()).unwrap();
+    store
+        .verify_param_mut()
+        .set_hostflags(X509CheckFlags::NEVER_CHECK_SUBJECT);
+    let mut connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    connector.set_cert_store(store.build()).unwrap();
+    let result = connector
+        .build()
+        .connect("foobar.com", server.connect_tcp());
+    assert!(
+        matches!(result, Err(HandshakeError::Failure(ref mid)) if mid.ssl().verify_result() == Err(crate::x509::X509VerifyError::HOSTNAME_MISMATCH))
+    );
+}
+
+#[test]
+fn connector_inherits_context_hostname_policy() {
+    let mut server = Server::builder();
+    server.should_error();
+    server
+        .ctx()
+        .set_certificate_chain_file("test/cert-wildcard.pem")
+        .unwrap();
+    let server = server.build();
+    let mut connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    connector
+        .verify_param_mut()
+        .unwrap()
+        .set_hostflags(X509CheckFlags::NO_WILDCARDS);
+    let result = connector
+        .build()
+        .connect("yes.foobar.com", server.connect_tcp());
+    assert!(
+        matches!(result, Err(HandshakeError::Failure(ref mid)) if mid.ssl().verify_result() == Err(crate::x509::X509VerifyError::HOSTNAME_MISMATCH))
+    );
+}
+
+#[test]
+fn invalid_context_parameters_prevent_connection_creation() {
+    let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+    assert!(context.verify_param_mut().unwrap().set_host("").is_err());
+    assert!(Ssl::new(&context.build()).is_err());
 }
 
 #[test]
