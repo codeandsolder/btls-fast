@@ -6,11 +6,17 @@ use std::marker::PhantomData;
 use std::ptr;
 
 use crate::error::ErrorStack;
-use crate::pkey::{HasPrivate, HasPublic, PKeyRef};
-use crate::{cvt, cvt_p, util::SecretBytes};
+use crate::pkey::{HasPrivate, HasPublic, Id, PKeyRef};
+use crate::util::{SecretBytes, cleanse};
+use crate::{cvt, cvt_p};
 
-/// A type used to derive a shared secret between two keys.
-pub struct Deriver<'a>(*mut ffi::EVP_PKEY_CTX, PhantomData<&'a ()>);
+/// A fixed-width shared-secret derivation operation with an immutable key pair.
+/// Construct a new operation to change either key.
+pub struct Deriver<'a> {
+    ctx: *mut ffi::EVP_PKEY_CTX,
+    secret_len: usize,
+    _keys: PhantomData<&'a ()>,
+}
 
 // SAFETY: the context is uniquely owned; native key references outlive it
 // and are immutable during derivation. The context is not thread-affine.
@@ -19,96 +25,95 @@ unsafe impl Send for Deriver<'_> {}
 impl Drop for Deriver<'_> {
     fn drop(&mut self) {
         // SAFETY: self owns exactly one native context reference.
-        unsafe { ffi::EVP_PKEY_CTX_free(self.0) };
+        unsafe { ffi::EVP_PKEY_CTX_free(self.ctx) };
     }
 }
 
 impl<'a> Deriver<'a> {
-    /// Creates a new deriver using the provided private key.
-    ///
+    /// Binds the private key and peer public key for shared-secret derivation.
+    /// Finite-field DH retains leading zeros, avoiding variable-length secrets.
+    /// Both keys must remain valid for the lifetime of the operation.
     /// # Errors
-    ///
-    /// Native allocation or derivation initialization fails.
+    /// Native allocation, derivation initialization, peer binding, or length query fails.
     #[corresponds(EVP_PKEY_derive_init)]
-    pub fn new<T>(key: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
-    where
-        T: HasPrivate,
-    {
-        // SAFETY: the live private key outlives the context. The new context
-        // is owned before initialization, including on error.
+    pub fn new<T: HasPrivate, P: HasPublic>(
+        key: &'a PKeyRef<T>,
+        peer: &'a PKeyRef<P>,
+    ) -> Result<Self, ErrorStack> {
+        // SAFETY: the live keys outlive the context. Own the native context
+        // before any fallible initialization; both key setters retain references.
+        let mut operation = unsafe {
+            Self {
+                ctx: cvt_p(ffi::EVP_PKEY_CTX_new(key.as_ptr(), ptr::null_mut()))?,
+                secret_len: 0,
+                _keys: PhantomData,
+            }
+        };
+        // SAFETY: uniquely owned initialized context and a borrowed live peer.
         unsafe {
-            cvt_p(ffi::EVP_PKEY_CTX_new(key.as_ptr(), ptr::null_mut()))
-                .map(|p| Self(p, PhantomData))
-                .and_then(|ctx| cvt(ffi::EVP_PKEY_derive_init(ctx.0)).map(|()| ctx))
+            cvt(ffi::EVP_PKEY_derive_init(operation.ctx))?;
+            cvt(ffi::EVP_PKEY_derive_set_peer(operation.ctx, peer.as_ptr()))?;
+            if key.id() == Id::DH {
+                cvt(ffi::EVP_PKEY_CTX_set_dh_pad(operation.ctx, 1))?;
+            }
+            cvt(ffi::EVP_PKEY_derive(
+                operation.ctx,
+                ptr::null_mut(),
+                &raw mut operation.secret_len,
+            ))?;
         }
-    }
-
-    /// Sets the peer key used for secret derivation.
-    ///
-    /// # Errors
-    ///
-    /// The peer key is incompatible with the derivation algorithm.
-    #[corresponds(EVP_PKEY_derive_set_peer)]
-    pub fn set_peer<T>(&mut self, key: &'a PKeyRef<T>) -> Result<(), ErrorStack>
-    where
-        T: HasPublic,
-    {
-        // SAFETY: the live peer key outlives this exclusively borrowed context.
-        unsafe { cvt(ffi::EVP_PKEY_derive_set_peer(self.0, key.as_ptr())) }
-    }
-
-    /// Returns the size of the shared secret.
-    ///
-    /// It can be used to size the buffer passed to [`Deriver::derive`].
-    ///
-    /// # Errors
-    ///
-    /// The context cannot determine a shared secret length.
-    #[corresponds(EVP_PKEY_derive)]
-    pub fn secret_len(&mut self) -> Result<usize, ErrorStack> {
-        // SAFETY: null output requests only the length from the live context.
-        unsafe {
-            let mut len = 0;
-            cvt(ffi::EVP_PKEY_derive(self.0, ptr::null_mut(), &raw mut len)).map(|()| len)
+        if operation.secret_len == 0 {
+            return Err(ErrorStack::internal_error_str("empty shared secret"));
         }
+        Ok(operation)
     }
 
-    /// Derives a shared secret between the two keys, writing it into the buffer.
-    ///
-    /// Returns the number of bytes written.
-    ///
+    /// Returns the exact byte width of the shared secret.
+    #[must_use = "Use the secret width when allocating the derivation output."]
+    pub const fn secret_len(&self) -> usize {
+        self.secret_len
+    }
+
+    /// Derives the complete shared secret into the start of the supplied buffer.
+    /// Returns the exact prefix written; bytes beyond that prefix are unchanged.
+    /// If native derivation fails, the output prefix is cleansed.
     /// # Errors
-    ///
-    /// The peer key is missing or invalid, or the output buffer is too small.
+    /// The output buffer is too small, the peer is invalid, or native derivation fails.
     #[corresponds(EVP_PKEY_derive)]
-    pub fn derive(&mut self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
-        let mut len = buf.len();
-        // SAFETY: the exclusive output buffer and its capacity are provided
-        // to the live, exclusively borrowed native derivation context.
-        unsafe { cvt(ffi::EVP_PKEY_derive(self.0, buf.as_mut_ptr(), &raw mut len))? };
-        if len > buf.len() {
+    pub fn derive<'b>(&mut self, buf: &'b mut [u8]) -> Result<&'b mut [u8], ErrorStack> {
+        let output = buf
+            .get_mut(..self.secret_len)
+            .ok_or_else(|| ErrorStack::internal_error_str("shared secret buffer too small"))?;
+        let mut len = output.len();
+        // SAFETY: the exclusive output prefix and its exact width are supplied
+        // to the live context. A short buffer never reaches native ECDH.
+        let result = unsafe {
+            cvt(ffi::EVP_PKEY_derive(
+                self.ctx,
+                output.as_mut_ptr(),
+                &raw mut len,
+            ))
+        };
+        if let Err(error) = result {
+            cleanse(output);
+            return Err(error);
+        }
+        if len != output.len() {
+            cleanse(output);
             return Err(ErrorStack::internal_error_str(
-                "invalid native secret length",
+                "invalid native shared secret width",
             ));
         }
-        Ok(len)
+        Ok(output)
     }
 
-    /// A convenience function which derives a shared secret and returns it in a new buffer.
-    ///
-    /// This simply wraps [`Deriver::secret_len`] and [`Deriver::derive`].
-    ///
-    /// [`Deriver::secret_len`]: #method.secret_len
-    /// [`Deriver::derive`]: #method.derive
-    ///
+    /// Derives the complete shared secret in a new buffer.
     /// # Errors
-    ///
-    /// The native length query or derivation fails.
+    /// Allocation or native derivation fails.
     pub fn derive_to_vec(&mut self) -> Result<Vec<u8>, ErrorStack> {
-        let len = self.secret_len()?;
-        let mut buf = SecretBytes::zeroed(len)?;
-        let len = self.derive(&mut buf)?;
-        buf.into_vec(len)
+        let mut buf = SecretBytes::zeroed(self.secret_len)?;
+        self.derive(&mut buf)?;
+        buf.into_vec(self.secret_len)
     }
 }
 
@@ -121,12 +126,19 @@ mod test {
     use crate::pkey::PKey;
 
     #[test]
-    fn derive_without_peer() {
-        let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
-        let ec_key = EcKey::generate(&group).unwrap();
-        let pkey = PKey::from_ec_key(ec_key).unwrap();
-        let mut deriver = Deriver::new(&pkey).unwrap();
-        deriver.derive_to_vec().unwrap_err();
+    fn incompatible_keys_cannot_be_bound() {
+        let ec = PKey::from_ec_key(
+            EcKey::generate(&EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let other = PKey::generate(Id::X25519).unwrap();
+        assert!(Deriver::new(&ec, &other).is_err());
+        assert!(Deriver::new(&other, &ec).is_err());
+        let different_curve = PKey::from_ec_key(
+            EcKey::generate(&EcGroup::from_curve_name(Nid::SECP384R1).unwrap()).unwrap(),
+        )
+        .unwrap();
+        assert!(Deriver::new(&ec, &different_curve).is_err());
     }
 
     #[test]
@@ -136,12 +148,65 @@ mod test {
         let ec_key2 = EcKey::generate(&group).unwrap();
         let pkey = PKey::from_ec_key(ec_key).unwrap();
         let pkey2 = PKey::from_ec_key(ec_key2).unwrap();
-        let mut deriver = Deriver::new(&pkey).unwrap();
-        deriver.set_peer(&pkey2).unwrap();
+        let mut deriver = Deriver::new(&pkey, &pkey2).unwrap();
         let shared = deriver.derive_to_vec().unwrap();
-        let mut reverse = Deriver::new(&pkey2).unwrap();
-        reverse.set_peer(&pkey).unwrap();
+        let mut reverse = Deriver::new(&pkey2, &pkey).unwrap();
         assert_eq!(shared, reverse.derive_to_vec().unwrap());
-        assert!(!shared.is_empty());
+        assert_eq!(shared.len(), 32);
+        assert_eq!(deriver.secret_len(), 32);
+        let mut short = [0xAA; 31];
+        assert!(deriver.derive(&mut short).is_err());
+        assert_eq!(short, [0xAA; 31]);
+        let mut long = [0xAA; 33];
+        assert_eq!(deriver.derive(&mut long).unwrap(), shared);
+        assert_eq!(long[32], 0xAA);
+    }
+
+    #[test]
+    fn x25519_invalid_peer_cleanses_output() {
+        let key = PKey::generate(Id::X25519).unwrap();
+        let peer = PKey::public_key_from_raw_bytes(&[0; 32], Id::X25519).unwrap();
+        let mut deriver = Deriver::new(&key, &peer).unwrap();
+        let mut output = [0xAA; 33];
+        assert!(deriver.derive(&mut output).is_err());
+        assert_eq!(output[..32], [0; 32]);
+        assert_eq!(output[32], 0xAA);
+    }
+
+    #[test]
+    fn finite_field_dh_preserves_leading_zeroes() {
+        use crate::bn::BigNum;
+        use crate::dh::Dh;
+        use crate::pkey::Private;
+        use foreign_types::ForeignType;
+
+        fn key() -> PKey<Private> {
+            // SAFETY: allocate the known ffdhe2048 group and install the
+            // matching private exponent 2 and public element 4. Small fixed
+            // test-only exponents deliberately produce leading zeroes.
+            unsafe {
+                let dh = Dh::<Private>::from_ptr(cvt_p(ffi::DH_get_rfc7919_2048()).unwrap());
+                let public = BigNum::from_u32(4).unwrap();
+                let private = BigNum::from_u32(2).unwrap();
+                cvt(ffi::DH_set0_key(
+                    dh.as_ptr(),
+                    public.as_ptr(),
+                    private.as_ptr(),
+                ))
+                .unwrap();
+                std::mem::forget((public, private));
+                let key = PKey::from_ptr(cvt_p(ffi::EVP_PKEY_new()).unwrap());
+                cvt(ffi::EVP_PKEY_set1_DH(key.as_ptr(), dh.as_ptr())).unwrap();
+                key
+            }
+        }
+        let alice = key();
+        let bob = key();
+        let mut deriver = Deriver::new(&alice, &bob).unwrap();
+        let secret = deriver.derive_to_vec().unwrap();
+        let mut expected = [0; 256];
+        expected[255] = 16;
+        assert_eq!(secret, expected);
+        assert_eq!(deriver.secret_len(), expected.len());
     }
 }
