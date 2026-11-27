@@ -498,6 +498,7 @@ enum CallbackRole {
     Keylog,
     Info,
     Quic,
+    #[cfg(not(feature = "fips"))]
     EchGrease,
 }
 
