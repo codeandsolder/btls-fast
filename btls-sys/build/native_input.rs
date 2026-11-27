@@ -64,5 +64,13 @@ pub fn find_archives(
                 )
             })
     };
-    Ok([find("crypto")?, find("ssl")?])
+    let mut archives = [find("crypto")?, find("ssl")?];
+    // Preserve search priority when the archives live in different directories.
+    // Otherwise an earlier link-search path could shadow the selected archive.
+    archives.sort_by_key(|archive| {
+        directories
+            .iter()
+            .position(|dir| archive.parent() == Some(dir))
+    });
+    Ok(archives)
 }

@@ -7,7 +7,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use foreign_types::ForeignTypeRef;
 use openssl_macros::corresponds;
 
-use crate::dh::Dh;
 use crate::error::ErrorStack;
 use crate::ex_data::IndexSlot;
 use crate::ffi;
@@ -27,17 +26,6 @@ pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallb
 pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
     IndexSlot::new(Ssl::new_ex_index);
 static NEXT_ISSUER: AtomicU64 = AtomicU64::new(1);
-
-const FFDHE_2048: &str = "
------BEGIN DH PARAMETERS-----
-MIIBCAKCAQEA//////////+t+FRYortKmq/cViAnPTzx2LnFg84tNpWp4TZBFGQz
-+8yTnc4kmz75fS/jY2MMddj2gbICrsRhetPfHtXV/WVhJDP1H18GbtCFY2VVPe0a
-87VXE15/V8k1mE8McODmi3fipona8+/och3xWKE2rec1MKzKT0g6eXq8CrGCsyT7
-YdEIqUuyyOP7uWrat2DX9GgdT0Kj3jlN9K5W7edjcrsZCwenyO4KbXCeAvzhzffi
-7MA0BM0oNC9hkXL+nOmFg/+OTxIy7vKBg8P+OxtMb61zO7X8vC7CIAXFjvGDfRaD
-ssbzSibBsu/6iGtCOGEoXJf//////////wIBAg==
------END DH PARAMETERS-----
-";
 
 fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
     let mut ctx = SslContextBuilder::new(method)?;
@@ -511,22 +499,19 @@ impl SslAcceptor {
     /// considered a reasonable default choice.
     ///
     /// This corresponds to the intermediate configuration of version 5 of Mozilla's server side TLS
-    /// recommendations. See its [documentation][docs] for more details on specifics.
+    /// recommendations, limited to supported server cipher suites. See its [documentation][docs] for more details on specifics.
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
     ///
     /// # Errors
     ///
-    /// Native context, Diffie–Hellman parameters, or cipher configuration is invalid.
+    /// Native context creation or cipher configuration fails.
     pub fn mozilla_intermediate_v5(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1);
-        let dh = Dh::params_from_pem(FFDHE_2048.as_bytes())?;
-        ctx.set_tmp_dh(&dh)?;
         ctx.set_cipher_list(
             "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:\
-             ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:\
-             DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384"
+             ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
         )?;
         Ok(SslAcceptorBuilder(ctx))
     }
@@ -535,28 +520,25 @@ impl SslAcceptor {
     /// considered a reasonable default choice.
     ///
     /// This corresponds to the intermediate configuration of version 4 of Mozilla's server side TLS
-    /// recommendations. See its [documentation][docs] for more details on specifics.
+    /// recommendations, limited to supported server cipher suites. See its [documentation][docs] for more details on specifics.
     ///
     /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
     // FIXME remove in next major version
     ///
     /// # Errors
     ///
-    /// Native context, Diffie–Hellman parameters, or cipher configuration is invalid.
+    /// Native context creation or cipher configuration fails.
     pub fn mozilla_intermediate(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
         ctx.set_options(SslOptions::NO_TLSV1_3);
-        let dh = Dh::params_from_pem(FFDHE_2048.as_bytes())?;
-        ctx.set_tmp_dh(&dh)?;
         ctx.set_cipher_list(
             "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:\
              ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-             DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:\
+             ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:\
              ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA384:\
-             ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA256:DHE-RSA-AES128-SHA:\
-             DHE-RSA-AES256-SHA256:DHE-RSA-AES256-SHA:ECDHE-ECDSA-DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:\
-             EDH-RSA-DES-CBC3-SHA:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:\
+             ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:\
+             AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:\
              AES256-SHA:DES-CBC3-SHA:!DSS",
         )?;
         Ok(SslAcceptorBuilder(ctx))

@@ -119,3 +119,21 @@ fn requires_both_archives_and_respects_platform_layout() -> io::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn archive_resolution_preserves_directory_priority() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    let root = &fixture.0;
+    fs::create_dir(root.join("lib"))?;
+    fs::create_dir(root.join("crypto"))?;
+    let preferred_ssl = root.join("lib/libssl.a");
+    let crypto = root.join("crypto/libcrypto.a");
+    fs::write(&preferred_ssl, [])?;
+    fs::write(&crypto, [])?;
+    fs::write(root.join("crypto/libssl.a"), [])?;
+    assert_eq!(
+        native_input::find_archives(root, "gnu", None)?,
+        [preferred_ssl, crypto]
+    );
+    Ok(())
+}

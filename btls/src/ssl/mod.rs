@@ -75,15 +75,13 @@ use std::slice;
 use std::str;
 use std::sync::{Arc, LazyLock};
 
-use crate::dh::DhRef;
-use crate::ec::EcKeyRef;
 use crate::error::ErrorStack;
 use crate::ex_data::{Index, IndexRegistry, IndexSlot, replace_boxed};
 use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
 use crate::pkey::Public;
-use crate::pkey::{HasPrivate, PKeyRef, Params, Private};
+use crate::pkey::{HasPrivate, PKeyRef, Private};
 use crate::srtp::{SrtpProtectionProfile, SrtpProtectionProfileRef};
 use crate::ssl::bio::BioMethod;
 use crate::ssl::callbacks::{
@@ -1513,40 +1511,12 @@ impl SslContextBuilder {
         Ok(())
     }
 
-    /// Controls read ahead behavior.
-    ///
-    /// If enabled, OpenSSL will read as much data as is available from the underlying stream,
-    /// instead of a single record at a time.
-    ///
-    /// It has no effect when used with DTLS.
-    #[corresponds(SSL_CTX_set_read_ahead)]
-    pub fn set_read_ahead(&mut self, read_ahead: bool) {
-        // SAFETY: The exclusively borrowed context receives a scalar native read-ahead flag.
-        unsafe {
-            ffi::SSL_CTX_set_read_ahead(self.as_ptr(), c_int::from(read_ahead));
-        }
-    }
-
     /// Sets the mode used by the context, returning the new bit-mask after adding mode.
     #[corresponds(SSL_CTX_set_mode)]
     pub fn set_mode(&mut self, mode: SslMode) -> SslMode {
         // SAFETY: The mutable context is live while the native mode bitmask is updated and returned.
         let bits = unsafe { ffi::SSL_CTX_set_mode(self.as_ptr(), mode.bits()) };
         SslMode::from_bits_retain(bits)
-    }
-
-    /// Sets the parameters to be used during ephemeral Diffie-Hellman key exchange.
-    #[corresponds(SSL_CTX_set_tmp_dh)]
-    pub fn set_tmp_dh(&mut self, dh: &DhRef<Params>) -> Result<(), ErrorStack> {
-        // SAFETY: The DH parameters are borrowed for a synchronous native setter that retains its own reference.
-        unsafe { cvt(ffi::SSL_CTX_set_tmp_dh(self.as_ptr(), dh.as_ptr())) }
-    }
-
-    /// Sets the parameters to be used during ephemeral elliptic curve Diffie-Hellman key exchange.
-    #[corresponds(SSL_CTX_set_tmp_ecdh)]
-    pub fn set_tmp_ecdh(&mut self, key: &EcKeyRef<Params>) -> Result<(), ErrorStack> {
-        // SAFETY: The ECDH key is borrowed for the native context setter while both handles remain live.
-        unsafe { cvt(ffi::SSL_CTX_set_tmp_ecdh(self.as_ptr(), key.as_ptr())) }
     }
 
     /// Use the default locations of trusted certificates for verification.
@@ -2639,7 +2609,25 @@ impl SslContextBuilder {
         unsafe { ffi::SSL_CTX_enable_ocsp_stapling(self.as_ptr()) }
     }
 
-    /// Sets the context's supported curves.
+    /// Sets the supported TLS named groups in preference order.
+    /// An empty list restores the native defaults.
+    ///
+    /// # Errors
+    /// A group is unsupported or repeated, or native configuration fails.
+    #[corresponds(SSL_CTX_set1_group_ids)]
+    pub fn set_groups(&mut self, groups: &[KeyShare]) -> Result<(), ErrorStack> {
+        // SAFETY: KeyShare is transparent over u16; the native setter copies
+        // the borrowed group IDs into the exclusively accessed configuration.
+        unsafe {
+            cvt(ffi::SSL_CTX_set1_group_ids(
+                self.as_ptr(),
+                groups.as_ptr().cast(),
+                groups.len(),
+            ))
+        }
+    }
+
+    /// Sets the context's supported groups by name.
     #[corresponds(SSL_CTX_set1_curves_list)]
     pub fn set_curves_list(&mut self, curves: &str) -> Result<(), ErrorStack> {
         let curves = CString::new(curves).map_err(ErrorStack::internal_error)?;
@@ -3815,6 +3803,24 @@ impl SslRef {
         SslOptions::from_bits_retain(bits)
     }
 
+    /// Sets the supported TLS named groups in preference order.
+    /// An empty list restores the native defaults.
+    ///
+    /// # Errors
+    /// A group is unsupported or repeated, or native configuration fails.
+    #[corresponds(SSL_set1_group_ids)]
+    pub fn set_groups(&mut self, groups: &[KeyShare]) -> Result<(), ErrorStack> {
+        // SAFETY: KeyShare is transparent over u16; the native setter copies
+        // the borrowed group IDs into the exclusively accessed configuration.
+        unsafe {
+            cvt(ffi::SSL_set1_group_ids(
+                self.as_ptr(),
+                groups.as_ptr().cast(),
+                groups.len(),
+            ))
+        }
+    }
+
     #[corresponds(SSL_set1_curves_list)]
     pub fn set_curves_list(&mut self, curves: &str) -> Result<(), ErrorStack> {
         let curves = CString::new(curves).map_err(ErrorStack::internal_error)?;
@@ -4032,26 +4038,6 @@ impl SslRef {
             );
         }
         Ok(())
-    }
-
-    /// Like [`SslContextBuilder::set_tmp_dh`].
-    ///
-    /// [`SslContextBuilder::set_tmp_dh`]: struct.SslContextBuilder.html#method.set_tmp_dh
-    #[corresponds(SSL_set_tmp_dh)]
-    pub fn set_tmp_dh(&mut self, dh: &DhRef<Params>) -> Result<(), ErrorStack> {
-        // SAFETY: The DH parameter handle remains live during the native
-        // setter, and the uniquely borrowed connection holds any needed state.
-        unsafe { cvt(ffi::SSL_set_tmp_dh(self.as_ptr(), dh.as_ptr())) }
-    }
-
-    /// Like [`SslContextBuilder::set_tmp_ecdh`].
-    ///
-    /// [`SslContextBuilder::set_tmp_ecdh`]: struct.SslContextBuilder.html#method.set_tmp_ecdh
-    #[corresponds(SSL_set_tmp_ecdh)]
-    pub fn set_tmp_ecdh(&mut self, key: &EcKeyRef<Params>) -> Result<(), ErrorStack> {
-        // SAFETY: The ECDH parameter handle remains live during the native
-        // setter, and the uniquely borrowed connection holds any needed state.
-        unsafe { cvt(ffi::SSL_set_tmp_ecdh(self.as_ptr(), key.as_ptr())) }
     }
 
     /// Configures whether ClientHello extensions should be permuted.

@@ -345,6 +345,7 @@ jobs:
           0012-boringssl-cheap-error-reset.patch \
           0013-ech-grease-payload-policy.patch \
           boringssl-rand-double-free.patch \
+          boringssl-pem-secret-cleanup.patch \
           boringssl-loongarch.patch \
           underscore-wildcards.patch \
           relax-cert-validation.patch; do
@@ -604,7 +605,7 @@ jobs:
                   // and fails to link here.
                   let mut prf = [0u8; 32];
                   assert_eq!(
-                      btls_sys::internal::CRYPTO_tls1_prf(
+                      btls_sys::CRYPTO_tls1_prf(
                           btls_sys::EVP_sha256(),
                           prf.as_mut_ptr(),
                           prf.len(),
