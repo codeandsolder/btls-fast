@@ -42,11 +42,16 @@ fn digest(algorithm: Algorithm) -> Result<MessageDigest> {
     }
 }
 
-fn mac(algorithm: Algorithm, key: &[u8], message: &[u8]) -> SigResult<Vec<u8>> {
+fn mac<T>(
+    algorithm: Algorithm,
+    key: &[u8],
+    message: &[u8],
+    consume: impl FnOnce(&[u8]) -> T,
+) -> SigResult<T> {
     match algorithm {
-        Algorithm::HS256 => hash::hmac_sha256(key, message).map(|v| v.to_vec()),
-        Algorithm::HS384 => hash::hmac_sha384(key, message).map(|v| v.to_vec()),
-        Algorithm::HS512 => hash::hmac_sha512(key, message).map(|v| v.to_vec()),
+        Algorithm::HS256 => hash::hmac_sha256(key, message).map(|v| consume(&v)),
+        Algorithm::HS384 => hash::hmac_sha384(key, message).map(|v| consume(&v)),
+        Algorithm::HS512 => hash::hmac_sha512(key, message).map(|v| consume(&v)),
         _ => return Err(signature::Error::new()),
     }
     .map_err(signature_error)
@@ -107,14 +112,17 @@ fn public_key(algorithm: Algorithm, key: &DecodingKey) -> Result<PKey<Public>> {
     match algorithm.family() {
         AlgorithmFamily::Rsa => {
             let rsa = match key.kind() {
-                DecodingKeyKind::RsaModulusExponent { n, e } => Rsa::from_public_components(
-                    BigNum::from_slice(n).map_err(|error| native_error(&error))?,
-                    BigNum::from_slice(e).map_err(|error| native_error(&error))?,
-                )
-                .map_err(|error| native_error(&error))?,
+                DecodingKeyKind::RsaModulusExponent { n, e } => {
+                    let rsa = Rsa::from_public_components(
+                        BigNum::from_slice(n).map_err(|error| native_error(&error))?,
+                        BigNum::from_slice(e).map_err(|error| native_error(&error))?,
+                    )
+                    .map_err(|error| native_error(&error))?;
+                    check_rsa(&rsa)?;
+                    rsa
+                }
                 DecodingKeyKind::SecretOrDer(bytes) => rsa_public(bytes)?,
             };
-            check_rsa(&rsa)?;
             PKey::from_rsa(rsa).map_err(|error| native_error(&error))
         }
         AlgorithmFamily::Ec => {
@@ -166,11 +174,11 @@ struct BtlsSigner {
 
 impl signature::Signer<Vec<u8>> for BtlsSigner {
     fn try_sign(&self, message: &[u8]) -> SigResult<Vec<u8>> {
-        let SigningKey::Asymmetric(key) = &self.key else {
-            if let SigningKey::Hmac(key) = &self.key {
-                return mac(self.algorithm, key.as_bytes(), message);
+        let key = match &self.key {
+            SigningKey::Hmac(key) => {
+                return mac(self.algorithm, key.as_bytes(), message, <[u8]>::to_vec);
             }
-            return Err(signature::Error::new());
+            SigningKey::Asymmetric(key) => key,
         };
         if self.algorithm == Algorithm::EdDSA {
             return Signer::new_without_digest(key)
@@ -228,7 +236,9 @@ impl signature::Verifier<Vec<u8>> for BtlsVerifier {
                 let key = key
                     .try_get_as_bytes()
                     .map_err(|_| signature::Error::new())?;
-                memcmp::eq(&mac(self.algorithm, key, message)?, signature)
+                mac(self.algorithm, key, message, |expected| {
+                    memcmp::eq(expected, signature)
+                })?
             }
             VerificationKey::Asymmetric(key) if self.algorithm == Algorithm::EdDSA => {
                 Verifier::new_without_digest(key)
@@ -490,6 +500,15 @@ mod tests {
         ] {
             roundtrip(algorithm, &private, &public)?;
         }
+        let modulus = rsa.n().to_vec();
+        for exponent in [&[][..], &[0], &[1], &[2], &[4], &[1, 0, 0, 0, 0, 1]] {
+            let malformed = DecodingKey::from_rsa_raw_components(&modulus, exponent);
+            assert!((DEFAULT_PROVIDER.verifier_factory)(&Algorithm::RS256, &malformed).is_err());
+        }
+        let mut even_modulus = modulus;
+        *even_modulus.last_mut().unwrap() &= !1;
+        let malformed = DecodingKey::from_rsa_raw_components(&even_modulus, &[1, 0, 1]);
+        assert!((DEFAULT_PROVIDER.verifier_factory)(&Algorithm::RS256, &malformed).is_err());
         let signer = (DEFAULT_PROVIDER.signer_factory)(&Algorithm::RS256, &private)?;
         let verifier = (DEFAULT_PROVIDER.verifier_factory)(&Algorithm::PS256, &public)?;
         assert!(
