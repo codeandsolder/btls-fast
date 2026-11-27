@@ -1450,7 +1450,7 @@ fn typed_group_configuration_controls_negotiation() {
             .is_err()
     );
     let server = server.build();
-    let mut client = server.client_with_root_ca().build();
+    let mut client = server.client_with_root_ca().build().builder();
     client.ssl().set_groups(&[KeyShare::X25519]).unwrap();
     client.ssl().set_groups(&[]).unwrap();
     client.ssl().set_groups(&[KeyShare::P256]).unwrap();
