@@ -31,7 +31,7 @@ impl Server {
             ssl_cb: Box::new(|_| {}),
             io_cb: Box::new(|_| {}),
             err_cb: Box::new(|_| {}),
-            should_error: false,
+            should_error: Box::new(|_| false),
             expected_connections_count: 1,
         }
     }
@@ -49,7 +49,7 @@ impl Server {
             ssl_cb: Box::new(|_| {}),
             io_cb: Box::new(|_| {}),
             err_cb: Box::new(|_| {}),
-            should_error: false,
+            should_error: Box::new(|_| false),
             expected_connections_count: 1,
         }
     }
@@ -79,7 +79,7 @@ pub struct Builder {
     ssl_cb: Box<dyn FnMut(&mut SslRef) + Send>,
     io_cb: Box<dyn FnMut(SslStream<TcpStream>) + Send>,
     err_cb: Box<dyn FnMut(HandshakeError<TcpStream>) + Send>,
-    should_error: bool,
+    should_error: Box<dyn FnMut(usize) -> bool + Send>,
     expected_connections_count: usize,
 }
 
@@ -109,7 +109,12 @@ impl Builder {
     }
 
     pub fn should_error(&mut self) {
-        self.should_error = true;
+        self.should_error = Box::new(|_| true);
+    }
+
+    /// Select which zero-based connection attempts are expected to fail.
+    pub fn should_error_when(&mut self, predicate: impl FnMut(usize) -> bool + Send + 'static) {
+        self.should_error = Box::new(predicate);
     }
 
     pub fn expected_connections_count(&mut self, count: usize) {
@@ -123,11 +128,11 @@ impl Builder {
         let mut ssl_cb = self.ssl_cb;
         let mut io_cb = self.io_cb;
         let mut err_cb = self.err_cb;
-        let should_error = self.should_error;
-        let mut count = self.expected_connections_count;
+        let mut should_error = self.should_error;
+        let count = self.expected_connections_count;
 
         let handle = thread::spawn(move || {
-            while count > 0 {
+            for index in 0..count {
                 let socket = socket.accept().unwrap().0;
                 let mut ssl = Ssl::new(&ctx).unwrap();
 
@@ -135,7 +140,7 @@ impl Builder {
 
                 let r = ssl.accept(socket);
 
-                if should_error {
+                if should_error(index) {
                     err_cb(r.unwrap_err());
                 } else {
                     let mut socket = r.unwrap();
@@ -143,8 +148,6 @@ impl Builder {
                     socket.write_all(&[0]).unwrap();
                     io_cb(socket);
                 }
-
-                count -= 1;
             }
         });
 

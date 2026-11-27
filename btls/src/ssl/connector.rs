@@ -7,14 +7,16 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use foreign_types::ForeignTypeRef;
 use openssl_macros::corresponds;
 
+use crate::cvt;
 use crate::error::ErrorStack;
 use crate::ex_data::IndexSlot;
 use crate::ffi;
 use crate::ssl::{
-    HandshakeError, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod, SslMode,
-    SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
+    HandshakeError, NameType, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
+    SslMode, SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
 };
 use crate::stack::StackRef;
+use crate::util::catch_native;
 use crate::x509::{X509, X509Ref};
 use std::net::IpAddr;
 
@@ -24,6 +26,8 @@ use super::callbacks::raw_client_session;
 pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
 pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
+    IndexSlot::new(Ssl::new_ex_index);
+static CLIENT_SESSION_OFFER_INDEX: IndexSlot<Ssl, SessionAuthentication> =
     IndexSlot::new(Ssl::new_ex_index);
 static NEXT_ISSUER: AtomicU64 = AtomicU64::new(1);
 
@@ -208,20 +212,31 @@ pub struct ConnectConfiguration {
 /// A client session and the connection it was issued on.
 ///
 /// Sessions come from [`SslConnectorBuilder::set_client_session_callback`].
-/// [`ConnectConfiguration::set_client_session`] offers one only to a connection with the same
-/// domain and SNI use, no stricter hostname or peer verification, and the same non-empty
-/// [session ID context](SslContextBuilder::set_session_id_context) or, without one, the same
-/// context. A connection that verifies the peer is not offered a session whose certificate chain
-/// has expired. Other per-connection changes through [`SslRef`], such as verify callbacks, verify
-/// stores, or client certificates, are not tracked.
+/// [`ConnectConfiguration::set_client_session`] offers a session only to the same
+/// domain and SNI use, with no stronger hostname or peer verification request,
+/// and the same nonempty [session ID context](SslContextBuilder::set_session_id_context)
+/// or, without one, the same issuing context. The built-in X.509 authentication
+/// policy is revalidated against the current store and parameters immediately
+/// before the session is offered, including changes made after `into_ssl`.
+/// A rejected session falls back to a full handshake.
+///
+/// The checked path applies to built-in X.509 authentication without custom
+/// verification or OCSP callbacks, PSKs, or client authentication credentials.
+/// Applications using those policies must explicitly establish session
+/// authentication with [`SslRef::set_session`] instead.
 #[derive(Clone)]
 pub struct ClientSession {
     session: SslSession,
+    authentication: SessionAuthentication,
+}
+
+/// The policy metadata is independent of native session ownership. When a
+/// session is offered, only this metadata needs to remain in connection ex-data.
+#[derive(Clone)]
+struct SessionAuthentication {
     peer: SessionPeer,
     verify_peer: bool,
-    /// Earliest expiry in the peer certificate chain, as POSIX time.
     not_after: Option<i64>,
-    /// Callback token of the issuing context, compared when the session has no session ID context.
     issuer: Option<u64>,
 }
 
@@ -232,6 +247,18 @@ pub(super) struct SessionPeer {
     domain: Arc<str>,
     sni: bool,
     verify_hostname: bool,
+    builtin_authentication: bool,
+}
+
+impl SessionPeer {
+    fn matches_sni(&self, ssl: &SslRef) -> bool {
+        let actual = ssl.servername_raw(NameType::HOST_NAME);
+        if self.sni {
+            actual.is_some_and(|name| name.eq_ignore_ascii_case(self.domain.as_bytes()))
+        } else {
+            actual.is_none()
+        }
+    }
 }
 
 type ClientSessionFn = dyn Fn(&mut SslRef, ClientSession) + Sync + Send;
@@ -245,13 +272,17 @@ pub(super) struct ClientSessionCallback {
 }
 
 impl ClientSession {
-    pub(super) fn new(session: SslSession, peer: SessionPeer, ssl: &SslRef) -> Self {
+    pub(super) fn new(session: SslSession, mut peer: SessionPeer, ssl: &SslRef) -> Self {
+        peer.builtin_authentication &= builtin_authentication(ssl) && peer.matches_sni(ssl);
+        let verify_peer = peer.builtin_authentication && verifies_peer(ssl);
         Self {
             session,
-            peer,
-            verify_peer: verifies_peer(ssl),
-            not_after: chain_not_after(ssl),
-            issuer: issuer(ssl.ssl_context()),
+            authentication: SessionAuthentication {
+                peer,
+                verify_peer,
+                not_after: chain_not_after(ssl),
+                issuer: issuer(ssl.ssl_context()),
+            },
         }
     }
 
@@ -260,13 +291,22 @@ impl ClientSession {
     pub fn session(&self) -> &SslSessionRef {
         &self.session
     }
+}
 
-    /// Checks the session against the connection `ssl` will make to `domain`.
-    ///
-    /// `BoringSSL` rejects another session ID context only after the server resumes, and skips
-    /// certificate checks on resumption unless reverify-on-resume runs a custom verifier.
-    fn resumes(&self, ssl: &SslRef, domain: &str, sni: bool, verify_hostname: bool) -> bool {
-        let scope = self.session.id_context();
+impl SessionAuthentication {
+    /// Reject mismatched scope and obviously stale sessions before native validation.
+    fn permits(
+        &self,
+        session: &SslSessionRef,
+        ssl: &SslRef,
+        domain: &str,
+        sni: bool,
+        verify_hostname: bool,
+    ) -> bool {
+        if !self.peer.builtin_authentication || !builtin_authentication(ssl) {
+            return false;
+        }
+        let scope = session.id_context();
         let verify_peer = verifies_peer(ssl);
         ssl.session_id_context() == Some(scope)
             && (!scope.is_empty()
@@ -275,7 +315,6 @@ impl ClientSession {
             && self.peer.sni == sni
             && (self.peer.verify_hostname || !verify_hostname)
             && (self.verify_peer || !verify_peer)
-            // Re-verification would reject an expired chain and fail the handshake.
             && !(verify_peer && self.chain_expired())
     }
 
@@ -287,6 +326,42 @@ impl ClientSession {
             .and_then(|now| i64::try_from(now.as_secs()).ok());
         matches!((self.not_after, now), (Some(not_after), Some(now)) if now >= not_after)
     }
+}
+
+fn builtin_authentication(ssl: &SslRef) -> bool {
+    // SAFETY: the live SSL is borrowed; the native predicate checks its configuration.
+    unsafe { ffi::SSL_client_session_uses_builtin_authentication(ssl.as_ptr()) != 0 }
+}
+
+unsafe extern "C" fn validate_client_session(
+    ssl: *const ffi::SSL,
+    session: *const ffi::SSL_SESSION,
+) -> libc::c_int {
+    catch_native(|| {
+        // SAFETY: the native validation callback borrows live SSL and session
+        // objects for the duration of this call, before constructing ClientHello.
+        let (ssl, session) = unsafe {
+            (
+                SslRef::from_ptr(ssl.cast_mut()),
+                SslSessionRef::from_ptr(session.cast_mut()),
+            )
+        };
+        let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX) else {
+            return 0;
+        };
+        let Some(authentication) = ssl.slot_data(&CLIENT_SESSION_OFFER_INDEX) else {
+            return 0;
+        };
+        if !peer.matches_sni(ssl)
+            || !authentication.permits(session, ssl, &peer.domain, peer.sni, peer.verify_hostname)
+        {
+            return 0;
+        }
+        // SAFETY: native verification uses the borrowed immutable session and
+        // current SSL configuration, without invoking application callbacks.
+        unsafe { ffi::SSL_check_client_session_x509(ssl.as_ptr(), session.as_ptr()) }
+    })
+    .unwrap_or(0)
 }
 
 /// Returns the earliest expiry in the peer certificate chain, as POSIX time.
@@ -383,8 +458,8 @@ impl ConnectConfiguration {
 
     /// Offers a session for resumption.
     ///
-    /// [`Self::into_ssl`] drops it unless it matches the connection as described on
-    /// [`ClientSession`], and the handshake then proceeds without resumption.
+    /// An incompatible session is discarded during setup or at handshake start
+    /// as described on [`ClientSession`]; the handshake then proceeds without resumption.
     pub fn set_client_session(&mut self, session: ClientSession) {
         self.session = Some(session);
     }
@@ -410,23 +485,42 @@ impl ConnectConfiguration {
             .ssl
             .session_context()
             .is_some_and(|context| context.slot_data(&CLIENT_SESSION_INDEX).is_some());
-        if reports_sessions {
+        let session = self.session.take().filter(|session| {
+            session.authentication.permits(
+                &session.session,
+                &self.ssl,
+                domain,
+                sni,
+                self.verify_hostname,
+            )
+        });
+        if reports_sessions || session.is_some() {
             let peer = SessionPeer {
                 domain: domain.into(),
                 sni,
                 verify_hostname: self.verify_hostname,
+                builtin_authentication: builtin_authentication(&self.ssl),
             };
             self.ssl.set_ex_data(SESSION_PEER_INDEX.register()?, peer)?;
         }
 
-        if let Some(session) = self
-            .session
-            .take()
-            .filter(|session| session.resumes(&self.ssl, domain, sni, self.verify_hostname))
+        if let Some(ClientSession {
+            session,
+            authentication,
+        }) = session
         {
-            // SAFETY: `self.ssl` has not been attached to a stream, so its handshake has not
-            // started, and the session was issued for a connection this one matches.
-            unsafe { self.ssl.set_session(&session.session)? };
+            self.ssl
+                .set_ex_data(CLIENT_SESSION_OFFER_INDEX.register()?, authentication)?;
+            // SAFETY: the owned SSL has not started its handshake. The native
+            // setter retains the session and calls the static validator before
+            // offering it; both typed metadata slots are initialized above.
+            unsafe {
+                cvt(ffi::SSL_set_session_with_validator(
+                    self.ssl.as_ptr(),
+                    session.as_ptr(),
+                    Some(validate_client_session),
+                ))?;
+            }
         }
 
         Ok(self.ssl)
