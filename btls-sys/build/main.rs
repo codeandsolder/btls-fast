@@ -13,6 +13,7 @@ mod cache;
 mod config;
 mod copy_tree;
 mod native_input;
+mod patches;
 mod prefix;
 
 use native_input::find_archives;
@@ -228,11 +229,20 @@ fn get_boringssl_cmake_config(config: &Config) -> io::Result<cmake::Config> {
         boringssl_cmake.define("BORINGSSL_PREFIX", PREFIX.as_str());
     }
 
-    if config.env.cmake_toolchain_file.is_some() {
-        return Ok(boringssl_cmake);
+    // Explicit overrides must apply to native builds too, otherwise bindgen
+    // and CMake can use different sysroots.
+    if let Some(sysroot) = &config.env.sysroot {
+        boringssl_cmake.define("CMAKE_SYSROOT", sysroot);
     }
 
-    if config.target_os == "windows" {
+    if let Some(toolchain) = &config.env.compiler_external_toolchain {
+        boringssl_cmake
+            .define("CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN", toolchain)
+            .define("CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN", toolchain)
+            .define("CMAKE_ASM_COMPILER_EXTERNAL_TOOLCHAIN", toolchain);
+    }
+
+    if config.target_env == "msvc" {
         // Explicitly use the non-debug CRT.
         // This is required now because newest BoringSSL requires CMake 3.22 which
         // uses the new logic with CMAKE_MSVC_RUNTIME_LIBRARY introduced in CMake 3.15.
@@ -242,6 +252,13 @@ fn get_boringssl_cmake_config(config: &Config) -> io::Result<cmake::Config> {
         } else {
             boringssl_cmake.define("CMAKE_MSVC_RUNTIME_LIBRARY", "MultiThreadedDLL");
         }
+    }
+
+    if let Some(toolchain) = &config.env.cmake_toolchain_file {
+        // The caller's toolchain owns compiler/platform selection. Explicit
+        // sysroot, external-toolchain and CRT settings above still apply.
+        boringssl_cmake.define("CMAKE_TOOLCHAIN_FILE", toolchain);
+        return Ok(boringssl_cmake);
     }
 
     if config.host == config.target {
@@ -267,17 +284,6 @@ fn get_boringssl_cmake_config(config: &Config) -> io::Result<cmake::Config> {
         if let Some(cxx) = &config.env.cxx {
             boringssl_cmake.define("CMAKE_CXX_COMPILER", cxx);
         }
-    }
-
-    if let Some(sysroot) = &config.env.sysroot {
-        boringssl_cmake.define("CMAKE_SYSROOT", sysroot);
-    }
-
-    if let Some(toolchain) = &config.env.compiler_external_toolchain {
-        boringssl_cmake
-            .define("CMAKE_C_COMPILER_EXTERNAL_TOOLCHAIN", toolchain)
-            .define("CMAKE_CXX_COMPILER_EXTERNAL_TOOLCHAIN", toolchain)
-            .define("CMAKE_ASM_COMPILER_EXTERNAL_TOOLCHAIN", toolchain);
     }
 
     configure_target_platform(config, &mut boringssl_cmake)?;
@@ -494,67 +500,11 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
         run_command(Command::new("git").arg("init").current_dir(src_path))?;
     }
 
-    if config.features.allow_crl_extensions_bad_version {
-        println!(
-            "cargo:warning=applying the patch for disabling certificate and \
-            CRL version validation for extensions"
-        );
-        apply_patch(config, "bad-cert-verification.patch")?;
-    }
-
-    println!("cargo:warning=applying post quantum crypto patch to boringssl");
-    apply_patch(config, "boring-pq.patch")?;
-
-    if config.features.rpk {
-        println!("cargo:warning=applying RPK patch to boringssl");
-        apply_patch(config, "rpk.patch")?;
-    }
-
-    if !config.features.fips {
-        for patch_name in [
-            "0001-boringssl-ffdhe.patch",
-            "0002-boringssl-legacy-ciphers.patch",
-            "0003-boringssl-tls-options.patch",
-            "0004-boringssl-extension-order.patch",
-            "0005-record-size-limit.patch",
-            "0006-delegated-credentials.patch",
-            "0007-boringssl-f5-padding.patch",
-            "0008-boringssl-sigalgs.patch",
-            "0009-boringssl-zstd-cert-compression.patch",
-            "0010-boringssl-build-compat.patch",
-            "0011-boringssl-seal-app-data.patch",
-            "0012-boringssl-cheap-error-reset.patch",
-            "0013-ech-grease-payload-policy.patch",
-        ] {
-            println!("cargo:warning=applying {patch_name} to boringssl");
-            apply_patch(config, patch_name)?;
+    for patch in patches::series()? {
+        if config.features.enables_patch(patch.condition) {
+            println!("cargo:warning=applying {} to BoringSSL", patch.file);
+            apply_patch(config, patch.file)?;
         }
-    }
-
-    // FIPS builds compile the same module source, so they need this fix too.
-    println!("cargo:warning=applying rand double-free fix to boringssl");
-    apply_patch(config, "boringssl-rand-double-free.patch")?;
-
-    // Only the symbol audit reads this tool, and only a prefixed build runs it.
-    if config.features.prefix_symbols {
-        println!("cargo:warning=applying symbol audit patch to boringssl");
-        apply_patch(config, "boringssl-audit-symbols.patch")?;
-    }
-
-    println!("cargo:warning=applying legacy PEM secret cleanup patch to boringssl");
-    apply_patch(config, "boringssl-pem-secret-cleanup.patch")?;
-
-    println!("cargo:warning=applying loongarch patch to boringssl");
-    apply_patch(config, "boringssl-loongarch.patch")?;
-
-    if config.features.underscore_wildcards {
-        println!("cargo:warning=applying underscore wildcards patch to boringssl");
-        apply_patch(config, "underscore-wildcards.patch")?;
-    }
-
-    if config.features.relax_cert_validation {
-        println!("cargo:warning=applying RSA key-usage enforcement relaxation patch");
-        apply_patch(config, "relax-cert-validation.patch")?;
     }
 
     Ok(())
@@ -656,17 +606,22 @@ fn build_boringssl_or_get_prebuilt(config: &Config) -> io::Result<PathBuf> {
     Ok(if build_dir.exists() { build_dir } else { path })
 }
 
-fn get_cpp_runtime_lib(config: &Config) -> Option<String> {
-    if let Some(ref cpp_lib) = config.env.cpp_runtime_lib {
-        return cpp_lib.clone().into_string().ok();
+fn get_cpp_runtime_lib(config: &Config) -> io::Result<Option<&str>> {
+    if let Some(cpp_lib) = &config.env.cpp_runtime_lib {
+        let name = cpp_lib
+            .to_str()
+            .filter(|name| !name.is_empty() && !name.contains(['\n', '\r']))
+            .ok_or_else(|| {
+                io::Error::other("BORING_BSSL_RUST_CPPLIB must be a nonempty Unicode library name")
+            })?;
+        return Ok(Some(name));
     }
 
-    match &*config.target_os {
-        "macos" | "ios" | "tvos" | "freebsd" | "openbsd" | "android" => Some("c++".into()),
-        _ if config.unix || config.target_env == "gnu" => Some("stdc++".into()),
-        // TODO(rmehra): figure out how to do this for windows
+    Ok(match &*config.target_os {
+        "macos" | "ios" | "tvos" | "freebsd" | "openbsd" | "android" => Some("c++"),
+        _ if config.unix || config.target_env == "gnu" => Some("stdc++"),
         _ => None,
-    }
+    })
 }
 
 /// Copies built `BoringSSL` artifacts (libraries and patched headers) into a
@@ -806,7 +761,7 @@ fn emit_link_directives(config: &Config, archives: &[PathBuf; 2]) -> io::Result<
         }
     }
 
-    if let Some(cpp_lib) = get_cpp_runtime_lib(config) {
+    if let Some(cpp_lib) = get_cpp_runtime_lib(config)? {
         println!("cargo:rustc-link-lib={cpp_lib}");
     }
     println!("cargo:rustc-link-lib=static=crypto");

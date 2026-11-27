@@ -164,6 +164,19 @@ impl Features {
         }
     }
 
+    pub const fn enables_patch(&self, condition: crate::patches::Condition) -> bool {
+        use crate::patches::Condition;
+        match condition {
+            Condition::Always => true,
+            Condition::NonFips => !self.fips,
+            Condition::Rpk => self.rpk,
+            Condition::PrefixSymbols => self.prefix_symbols,
+            Condition::AllowCrlExtensionsBadVersion => self.allow_crl_extensions_bad_version,
+            Condition::UnderscoreWildcards => self.underscore_wildcards,
+            Condition::RelaxCertValidation => self.relax_cert_validation,
+        }
+    }
+
     pub const fn is_fips_like(&self) -> bool {
         self.fips
     }
