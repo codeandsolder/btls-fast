@@ -122,19 +122,15 @@ impl Config {
     }
 
     pub fn static_cxx_runtime(&self) -> bool {
-        self.features.static_cxx_runtime
-            || (self.linux_cxx_runtime()
-                && self
+        self.linux_cxx_runtime()
+            && (self.features.static_cxx_runtime
+                || self
                     .target_features
                     .iter()
                     .any(|feature| feature == "crt-static"))
     }
 
     fn check_feature_compatibility(&self) -> Result<(), &'static str> {
-        if self.features.static_cxx_runtime && !self.linux_cxx_runtime() {
-            return Err("static-cxx-runtime requires a Linux GNU or musl target");
-        }
-
         if self.features.fips && self.features.rpk {
             return Err("`fips` and `rpk` features are mutually exclusive");
         }
