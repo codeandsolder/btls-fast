@@ -52,7 +52,7 @@ fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
 
 /// A type which wraps client-side streams in a TLS session.
 ///
-/// Configures BoringSSL cipher suites, session options, certificate verification,
+/// Configures `BoringSSL` cipher suites, session options, certificate verification,
 /// and hostname verification. Certificate verification is enabled by default,
 /// including when the caller provides its own trust store.
 #[derive(Clone, Debug)]

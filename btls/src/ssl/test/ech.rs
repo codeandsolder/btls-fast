@@ -1,4 +1,4 @@
-use crate::hpke::HpkeKey;
+use crate::hpke::{HpkeKey, Kem};
 use crate::ssl::ech::SslEchKeys;
 use crate::ssl::test::server::{ClientSslBuilder, Server};
 use crate::ssl::{
@@ -23,7 +23,7 @@ static ECH_KEY_2: &[u8] = include_bytes!("../../../test/echkey-2");
 
 fn bootstrap_ech(config: &[u8], key: &[u8], list: Option<&[u8]>) -> (Server, ClientSslBuilder) {
     let server = {
-        let key = HpkeKey::dhkem_p256_sha256(key).unwrap();
+        let key = HpkeKey::from_private_key(Kem::DhkemX25519HkdfSha256, key).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
         ech_keys_builder.add_key(true, config, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
@@ -56,7 +56,7 @@ fn ech_disable_from_select_certificate_callback() {
     let calls = Arc::new(AtomicUsize::new(0));
     let observations = Arc::new(Mutex::new(Vec::new()));
     let server = {
-        let key = HpkeKey::dhkem_p256_sha256(ECH_KEY).unwrap();
+        let key = HpkeKey::from_private_key(Kem::DhkemX25519HkdfSha256, ECH_KEY).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
         ech_keys_builder.add_key(true, ECH_CONFIG, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
@@ -110,7 +110,7 @@ fn ech_disable_from_select_certificate_callback() {
 fn ech_disable_repeatedly_fails_after_outer_client_hello() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = {
-        let key = HpkeKey::dhkem_p256_sha256(ECH_KEY).unwrap();
+        let key = HpkeKey::from_private_key(Kem::DhkemX25519HkdfSha256, ECH_KEY).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
         ech_keys_builder.add_key(true, ECH_CONFIG, &key).unwrap();
         let ech_keys = ech_keys_builder.build();
@@ -145,7 +145,7 @@ fn ech_disable_repeatedly_fails_after_outer_client_hello() {
 fn ech_disable_from_async_select_certificate_callback() {
     let calls = Arc::new(AtomicUsize::new(0));
     let server = {
-        let key = HpkeKey::dhkem_p256_sha256(ECH_KEY).unwrap();
+        let key = HpkeKey::from_private_key(Kem::DhkemX25519HkdfSha256, ECH_KEY).unwrap();
         let mut ech_keys_builder = SslEchKeys::builder().unwrap();
         ech_keys_builder.add_key(true, ECH_CONFIG, &key).unwrap();
         let ech_keys = ech_keys_builder.build();

@@ -43,27 +43,18 @@
 //!
 //! ## Building with a FIPS-validated module
 //!
-//! Only `BoringCrypto` module version `853ca1ea1168dff08011e5d42d94609cc0ca2e27`, as certified with
-//! [FIPS 140-2 certificate 4407](https://csrc.nist.gov/projects/cryptographic-module-validation-program/certificate/4407)
-//! is supported by this crate. Support is enabled by this crate's `fips` feature.
+//! The `fips` feature enables the native FIPS build configuration for the
+//! pinned source revision. Enabling this feature does not by itself establish
+//! that the resulting binary is a validated cryptographic module. Deployment
+//! must separately satisfy the relevant module certificate and security policy.
 //!
-//! `btls-sys` comes with a test that FIPS is enabled/disabled depending on the feature flag. You can run it as follows:
+//! The native mode can be checked with:
 //!
 //! ```bash
-//! $ cargo test --features fips fips::is_enabled
+//! cargo test --features fips fips::is_enabled
 //! ```
 //!
-//! ## Linking current `BoringSSL` version with precompiled FIPS-validated module (`bcm.o`)
-//!
-//! It's possible to link latest supported version of `BoringSSL` with FIPS-validated crypto module
-//! (`bcm.o`). To enable this compilation option one should enable `fips-link-precompiled`
-//! compilation feature and provide a `BORING_BSSL_FIPS_PRECOMPILED_BCM_O` env variable with a path to the
-//! precompiled FIPS-validated `bcm.o` module.
-//!
-//! Note that `BORING_BSSL_PRECOMPILED_BCM_O` is never used, as linking `BoringSSL` with precompiled non-FIPS
-//! module is not supported.
-//!
-//! ## Linking with a C++ standard library
+////! ## Linking with a C++ standard library
 //!
 //! Recent versions of boringssl require some C++ standard library features, so btls needs to link
 //! with a STL implementation. This can be controlled using the `BORING_BSSL_RUST_CPPLIB` variable. If
