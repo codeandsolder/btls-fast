@@ -17,37 +17,125 @@ pub fn catch_native<T>(callback: impl FnOnce() -> T) -> Option<T> {
     }
 }
 
-/// Wraps a user-supplied callback and a slot for panics thrown inside the callback (while FFI
-/// frames are on the stack).
-///
-/// When dropped, checks if the callback has panicked, and resumes unwinding if so.
+/// Captures a single-use password callback's failure until native frames are gone.
 pub struct CallbackState<F> {
-    /// The user callback. Taken out of the `Option` when called.
     cb: Option<F>,
-    /// If the callback panics, we place the panic object here, to be re-thrown once OpenSSL
-    /// returns.
-    panic: Option<Box<dyn Any + Send + 'static>>,
+    failure: Option<CallbackFailure>,
+}
+
+enum CallbackFailure {
+    Error(ErrorStack),
+    Panic(Box<dyn Any + Send + 'static>),
 }
 
 impl<F> CallbackState<F> {
-    pub fn new(callback: F) -> Self {
+    pub const fn new(callback: F) -> Self {
         Self {
             cb: Some(callback),
-            panic: None,
+            failure: None,
+        }
+    }
+
+    /// The caller must pass the owned result of the completed native operation.
+    /// A callback failure takes precedence over that result.
+    pub fn finish<T>(self, result: Result<T, ErrorStack>) -> Result<T, ErrorStack> {
+        match self.failure {
+            None => result,
+            Some(CallbackFailure::Error(error)) => Err(error),
+            Some(CallbackFailure::Panic(payload)) => panic::resume_unwind(payload),
         }
     }
 }
 
-impl<F> Drop for CallbackState<F> {
+/// Copies a length-delimited passphrase into a native callback buffer.
+pub fn copy_passphrase(password: &[u8], out: &mut [u8]) -> Result<usize, ErrorStack> {
+    let dst = out.get_mut(..password.len()).ok_or_else(|| {
+        ErrorStack::internal_error_str("passphrase exceeds native callback capacity")
+    })?;
+    dst.copy_from_slice(password);
+    Ok(password.len())
+}
+
+/// Clears exclusively borrowed sensitive storage.
+fn cleanse(bytes: &mut [u8]) {
+    if !bytes.is_empty() {
+        // SAFETY: the slice describes exactly the writable bytes.
+        unsafe { crate::ffi::OPENSSL_cleanse(bytes.as_mut_ptr().cast(), bytes.len()) };
+    }
+}
+
+/// Fixed-length initialized heap storage for sensitive intermediate data.
+/// Cleanses the initialized allocation on every exit path. Ownership may be
+/// transferred explicitly after a successful operation.
+pub struct SecretBytes(Vec<u8>);
+
+impl SecretBytes {
+    pub(crate) fn zeroed(len: usize) -> Result<Self, ErrorStack> {
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(len)
+            .map_err(ErrorStack::internal_error)?;
+        bytes.resize(len, 0);
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn into_vec(mut self, len: usize) -> Result<Vec<u8>, ErrorStack> {
+        let tail = self
+            .0
+            .get_mut(len..)
+            .ok_or_else(|| ErrorStack::internal_error_str("invalid native secret output length"))?;
+        cleanse(tail);
+        self.0.truncate(len);
+        Ok(std::mem::take(&mut self.0))
+    }
+}
+
+impl std::ops::Deref for SecretBytes {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SecretBytes {
+    fn deref_mut(&mut self) -> &mut [u8] {
+        &mut self.0
+    }
+}
+
+impl Drop for SecretBytes {
     fn drop(&mut self) {
-        if let Some(panic) = self.panic.take() {
-            panic::resume_unwind(panic);
+        cleanse(&mut self.0);
+    }
+}
+
+/// A NUL-terminated password for native interfaces that lack an explicit length.
+pub struct SecretCString(SecretBytes);
+
+impl SecretCString {
+    pub(crate) fn new(password: &[u8]) -> Result<Self, ErrorStack> {
+        if password.contains(&0) {
+            return Err(ErrorStack::internal_error_str(
+                "password contains an embedded NUL",
+            ));
         }
+        let len = password
+            .len()
+            .checked_add(1)
+            .ok_or_else(|| ErrorStack::internal_error_str("password length overflow"))?;
+        let mut bytes = SecretBytes::zeroed(len)?;
+        bytes[..password.len()].copy_from_slice(password);
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn as_ptr(&self) -> *const c_char {
+        self.0.as_ptr().cast()
     }
 }
 
 /// Password callback function, passed to private key loading functions.
-///
+/// A nonnegative return is the password length (including zero); -1 is failure.
 /// # Safety
 ///
 /// For a positive size, the non-null buffer must point to that many writable
@@ -62,45 +150,51 @@ pub unsafe extern "C" fn invoke_passwd_cb<F>(
 where
     F: FnOnce(&mut [u8]) -> Result<usize, ErrorStack>,
 {
-    let Ok(size) = usize::try_from(size) else {
-        return 0;
+    let Ok(capacity) = usize::try_from(size) else {
+        return -1;
     };
-    if cb_state.is_null() || buf.is_null() || size == 0 {
-        return 0;
+    if cb_state.is_null() || buf.is_null() {
+        return -1;
     }
 
-    // SAFETY: BoringSSL supplies the exclusive callback state installed by the
-    // synchronous key-loading call. The state outlives this invocation.
+    // SAFETY: the synchronous native call passes its live exclusive state.
     let callback = unsafe { &mut *cb_state.cast::<CallbackState<F>>() };
     let Some(cb) = callback.cb.take() else {
-        // This API accepts a single-use callback; a second invocation fails
-        // without overwriting a previously captured panic.
-        return 0;
+        if callback.failure.is_none() {
+            callback.failure = Some(CallbackFailure::Error(ErrorStack::internal_error_str(
+                "password callback invoked more than once",
+            )));
+        }
+        return -1;
     };
-    let result = panic::catch_unwind(AssertUnwindSafe(|| {
-        // SAFETY: BoringSSL provides size writable bytes, potentially
-        // uninitialized. Initialize them before making a safe byte slice.
-        let pass_slice = unsafe {
-            buf.cast::<u8>().write_bytes(0, size);
-            slice::from_raw_parts_mut(buf.cast::<u8>(), size)
-        };
-        match cb(pass_slice) {
-            Ok(len) if len <= size => c_int::try_from(len).unwrap_or(0),
-            Ok(_) => 0,
-            Err(err) => {
-                err.put();
-                0
-            }
-        }
-    }));
 
-    match result {
-        Ok(len) => len,
-        Err(err) => {
-            callback.panic = Some(err);
-            0
+    // SAFETY: native supplies capacity writable bytes, potentially uninitialized.
+    // Initialize them before creating a Rust slice.
+    let password = unsafe {
+        buf.cast::<u8>().write_bytes(0, capacity);
+        slice::from_raw_parts_mut(buf.cast::<u8>(), capacity)
+    };
+    let result = panic::catch_unwind(AssertUnwindSafe(|| cb(password)));
+    let failure = match result {
+        Ok(Ok(len)) if len <= capacity => {
+            if let Ok(native_len) = c_int::try_from(len) {
+                cleanse(&mut password[len..]);
+                return native_len;
+            }
+            CallbackFailure::Error(ErrorStack::internal_error_str(
+                "password length cannot be represented",
+            ))
         }
-    }
+        Ok(Ok(_)) => CallbackFailure::Error(ErrorStack::internal_error_str(
+            "password callback returned a length exceeding its buffer",
+        )),
+        Ok(Err(error)) => CallbackFailure::Error(error),
+        Err(payload) => CallbackFailure::Panic(payload),
+    };
+    // Native is not required to clear the output on callback failure.
+    cleanse(password);
+    callback.failure = Some(failure);
+    -1
 }
 
 /// Returns a borrowed byte slice only when the native pointer/length pair is
@@ -200,6 +294,29 @@ mod tests {
     }
 
     #[test]
+    fn secret_buffer_release_cleans_discarded_tail() {
+        let mut secret = SecretBytes::zeroed(8).unwrap();
+        secret.copy_from_slice(b"oksecret");
+        let mut bytes = secret.into_vec(2).unwrap();
+        assert_eq!(bytes, b"ok");
+        // SAFETY: this allocation previously contained eight initialized bytes
+        // and into_vec only truncated it, without reallocating.
+        unsafe { bytes.set_len(8) };
+        assert_eq!(bytes, b"ok\0\0\0\0\0\0");
+    }
+
+    #[test]
+    fn secret_c_string_is_terminated_and_rejects_embedded_nul() {
+        let pass = SecretCString::new(b"abc").unwrap();
+        // SAFETY: the wrapper owns a valid NUL-terminated byte string.
+        assert_eq!(
+            unsafe { std::ffi::CStr::from_ptr(pass.as_ptr()) }.to_bytes(),
+            b"abc"
+        );
+        assert!(SecretCString::new(b"a\0b").is_err());
+    }
+
+    #[test]
     fn native_input_guards_empty_and_invalid_native_buffers() {
         let input = [0x12, 0x34];
         // SAFETY: null or impossible-length pairs are rejected before access;
@@ -222,12 +339,44 @@ mod tests {
         let mut buf = [255; 4];
         assert_eq!(invoke(&mut state, &mut buf), 2);
         assert_eq!(buf, *b"pw\0\0");
-        assert_eq!(invoke(&mut state, &mut buf), 0);
+        assert_eq!(invoke(&mut state, &mut buf), -1);
+        assert!(state.finish(Ok(())).is_err());
     }
 
     #[test]
     fn callback_rejects_impossible_length() {
-        let mut state = CallbackState::new(|out: &mut [u8]| Ok(out.len() + 1));
-        assert_eq!(invoke(&mut state, &mut [0; 4]), 0);
+        let mut state = CallbackState::new(|out: &mut [u8]| {
+            out.fill(0x55);
+            Ok(out.len() + 1)
+        });
+        let mut buf = [0; 4];
+        assert_eq!(invoke(&mut state, &mut buf), -1);
+        assert_eq!(buf, [0; 4]);
+        assert!(state.finish(Ok(())).is_err());
+    }
+
+    #[test]
+    fn callback_preserves_empty_password_and_cleans_unused_output() {
+        let mut state = CallbackState::new(|out: &mut [u8]| {
+            out.fill(0x55);
+            Ok(0)
+        });
+        let mut buf = [0; 4];
+        assert_eq!(invoke(&mut state, &mut buf), 0);
+        assert_eq!(buf, [0; 4]);
+        state.finish(Ok(())).unwrap();
+    }
+
+    #[test]
+    fn callback_preserves_original_error_and_wipes_partial_password() {
+        let mut state = CallbackState::new(|out: &mut [u8]| {
+            out.fill(0x55);
+            Err(ErrorStack::internal_error_str("password unavailable"))
+        });
+        let mut buf = [0; 4];
+        assert_eq!(invoke(&mut state, &mut buf), -1);
+        assert_eq!(buf, [0; 4]);
+        let error = state.finish(Ok(())).unwrap_err();
+        assert_eq!(error.to_string(), "[password unavailable]");
     }
 }

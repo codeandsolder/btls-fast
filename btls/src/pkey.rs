@@ -43,7 +43,6 @@
 use foreign_types::{ForeignType, ForeignTypeRef};
 use libc::c_int;
 use openssl_macros::corresponds;
-use std::ffi::CString;
 use std::fmt;
 use std::mem;
 use std::ptr;
@@ -524,15 +523,14 @@ impl PKey<Private> {
         result
     }
 
-    /// Deserializes a DER-formatted PKCS#8 private key, using a callback to retrieve the password
-    /// if the key is encrypted.
+    /// Deserializes an encrypted DER-formatted PKCS#8 private key using a password callback.
     ///
     /// The callback should copy the password into the provided buffer and return the number of
     /// bytes written.
     ///
     /// # Errors
     ///
-    /// Returns an error for invalid DER, an unsuccessful password callback,
+    /// Returns an error for invalid DER, trailing data, an unsuccessful password callback,
     /// decryption failure, or native allocation failure.
     pub fn private_key_from_pkcs8_callback<F>(der: &[u8], callback: F) -> Result<Self, ErrorStack>
     where
@@ -544,41 +542,38 @@ impl PKey<Private> {
             ffi::init();
             let mut cb = CallbackState::new(callback);
             let bio = MemBioSlice::new(der)?;
-            cvt_p(ffi::d2i_PKCS8PrivateKey_bio(
+            let result = cvt_p(ffi::d2i_PKCS8PrivateKey_bio(
                 bio.as_ptr(),
                 ptr::null_mut(),
                 Some(invoke_passwd_cb::<F>),
                 std::ptr::addr_of_mut!(cb).cast(),
             ))
-            .map(|p| Self::from_ptr(p))
+            .map(|p| Self::from_ptr(p));
+            let key = cb.finish(result)?;
+            if bio.remaining_len() != 0 {
+                return Err(ErrorStack::internal_error_str(
+                    "trailing encrypted PKCS#8 DER data",
+                ));
+            }
+            Ok(key)
         }
     }
 
-    /// Deserializes a DER-formatted PKCS#8 private key, using the supplied password if the key is
-    /// encrypted.
+    /// Deserializes an encrypted DER-formatted PKCS#8 private key with the supplied password.
+    ///
+    /// The password is a length-delimited byte string, including any embedded NUL bytes.
     ///
     /// # Errors
     ///
-    /// Returns an error for embedded NUL, invalid DER, decryption failure,
+    /// Returns an error for an oversized passphrase, invalid DER, decryption failure,
     /// or native allocation failure.
     pub fn private_key_from_pkcs8_passphrase(
         der: &[u8],
         passphrase: &[u8],
     ) -> Result<Self, ErrorStack> {
-        // SAFETY: the native decoder borrows both the in-memory BIO and the
-        // NUL-terminated password during this synchronous call only.
-        unsafe {
-            ffi::init();
-            let bio = MemBioSlice::new(der)?;
-            let passphrase = CString::new(passphrase).map_err(ErrorStack::internal_error)?;
-            cvt_p(ffi::d2i_PKCS8PrivateKey_bio(
-                bio.as_ptr(),
-                ptr::null_mut(),
-                None,
-                passphrase.as_ptr().cast_mut().cast(),
-            ))
-            .map(|p| Self::from_ptr(p))
-        }
+        Self::private_key_from_pkcs8_callback(der, |out| {
+            crate::util::copy_passphrase(passphrase, out)
+        })
     }
 }
 
@@ -646,6 +641,46 @@ mod tests {
             .unwrap();
         PKey::private_key_from_pem_passphrase(&pem, b"foobar").unwrap();
         assert!(PKey::private_key_from_pem_passphrase(&pem, b"fizzbuzz").is_err());
+    }
+
+    #[test]
+    fn binary_and_empty_pkcs8_passwords() {
+        let key = PKey::private_key_from_pem(include_bytes!("../test/key.pem")).unwrap();
+        for password in [&b"before\0after"[..], &b""[..]] {
+            let pem = key
+                .private_key_to_pem_pkcs8_passphrase(Cipher::aes_128_cbc(), password)
+                .unwrap();
+            let der = key
+                .private_key_to_der_pkcs8_passphrase(Cipher::aes_128_cbc(), password)
+                .unwrap();
+            let from_pem = PKey::private_key_from_pem_passphrase(&pem, password).unwrap();
+            let from_der = PKey::private_key_from_pkcs8_passphrase(&der, password).unwrap();
+            assert!(from_pem.public_eq(&key));
+            assert!(from_der.public_eq(&key));
+            let mut trailing = der.clone();
+            trailing.push(0);
+            assert!(PKey::private_key_from_pkcs8_passphrase(&trailing, password).is_err());
+            for error in [
+                PKey::private_key_from_pem_callback(&pem, |_| {
+                    Err(ErrorStack::internal_error_str("refused password"))
+                })
+                .unwrap_err(),
+                PKey::private_key_from_pkcs8_callback(&der, |_| {
+                    Err(ErrorStack::internal_error_str("refused password"))
+                })
+                .unwrap_err(),
+            ] {
+                assert_eq!(error.to_string(), "[refused password]");
+            }
+            assert!(PKey::private_key_from_pem_callback(&pem, |out| Ok(out.len() + 1)).is_err());
+            assert!(PKey::private_key_from_pkcs8_callback(&der, |out| Ok(out.len() + 1)).is_err());
+            let panic = std::panic::catch_unwind(|| {
+                let _ = PKey::private_key_from_pkcs8_callback(&der, |_| {
+                    panic!("password callback panic")
+                });
+            });
+            assert!(panic.is_err());
+        }
     }
 
     #[test]

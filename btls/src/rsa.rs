@@ -611,6 +611,23 @@ mod test {
     }
 
     #[test]
+    fn legacy_pem_accepts_binary_and_empty_passwords() {
+        let key = Rsa::generate(2048).unwrap();
+        for password in [&b"before\0after"[..], &b""[..]] {
+            let pem = key
+                .private_key_to_pem_passphrase(Cipher::aes_128_cbc(), password)
+                .unwrap();
+            let decoded = Rsa::private_key_from_pem_passphrase(&pem, password).unwrap();
+            assert_eq!(decoded.n(), key.n());
+            let error = Rsa::private_key_from_pem_callback(&pem, |_| {
+                Err(ErrorStack::internal_error_str("refused password"))
+            })
+            .unwrap_err();
+            assert_eq!(error.to_string(), "[refused password]");
+        }
+    }
+
+    #[test]
     fn test_from_password_callback() {
         let mut password_queried = false;
         let key = include_bytes!("../test/rsa-encrypted.pem");

@@ -7,7 +7,7 @@ use std::ptr;
 
 use crate::error::ErrorStack;
 use crate::pkey::{HasPrivate, HasPublic, PKeyRef};
-use crate::{cvt, cvt_p};
+use crate::{cvt, cvt_p, util::SecretBytes};
 
 /// A type used to derive a shared secret between two keys.
 pub struct Deriver<'a>(*mut ffi::EVP_PKEY_CTX, PhantomData<&'a ()>);
@@ -106,10 +106,9 @@ impl<'a> Deriver<'a> {
     /// The native length query or derivation fails.
     pub fn derive_to_vec(&mut self) -> Result<Vec<u8>, ErrorStack> {
         let len = self.secret_len()?;
-        let mut buf = vec![0; len];
+        let mut buf = SecretBytes::zeroed(len)?;
         let len = self.derive(&mut buf)?;
-        buf.truncate(len);
-        Ok(buf)
+        buf.into_vec(len)
     }
 }
 

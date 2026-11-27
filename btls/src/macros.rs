@@ -5,22 +5,9 @@ macro_rules! private_key_from_pem {
         $(#[$m2])*
         ///
         /// # Errors
-        ///
-        /// The passphrase contains NUL, the input is invalid, decryption fails, or allocation fails.
+        /// The passphrase exceeds native capacity, the input is invalid, decryption fails, or allocation fails.
         pub fn $n2(pem: &[u8], passphrase: &[u8]) -> Result<$t, crate::error::ErrorStack> {
-            // SAFETY: Both BIO input and C-string password live through synchronous
-            // parsing. The native parser returns an owned object or null.
-            unsafe {
-                ffi::init();
-                let bio = crate::bio::MemBioSlice::new(pem)?;
-                let passphrase = ::std::ffi::CString::new(passphrase)
-                    .map_err(crate::error::ErrorStack::internal_error)?;
-                cvt_p($f(bio.as_ptr(),
-                         ptr::null_mut(),
-                         None,
-                         passphrase.as_ptr().cast_mut().cast()))
-                    .map(|p| ::foreign_types::ForeignType::from_ptr(p))
-            }
+            Self::$n3(pem, |out| crate::util::copy_passphrase(passphrase, out))
         }
 
         $(#[$m3])*
@@ -37,11 +24,12 @@ macro_rules! private_key_from_pem {
                 ffi::init();
                 let mut cb = crate::util::CallbackState::new(callback);
                 let bio = crate::bio::MemBioSlice::new(pem)?;
-                cvt_p($f(bio.as_ptr(),
+                let result = cvt_p($f(bio.as_ptr(),
                          ptr::null_mut(),
                          Some(crate::util::invoke_passwd_cb::<F>),
                          ptr::from_mut(&mut cb).cast()))
-                    .map(|p| ::foreign_types::ForeignType::from_ptr(p))
+                    .map(|p| ::foreign_types::ForeignType::from_ptr(p));
+                cb.finish(result)
             }
         }
     }

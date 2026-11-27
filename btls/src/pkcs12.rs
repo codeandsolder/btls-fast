@@ -12,7 +12,7 @@ use crate::nid::Nid;
 use crate::pkey::{HasPrivate, PKey, PKeyRef, Private};
 use crate::stack::{Stack, StackRef};
 use crate::x509::{X509, X509Ref};
-use crate::{cvt_0i, cvt_p};
+use crate::{cvt_0i, cvt_p, util::SecretCString};
 
 pub const PKCS12_DEFAULT_ITER: c_int = 2048;
 
@@ -60,7 +60,7 @@ impl Pkcs12Ref {
         // and three writable output-pointer slots. Any returned non-null values
         // transfer native ownership to the corresponding Rust wrappers.
         unsafe {
-            let pass = CString::new(pass.as_bytes()).map_err(ErrorStack::internal_error)?;
+            let pass = SecretCString::new(pass.as_bytes())?;
 
             let mut pkey = ptr::null_mut();
             let mut cert = ptr::null_mut();
@@ -95,19 +95,17 @@ impl Pkcs12 {
 
     /// Creates a new builder for a protected pkcs12 certificate.
     ///
-    /// This uses the defaults from the OpenSSL library:
-    ///
-    /// * `nid_key` - `nid::PBE_WITHSHA1AND3_KEY_TRIPLEDES_CBC`
-    /// * `nid_cert` - `nid::PBE_WITHSHA1AND40BITRC2_CBC`
-    /// * `iter` - `2048`
-    /// * `mac_iter` - `2048`
+    /// Uses the native defaults: AES-256-CBC with PBES2/PBKDF2-HMAC-SHA256
+    /// for the private key and certificates, and 2048 iterations for both
+    /// encryption-key and MAC derivation. Choose iteration counts suitable
+    /// for the deployment.
     #[must_use = "Configure or consume the returned builder or cryptographic state."]
     pub fn builder() -> Pkcs12Builder {
         ffi::init();
 
         Pkcs12Builder {
-            nid_key: Nid::UNDEF,  //nid::PBE_WITHSHA1AND3_KEY_TRIPLEDES_CBC,
-            nid_cert: Nid::UNDEF, //nid::PBE_WITHSHA1AND40BITRC2_CBC,
+            nid_key: Nid::UNDEF,
+            nid_cert: Nid::UNDEF,
             iter: PKCS12_DEFAULT_ITER,
             mac_iter: PKCS12_DEFAULT_ITER,
             ca: None,
@@ -166,10 +164,9 @@ impl Pkcs12Builder {
         Ok(self)
     }
 
-    /// MAC iteration count, default is the same as `key_iter`.
+    /// Sets the independent MAC key-derivation iteration count.
     ///
-    /// Old implementations don't understand MAC iterations greater than 1, (pre 1.0.1?), if such
-    /// compatibility is required this should be set to 1.
+    /// Zero requests the native default of 2048 iterations.
     ///
     /// # Errors
     ///
@@ -212,7 +209,7 @@ impl Pkcs12Builder {
         // and optional CA stack remain live through the synchronous creation.
         // A non-null result transfers ownership to the new `Pkcs12`.
         unsafe {
-            let pass = CString::new(password).map_err(ErrorStack::internal_error)?;
+            let pass = SecretCString::new(password.as_bytes())?;
             let friendly_name = CString::new(friendly_name).map_err(ErrorStack::internal_error)?;
             let pkey = pkey.as_ptr();
             let cert = cert.as_ptr();
