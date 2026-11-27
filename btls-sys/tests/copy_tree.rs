@@ -1,9 +1,11 @@
 #[path = "../build/copy_tree.rs"]
 mod copy_tree;
+#[path = "../build/native_input.rs"]
+mod native_input;
 
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Fixture(PathBuf);
@@ -70,5 +72,49 @@ fn rejects_copy_inside_source() -> io::Result<()> {
     let fixture = Fixture::new()?;
     assert!(copy_tree::copy_tree(&fixture.0, &fixture.0.join("nested")).is_err());
     assert!(!fixture.0.join("nested").exists());
+    Ok(())
+}
+
+#[test]
+fn external_native_input_requires_explicit_patch_confirmation() {
+    let path = Some(Path::new("provided"));
+    use native_input::validate_native_input as validate;
+    assert!(validate(None, None, None, false, None).is_ok());
+    assert!(validate(None, None, None, true, None).is_err());
+    assert!(validate(path, None, None, false, None).is_err());
+    assert!(validate(None, path, None, false, None).is_err());
+    assert!(validate(path, None, path, true, None).is_ok());
+    assert!(validate(None, path, None, true, path).is_ok());
+    assert!(validate(path, path, None, true, None).is_err());
+    assert!(validate(path, None, None, true, path).is_err());
+    assert!(validate(None, None, path, false, None).is_err());
+    assert!(validate(None, path, path, true, None).is_err());
+}
+
+#[test]
+fn requires_both_archives_and_respects_platform_layout() -> io::Result<()> {
+    let fixture = Fixture::new()?;
+    let root = &fixture.0;
+    assert!(native_input::find_archives(root, "gnu", None).is_err());
+    fs::create_dir(root.join("crypto"))?;
+    fs::create_dir(root.join("ssl"))?;
+    let crypto = root.join("crypto/libcrypto.a");
+    let ssl = root.join("ssl/libssl.a");
+    fs::write(&crypto, [])?;
+    assert!(native_input::find_archives(root, "gnu", None).is_err());
+    fs::write(&ssl, [])?;
+    assert_eq!(
+        native_input::find_archives(root, "gnu", None)?,
+        [crypto, ssl]
+    );
+    fs::create_dir_all(root.join("lib/Release"))?;
+    let crypto = root.join("lib/Release/crypto.lib");
+    let ssl = root.join("lib/Release/ssl.lib");
+    fs::write(&crypto, [])?;
+    fs::write(&ssl, [])?;
+    assert_eq!(
+        native_input::find_archives(root, "msvc", Some("Release"))?,
+        [crypto, ssl]
+    );
     Ok(())
 }

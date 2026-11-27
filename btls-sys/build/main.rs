@@ -7,14 +7,15 @@ use std::process::ExitCode;
 use std::process::{Command, Output};
 
 use crate::config::Config;
-use crate::prefix::{
-    PREFIX, PrefixCallback, audit_prefixed_symbols, find_archive, regenerate_prefix_symbols,
-};
+use crate::prefix::{PREFIX, PrefixCallback, audit_prefixed_symbols, regenerate_prefix_symbols};
 
 mod cache;
 mod config;
 mod copy_tree;
+mod native_input;
 mod prefix;
+
+use native_input::find_archives;
 
 fn should_use_cmake_cross_compilation(config: &Config) -> bool {
     if config.host == config.target {
@@ -673,9 +674,8 @@ fn get_cpp_runtime_lib(config: &Config) -> Option<String> {
 ///
 /// The destination directory must exist and be empty. Writes:
 ///
-///   - `lib/libcrypto.a`
-///   - `lib/libssl.a`
-///   - `lib/bcm.o` (if FIPS is enabled)
+///   - `lib/` containing both platform-native static archives
+///   - `lib/bcm.o` (if the FIPS build produces a separate module object)
 ///   - `include/openssl/...` (patched headers)
 fn install_artifacts(
     config: &Config,
@@ -693,11 +693,17 @@ fn install_artifacts(
     let lib_dir = install_dir.join("lib");
     fs::create_dir(&lib_dir)?;
 
-    for lib in ["libcrypto.a", "libssl.a", "bcm.o"] {
-        if !config.features.fips && lib == "bcm.o" {
-            continue;
+    for archive in find_archives(bssl_build_dir, &config.target_env, msvc_lib_subdir(config)?)? {
+        let name = archive
+            .file_name()
+            .ok_or("native archive has no file name")?;
+        fs::copy(&archive, lib_dir.join(name))?;
+    }
+    if config.features.fips {
+        let module = bssl_build_dir.join("bcm.o");
+        if module.is_file() {
+            fs::copy(&module, lib_dir.join("bcm.o"))?;
         }
-        fs::copy(bssl_build_dir.join(lib), lib_dir.join(lib))?;
     }
 
     copy_tree::copy_tree(&get_include_path(config)?, &install_dir.join("include"))?;
@@ -752,15 +758,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         let bssl_dir = build_dir
             .as_deref()
             .ok_or("missing native build directory")?;
-        emit_link_directives(&config, bssl_dir)?;
+        let archives = find_archives(bssl_dir, &config.target_env, msvc_lib_subdir(&config)?)?;
+        emit_link_directives(&config, &archives)?;
         if config.features.prefix_symbols && config.env.path.is_none() {
-            let msvc_subdir = msvc_lib_subdir(&config)?;
             // libssl holds the C++ symbols that `prefix_symbols.h` cannot rename, so it
             // needs the audit at least as much as libcrypto does.
-            let archives = ["crypto", "ssl"]
-                .into_iter()
-                .map(|library| find_archive(bssl_dir, &config.target_env, msvc_subdir, library))
-                .collect::<io::Result<Vec<_>>>()?;
             audit_prefixed_symbols(&config.source_dir, &archives, &config.target_os)
                 .map_err(|e| format!("BoringSSL's prefixed symbol audit failed: {e}"))?;
         }
@@ -792,25 +794,13 @@ fn emit_rerun_if_changed(config: &Config) {
     }
 }
 
-fn emit_link_directives(config: &Config, bssl_dir: &Path) -> io::Result<()> {
-    let msvc_lib_subdir = msvc_lib_subdir(config)?;
-
-    let subdirs =
-        if config.is_bazel || (config.features.is_fips_like() && config.env.path.is_some()) {
-            &["lib"][..]
-        } else {
-            &["lib", "crypto", "ssl", ""][..]
-        };
-
-    for subdir in subdirs {
-        let dir = bssl_dir.join(subdir);
-        let dir = msvc_lib_subdir
-            .map(|s| dir.join(s))
-            .filter(|d| d.exists())
-            .unwrap_or(dir);
-        if dir.is_dir() {
-            println!("cargo:rustc-link-search=native={}", dir.display());
-        }
+fn emit_link_directives(config: &Config, archives: &[PathBuf; 2]) -> io::Result<()> {
+    let [crypto, ssl] = archives.each_ref().map(|archive| archive.parent());
+    let crypto = crypto.ok_or_else(|| io::Error::other("crypto archive has no parent"))?;
+    let ssl = ssl.ok_or_else(|| io::Error::other("ssl archive has no parent"))?;
+    println!("cargo:rustc-link-search=native={}", crypto.display());
+    if ssl != crypto {
+        println!("cargo:rustc-link-search=native={}", ssl.display());
     }
 
     if let Some(cpp_lib) = get_cpp_runtime_lib(config) {

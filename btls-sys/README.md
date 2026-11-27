@@ -15,8 +15,11 @@ For a Git checkout, initialize the vendored source before building with
 `git submodule update --init --recursive`. The build does not fetch it.
 Cargo tracks the native source, headers, and patch inputs for rebuilds.
 A caller-provided `BORING_BSSL{,_FIPS}_SOURCE_PATH` must already contain the
-required patches and be accompanied by `BORING_BSSL{,_FIPS}_ASSUME_PATCHED`.
-The build never applies patches to caller-owned sources.
+required patches and be accompanied by `BORING_BSSL{,_FIPS}_ASSUME_PATCHED=1`.
+The same explicit confirmation is mandatory for prebuilt archives supplied via
+`BORING_BSSL{,_FIPS}_PATH`. The caller must ensure the native revision, ABI,
+features, patches and headers match; the build never patches caller-owned inputs.
+Separate header overrides are supported only with prebuilt archives.
 
 ## Speeding up the build
 

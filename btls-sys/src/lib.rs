@@ -67,9 +67,3 @@ pub const fn cbs_init(data: &[u8]) -> CBS {
         len: data.len(),
     }
 }
-
-pub mod internal {
-    // BoringSSL now exposes this in the public `openssl/tls_prf.h`, so bindgen
-    // generates it; kept as a re-export so the old path still works.
-    pub use super::CRYPTO_tls1_prf;
-}
