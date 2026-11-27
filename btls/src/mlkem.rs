@@ -34,8 +34,44 @@ pub const SHARED_SECRET_BYTES: usize = ffi::MLKEM_SHARED_SECRET_BYTES as usize;
 /// Raw bytes of the private key seed ([`PRIVATE_KEY_SEED_BYTES`] long)
 pub type MlKemPrivateKeySeed = [u8; PRIVATE_KEY_SEED_BYTES];
 
-/// Raw bytes of the shared secret ([`SHARED_SECRET_BYTES`] long)
-pub type MlKemSharedSecret = [u8; SHARED_SECRET_BYTES];
+/// Owned shared secret, cleansed on drop and redacted in debug output.
+/// Borrow the bytes for use in a key derivation function or AEAD.
+pub struct MlKemSharedSecret([u8; SHARED_SECRET_BYTES]);
+
+impl MlKemSharedSecret {
+    /// Borrows the fixed-width shared secret without copying it.
+    #[must_use = "Use the secret only in the intended key derivation operation."]
+    pub const fn as_bytes(&self) -> &[u8; SHARED_SECRET_BYTES] {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for MlKemSharedSecret {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl PartialEq for MlKemSharedSecret {
+    fn eq(&self, other: &Self) -> bool {
+        crate::memcmp::eq(&self.0, &other.0)
+    }
+}
+
+impl Eq for MlKemSharedSecret {}
+
+impl fmt::Debug for MlKemSharedSecret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("MlKemSharedSecret([redacted])")
+    }
+}
+
+impl Drop for MlKemSharedSecret {
+    fn drop(&mut self) {
+        // SAFETY: the owned secret is exclusively writable during destruction.
+        unsafe { ffi::OPENSSL_cleanse(self.0.as_mut_ptr().cast(), self.0.len()) };
+    }
+}
 
 /// ML-KEM runtime algorithm selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,24 +226,40 @@ impl MlKemPrivateKey {
         }
     }
 
+    /// Derives the public key from this private key, including after seed restoration.
+    /// # Errors
+    /// Native public-key encoding fails or returns an unexpected length.
+    pub fn public_key(&self) -> Result<MlKemPublicKey, ErrorStack> {
+        match &self.0 {
+            Either::MlKem768(sk) => sk
+                .public_key()
+                .map(|key| MlKemPublicKey(Either::MlKem768(Arc::new(key)))),
+            Either::MlKem1024(sk) => sk
+                .public_key()
+                .map(|key| MlKemPublicKey(Either::MlKem1024(Arc::new(key)))),
+        }
+    }
+
     /// Decapsulates a shared secret from a ciphertext using the private key.
     ///
+    /// An invalid ciphertext of the correct length produces a deterministic,
+    /// pseudorandom fallback secret (implicit rejection), not an error. Use
+    /// authenticated encryption or explicit key confirmation to detect rejection.
     /// # Errors
-    ///
-    /// Returns an error if the ciphertext length does not match the parameter set.
+    /// The ciphertext length is incorrect or the native operation fails.
     pub fn decapsulate(&self, ciphertext: &[u8]) -> Result<MlKemSharedSecret, ErrorStack> {
         match &self.0 {
             Either::MlKem768(sk) => {
                 let ct: &[u8; MlKem768PrivateKey::CIPHERTEXT_BYTES] = ciphertext
                     .try_into()
                     .map_err(|_| ErrorStack::internal_error_str("invalid ciphertext length"))?;
-                Ok(sk.decapsulate(ct))
+                sk.decapsulate(ct)
             }
             Either::MlKem1024(sk) => {
                 let ct: &[u8; MlKem1024PrivateKey::CIPHERTEXT_BYTES] = ciphertext
                     .try_into()
                     .map_err(|_| ErrorStack::internal_error_str("invalid ciphertext length"))?;
-                Ok(sk.decapsulate(ct))
+                sk.decapsulate(ct)
             }
         }
     }
@@ -252,7 +304,15 @@ macro_rules! define_mlkem {
                         Ok(())
                     })
                 }?;
-                Ok((Arc::new($public::from_slice(&bytes)?), private))
+                // SAFETY: generation initialized the immutable expanded key.
+                // Reuse its parsed public representation rather than reparse the
+                // serialized bytes that the same native generator just wrote.
+                let parsed = unsafe {
+                    let mut public = MaybeUninit::<ffi::$native_public>::zeroed();
+                    ffi::$derive_public(public.as_mut_ptr(), private.expanded_ptr());
+                    public.assume_init()
+                };
+                Ok((Arc::new($public { bytes, parsed }), private))
             }
 
             /// Restore private key from seed.
@@ -269,7 +329,6 @@ macro_rules! define_mlkem {
             }
 
             /// Derive the public key.
-            #[cfg(test)]
             fn public_key(&self) -> Result<$public, ErrorStack> {
                 // SAFETY: expanded key is valid, buffers correctly sized
                 unsafe {
@@ -284,9 +343,20 @@ macro_rules! define_mlkem {
                         bytes.as_mut_ptr(),
                         bytes.len(),
                     ))?;
-                    let result = cvt(ffi::$marshal(cbb.as_mut_ptr(), parsed.as_ptr()));
+                    let result = cvt(ffi::$marshal(cbb.as_mut_ptr(), parsed.as_ptr()))
+                        .and_then(|()| cvt(ffi::CBB_flush(cbb.as_mut_ptr())));
+                    let written = if result.is_ok() {
+                        ffi::CBB_len(cbb.as_ptr())
+                    } else {
+                        0
+                    };
                     ffi::CBB_cleanup(cbb.as_mut_ptr());
                     result?;
+                    if written != bytes.len() {
+                        return Err(ErrorStack::internal_error_str(
+                            "invalid encoded ML-KEM public key length",
+                        ));
+                    }
 
                     Ok($public {
                         bytes,
@@ -296,20 +366,22 @@ macro_rules! define_mlkem {
             }
 
             /// Decapsulate to get the shared secret.
-            fn decapsulate(&self, ciphertext: &[u8; Self::CIPHERTEXT_BYTES]) -> MlKemSharedSecret {
+            fn decapsulate(
+                &self,
+                ciphertext: &[u8; Self::CIPHERTEXT_BYTES],
+            ) -> Result<MlKemSharedSecret, ErrorStack> {
                 // SAFETY: expanded key is valid, ciphertext is correctly sized
                 unsafe {
                     ffi::init();
-                    let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
+                    let mut shared_secret = MlKemSharedSecret([0; SHARED_SECRET_BYTES]);
 
-                    ffi::$decap(
-                        shared_secret.as_mut_ptr(),
+                    cvt(ffi::$decap(
+                        shared_secret.0.as_mut_ptr(),
                         ciphertext.as_ptr(),
                         ciphertext.len(),
                         self.expanded_ptr(),
-                    );
-
-                    shared_secret
+                    ))?;
+                    Ok(shared_secret)
                 }
             }
         }
@@ -359,11 +431,11 @@ macro_rules! define_mlkem {
                 unsafe {
                     ffi::init();
                     let mut ciphertext = [0u8; $private::CIPHERTEXT_BYTES];
-                    let mut shared_secret = [0u8; SHARED_SECRET_BYTES];
+                    let mut shared_secret = MlKemSharedSecret([0; SHARED_SECRET_BYTES]);
 
                     ffi::$encap(
                         ciphertext.as_mut_ptr(),
-                        shared_secret.as_mut_ptr(),
+                        shared_secret.0.as_mut_ptr(),
                         &raw const self.parsed,
                     );
 
@@ -427,7 +499,7 @@ mod tests {
                 fn roundtrip() {
                     let (pk, sk) = <$priv>::generate().unwrap();
                     let (ct, ss1) = pk.encapsulate();
-                    let ss2 = sk.decapsulate(&ct);
+                    let ss2 = sk.decapsulate(&ct).unwrap();
                     assert_eq!(ss1, ss2);
                 }
 
@@ -436,7 +508,7 @@ mod tests {
                     let (pk, sk) = <$priv>::generate().unwrap();
                     let sk2 = <$priv>::from_seed(&sk.seed).unwrap();
                     let (ct, ss1) = pk.encapsulate();
-                    let ss2 = sk2.decapsulate(&ct);
+                    let ss2 = sk2.decapsulate(&ct).unwrap();
                     assert_eq!(ss1, ss2);
                 }
 
@@ -464,8 +536,8 @@ mod tests {
                     let (_, sk) = <$priv>::generate().unwrap();
                     let bad_ct = [0x42u8; $ct_len];
                     // bad ciphertext still "works", just returns deterministic garbage
-                    let ss1 = sk.decapsulate(&bad_ct);
-                    let ss2 = sk.decapsulate(&bad_ct);
+                    let ss1 = sk.decapsulate(&bad_ct).unwrap();
+                    let ss2 = sk.decapsulate(&bad_ct).unwrap();
                     assert_eq!(ss1, ss2);
                 }
 
@@ -506,6 +578,18 @@ mod tests {
                     }
 
                     #[test]
+                    fn restored_public_key_matches_generated_key() {
+                        let (generated, private) = MlKemPrivateKey::generate($algorithm).unwrap();
+                        let restored =
+                            MlKemPrivateKey::from_seed($algorithm, private.seed_bytes()).unwrap();
+                        let public = restored.public_key().unwrap();
+                        assert_eq!(generated.as_bytes(), public.as_bytes());
+                        let (ciphertext, secret) = public.encapsulate();
+                        assert_eq!(secret, private.decapsulate(&ciphertext).unwrap());
+                        assert_eq!(format!("{secret:?}"), "MlKemSharedSecret([redacted])");
+                    }
+
+                    #[test]
                     fn key_sizes() {
                         assert_eq!($algorithm.public_key_bytes(), $pk_len);
                         assert_eq!($algorithm.ciphertext_bytes(), $ct_len);
@@ -516,7 +600,7 @@ mod tests {
 
                         let (ct, ss) = pk.encapsulate();
                         assert_eq!(ct.len(), $ct_len);
-                        assert_eq!(ss.len(), SHARED_SECRET_BYTES);
+                        assert_eq!(ss.as_bytes().len(), SHARED_SECRET_BYTES);
                     }
 
                     #[test]
