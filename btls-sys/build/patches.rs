@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 use std::io;
+use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Condition {
@@ -40,7 +41,9 @@ pub fn series() -> io::Result<Vec<Patch>> {
                     )));
                 }
             };
-            if !file.ends_with(".patch")
+            if !Path::new(file)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("patch"))
                 || !file
                     .bytes()
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_'))

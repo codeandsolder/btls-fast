@@ -150,7 +150,11 @@ fn patch_manifest_covers_every_patch() -> io::Result<()> {
         .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
         .collect::<io::Result<Vec<_>>>()?
         .into_iter()
-        .filter(|name| name.ends_with(".patch"))
+        .filter(|name| {
+            Path::new(name)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("patch"))
+        })
         .collect();
     assert_eq!(listed, disk);
     // These are mandatory for both FIPS and normal native builds.
