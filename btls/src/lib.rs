@@ -21,8 +21,9 @@
 //!
 //! ## Environment variables
 //!
-//! This crate uses various environment variables to tweak how btls is built. The variables
-//! are all prefixed by `BORING_BSSL_` for non-FIPS builds, and by `BORING_BSSL_FIPS_` for FIPS builds.
+//! Native source, binary and toolchain-path overrides use `BORING_BSSL_` for
+//! non-FIPS builds and `BORING_BSSL_FIPS_` for FIPS builds. Runtime library and
+//! compiler launcher settings apply to both configurations.
 //!
 //! ## Support for pre-built binaries or custom source
 //!
@@ -58,10 +59,10 @@
 //!
 //! ## Linking with a C++ standard library
 //!
-//! Recent versions of boringssl require some C++ standard library features, so btls needs to link
-//! with a STL implementation. This can be controlled using the `BORING_BSSL_RUST_CPPLIB` variable. If
-//! no library is specified, libc++ is used on macOS and iOS whereas libstdc++ is used on other Unix
-//! systems.
+//! `BoringSSL` requires a C++ runtime. The `BORING_BSSL_RUST_CPPLIB` variable
+//! can override the nonempty library name. By default, libc++ is selected on
+//! Apple, Android, `FreeBSD` and `OpenBSD` targets, libstdc++ on other Unix
+//! and GNU targets, and no explicit C++ runtime on MSVC.
 //!
 //! # Optional patches
 //!
