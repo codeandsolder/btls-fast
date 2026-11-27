@@ -1,0 +1,137 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 9a2004041..823f17894 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2370,6 +2370,17 @@ OPENSSL_EXPORT int SSL_client_session_uses_builtin_authentication(
+ OPENSSL_EXPORT int SSL_check_client_session_x509(
+     const SSL *ssl, const SSL_SESSION *session);
+ 
++// SSL_verify_peer_cert_chain performs the built-in X.509 verification
++// procedure on the current peer chain, including any X.509 verification
++// callbacks, without modifying the session. Unlike normal handshakes, this
++// explicitly requested check is strict even with SSL_VERIFY_NONE. Returns
++// X509_V_OK on acceptance or the X509_V_ERR_* code on failure. Call only when
++// no other verification of this connection is active. The native custom
++// verify callback is not invoked. No error queue entries from this check
++// remain on return.
++OPENSSL_EXPORT long SSL_verify_peer_cert_chain(SSL *ssl);
++
++
+ 
+ // SSL_DEFAULT_SESSION_TIMEOUT is the default lifetime, in seconds, of a
+ // session in TLS 1.2 or earlier. This is how long we are willing to use the
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index b0c9d596a..45f73f3f7 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -200,7 +200,8 @@ static void ssl_crypto_x509_session_clear(SSLSession *session) {
+ }
+ 
+ static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
+-                                               SSL_HANDSHAKE *hs,
++                                               SSLImpl *ssl,
++                                               bool allow_unverified,
+                                                long *out_verify_result,
+                                                uint8_t *out_alert) {
+   if (session->peer_cert_type != TLSEXT_cert_type_x509) {
+@@ -212,11 +213,11 @@ static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
+     return false;
+   }
+ 
+-  SSLImpl *const ssl = hs->ssl;
++  SSL_CONFIG *const config = ssl->config.get();
+   SSLContext *ssl_ctx = ssl->ctx.get();
+   X509_STORE *verify_store = ssl_ctx->cert_store;
+-  if (hs->config->cert->verify_store != nullptr) {
+-    verify_store = hs->config->cert->verify_store;
++  if (config->cert->verify_store != nullptr) {
++    verify_store = config->cert->verify_store;
+   }
+ 
+   X509 *leaf = sk_X509_value(cert_chain, 0);
+@@ -236,7 +237,7 @@ static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
+           ssl->server ? "ssl_client" : "ssl_server") ||  //
+       // Anything non-default in "param" should overwrite anything in the ctx.
+       !X509_VERIFY_PARAM_set1(X509_STORE_CTX_get0_param(ctx.get()),
+-                              hs->config->param) ||  //
++                              config->param) ||  //
+       // ClientHelloOuter connections use a different name.
+       (name_len != 0 &&  //
+        !X509_VERIFY_PARAM_set1_host(X509_STORE_CTX_get0_param(ctx.get()), name,
+@@ -245,8 +246,8 @@ static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
+     return false;
+   }
+ 
+-  if (hs->config->verify_callback) {
+-    X509_STORE_CTX_set_verify_cb(ctx.get(), hs->config->verify_callback);
++  if (config->verify_callback) {
++    X509_STORE_CTX_set_verify_cb(ctx.get(), config->verify_callback);
+   }
+ 
+   int verify_ret;
+@@ -260,7 +261,7 @@ static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
+   *out_verify_result = X509_STORE_CTX_get_error(ctx.get());
+ 
+   // If `SSL_VERIFY_NONE`, the error is non-fatal, but we keep the result.
+-  if (verify_ret <= 0 && hs->config->verify_mode != SSL_VERIFY_NONE) {
++  if (verify_ret <= 0 && !allow_unverified) {
+     *out_alert = SSL_alert_from_verify_result(*out_verify_result);
+     return false;
+   }
+@@ -272,8 +273,9 @@ static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
+ static bool ssl_crypto_x509_session_verify_cert_chain(SSLSession *session,
+                                                       SSL_HANDSHAKE *hs,
+                                                       uint8_t *out_alert) {
+-  return ssl_crypto_x509_verify_cert_chain(session, hs, &session->verify_result,
+-                                            out_alert);
++  return ssl_crypto_x509_verify_cert_chain(
++      session, hs->ssl, hs->config->verify_mode == SSL_VERIFY_NONE,
++      &session->verify_result, out_alert);
+ }
+ 
+ static void ssl_crypto_x509_hs_flush_cached_ca_names(SSL_HANDSHAKE *hs) {
+@@ -462,12 +464,34 @@ int SSL_check_client_session_x509(const SSL *ssl,
+   }
+   long verify_result = X509_V_ERR_UNSPECIFIED;
+   uint8_t alert = SSL_AD_INTERNAL_ERROR;
+-  bool ok = ssl_crypto_x509_verify_cert_chain(cached, impl->s3->hs.get(),
+-                                              &verify_result, &alert);
++  bool ok = ssl_crypto_x509_verify_cert_chain(cached, impl->s3->hs->ssl,
++                                              false, &verify_result, &alert);
+   ERR_clear_error();
+   return ok;
+ }
+ 
++long SSL_verify_peer_cert_chain(SSL *ssl) {
++  auto *impl = FromOpaque(ssl);
++  if (impl->ctx->x509_method != &ssl_crypto_x509_method || !impl->config ||
++      (!impl->s3->hs && !impl->s3->established_session)) {
++    return X509_V_ERR_INVALID_CALL;
++  }
++  const SSLSession *session = ssl_get_session(impl);
++  if (session == nullptr || session->peer_cert_type != TLSEXT_cert_type_x509 ||
++      !session->x509_chain || sk_X509_num(session->x509_chain) == 0) {
++    return X509_V_ERR_INVALID_CALL;
++  }
++  long verify_result = X509_V_ERR_UNSPECIFIED;
++  uint8_t alert = SSL_AD_INTERNAL_ERROR;
++  bool ok = ssl_crypto_x509_verify_cert_chain(session, impl, false,
++                                              &verify_result, &alert);
++  ERR_clear_error();
++  if (ok) {
++    return X509_V_OK;
++  }
++  return verify_result == X509_V_OK ? X509_V_ERR_UNSPECIFIED : verify_result;
++}
++
+ int SSL_CTX_set_purpose(SSL_CTX *ctx, int purpose) {
+   auto *ctx_impl = FromOpaque(ctx);
+   check_ssl_ctx_x509_method(ctx_impl);
+@@ -523,7 +547,6 @@ X509_VERIFY_PARAM *SSL_get0_param(SSL *ssl) {
+   auto *ssl_impl = FromOpaque(ssl);
+   check_ssl_x509_method(ssl_impl);
+   if (!ssl_impl->config) {
+-    assert(ssl_impl->config);
+     return nullptr;
+   }
+   return ssl_impl->config->param;
