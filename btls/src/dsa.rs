@@ -144,15 +144,15 @@ where
     pub fn check_private_key(&self) -> Result<(), ErrorStack> {
         let mut ctx = BigNumContext::new()?;
         validate_public_components(self.p(), self.q(), self.g(), self.pub_key(), &mut ctx)?;
-        validated_private_scalar(
+        let mut private = self.priv_key().to_owned()?;
+        validate_private_scalar(
             self.p(),
             self.q(),
             self.g(),
-            self.priv_key(),
+            &mut private,
             self.pub_key(),
             &mut ctx,
-        )?;
-        Ok(())
+        )
     }
 
     /// Returns a reference to the private key component of `self`.
@@ -257,15 +257,15 @@ fn validate_public_components(
 
 // Native constant-time exponentiation uses the stored word width, so import
 // the private scalar at the public subgroup width, including leading zeroes.
-fn validated_private_scalar(
+fn validate_private_scalar(
     p: &BigNumRef,
     q: &BigNumRef,
     g: &BigNumRef,
-    private: &BigNumRef,
+    private: &mut BigNum,
     public: &BigNumRef,
     ctx: &mut BigNumContextRef,
-) -> Result<BigNum, ErrorStack> {
-    if private.is_negative() || private.num_bits() == 0 || private >= q {
+) -> Result<(), ErrorStack> {
+    if private.is_negative() || private.num_bits() == 0 || &**private >= q {
         return Err(ErrorStack::internal_error_str("invalid DSA private scalar"));
     }
     let mut bytes = SecretBytes::zeroed(q.num_bytes())?;
@@ -278,7 +278,7 @@ fn validated_private_scalar(
             private.as_ptr(),
         ))?;
     }
-    let private = BigNum::from_slice(&bytes)?;
+    private.copy_from_slice(&bytes)?;
     let result = BigNum::new()?;
     // SAFETY: group validation established an odd positive modulus and a
     // reduced base. Native exponentiation uses the padded scalar width.
@@ -295,7 +295,7 @@ fn validated_private_scalar(
     if &*result != public {
         return Err(ErrorStack::internal_error_str("inconsistent DSA key pair"));
     }
-    Ok(private)
+    Ok(())
 }
 
 impl Dsa<Params> {
@@ -385,12 +385,12 @@ impl Dsa<Private> {
         p: BigNum,
         q: BigNum,
         g: BigNum,
-        priv_key: BigNum,
+        mut priv_key: BigNum,
         pub_key: BigNum,
     ) -> Result<Self, ErrorStack> {
         let mut ctx = BigNumContext::new()?;
         validate_public_components(&p, &q, &g, &pub_key, &mut ctx)?;
-        let priv_key = validated_private_scalar(&p, &q, &g, &priv_key, &pub_key, &mut ctx)?;
+        validate_private_scalar(&p, &q, &g, &mut priv_key, &pub_key, &mut ctx)?;
         let mut dsa = Dsa::<Params>::from_parameters(p, q, g)?;
         dsa.install_key(pub_key, Some(priv_key))?;
         // SAFETY: successful installation establishes both key components.
@@ -463,27 +463,21 @@ mod test {
     #[test]
     fn test_pubkey_generation() {
         let dsa = Dsa::generate(1024).unwrap();
-        let p = dsa.p();
-        let g = dsa.g();
-        let priv_key = dsa.priv_key();
-        let pub_key = dsa.pub_key();
-        let mut ctx = BigNumContext::new().unwrap();
-        let validated =
-            validated_private_scalar(p, dsa.q(), g, priv_key, pub_key, &mut ctx).unwrap();
-        assert_eq!(&validated, priv_key);
+        dsa.check_private_key().unwrap();
+    }
+
+    fn group(key: &DsaRef<Private>) -> (BigNum, BigNum, BigNum) {
+        (
+            key.p().to_owned().unwrap(),
+            key.q().to_owned().unwrap(),
+            key.g().to_owned().unwrap(),
+        )
     }
 
     #[test]
     fn validates_component_keys() {
         let key = Dsa::generate(1024).unwrap();
-        let components = || {
-            (
-                key.p().to_owned().unwrap(),
-                key.q().to_owned().unwrap(),
-                key.g().to_owned().unwrap(),
-            )
-        };
-        let (p, q, g) = components();
+        let (p, q, g) = group(&key);
         let reconstructed = Dsa::from_private_components(
             p,
             q,
@@ -495,7 +489,7 @@ mod test {
         assert_eq!(reconstructed.priv_key(), key.priv_key());
         assert_eq!(reconstructed.pub_key(), key.pub_key());
         reconstructed.check_private_key().unwrap();
-        let (p, q, g) = components();
+        let (p, q, g) = group(&key);
         // A small scalar must be accepted and padded to the public subgroup width.
         let scalar_one = Dsa::from_private_components(
             p,
@@ -506,57 +500,32 @@ mod test {
         )
         .unwrap();
         assert_eq!(scalar_one.pub_key(), key.g());
-        let (p, q, g) = components();
+        let (p, q, g) = group(&key);
         let public =
             Dsa::from_public_components(p, q, g, key.pub_key().to_owned().unwrap()).unwrap();
         assert_eq!(public.pub_key(), key.pub_key());
         public.check_public_key().unwrap();
-        let (p, q, g) = components();
-        assert!(
-            Dsa::from_private_components(
-                p,
-                q,
-                g,
-                BigNum::from_u32(0).unwrap(),
-                key.pub_key().to_owned().unwrap()
-            )
-            .is_err()
-        );
-        let (p, q, g) = components();
-        assert!(
-            Dsa::from_private_components(
-                p,
-                q,
-                g,
-                key.q().to_owned().unwrap(),
-                key.pub_key().to_owned().unwrap()
-            )
-            .is_err()
-        );
-        let (p, q, g) = components();
-        // Both candidate public values are valid subgroup elements, but they
-        // correspond to different private scalars.
-        let wrong_public = if key.pub_key() == key.g() {
-            let mut square = BigNum::new().unwrap();
-            square
-                .mod_exp(
-                    key.g(),
-                    &BigNum::from_u32(2).unwrap(),
-                    key.p(),
-                    &mut BigNumContext::new().unwrap(),
-                )
-                .unwrap();
-            square
-        } else {
-            key.g().to_owned().unwrap()
+    }
+
+    #[test]
+    fn rejects_invalid_private_components() {
+        let key = Dsa::generate(1024).unwrap();
+        let import = |private| {
+            let (p, q, g) = group(&key);
+            Dsa::from_private_components(p, q, g, private, key.g().to_owned().unwrap())
         };
-        assert!(
-            Dsa::from_private_components(p, q, g, key.priv_key().to_owned().unwrap(), wrong_public)
-                .is_err()
-        );
-        let (p, q, g) = components();
+        assert!(import(BigNum::from_u32(0).unwrap()).is_err());
+        assert!(import(key.q().to_owned().unwrap()).is_err());
+        // g is a valid subgroup element but corresponds to scalar one, not two.
+        assert!(import(BigNum::from_u32(2).unwrap()).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_public_components() {
+        let key = Dsa::generate(1024).unwrap();
+        let (p, q, g) = group(&key);
         assert!(Dsa::from_public_components(p, q, g, BigNum::from_u32(1).unwrap()).is_err());
-        let (p, q, _) = components();
+        let (p, q, _) = group(&key);
         assert!(
             Dsa::from_public_components(
                 p,
@@ -566,11 +535,11 @@ mod test {
             )
             .is_err()
         );
-        let (p, q, g) = components();
+        let (p, q, g) = group(&key);
         let mut outside_subgroup = p.to_owned().unwrap();
         outside_subgroup.sub_word(1).unwrap();
         assert!(Dsa::from_public_components(p, q, g, outside_subgroup).is_err());
-        let (p, _, g) = components();
+        let (p, _, g) = group(&key);
         assert!(
             Dsa::from_public_components(
                 p,
@@ -579,6 +548,16 @@ mod test {
                 key.pub_key().to_owned().unwrap()
             )
             .is_err()
+        );
+        // p² is odd and still congruent to one modulo q, but not prime.
+        let (_, q, g) = group(&key);
+        let mut composite = BigNum::new().unwrap();
+        composite
+            .sqr(key.p(), &mut BigNumContext::new().unwrap())
+            .unwrap();
+        assert!(
+            Dsa::from_public_components(composite, q, g, key.pub_key().to_owned().unwrap())
+                .is_err()
         );
     }
 
