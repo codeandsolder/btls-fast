@@ -5,6 +5,25 @@
 //! corresponding public key to verify the integrity and authenticity of that
 //! data given the signature.
 //!
+//! Streaming operations preserve a digest snapshot for repeated signing or verification.
+//! Single-message operations use `new_oneshot` or `new_without_digest` and consume
+//! the operation when signing or verifying. They cannot accept streaming updates.
+//!
+//! ```compile_fail
+//! use btls::{hash::MessageDigest, pkey::{Id, PKey}, sign::Signer};
+//! let key = PKey::generate(Id::ED25519).unwrap();
+//! let mut signer = Signer::new_without_digest(&key).unwrap();
+//! signer.update(b"prefix").unwrap();
+//! ```
+//!
+//! ```compile_fail
+//! use btls::{pkey::{Id, PKey}, sign::Signer};
+//! let key = PKey::generate(Id::ED25519).unwrap();
+//! let signer = Signer::new_without_digest(&key).unwrap();
+//! let _ = signer.sign_oneshot_to_vec(b"first");
+//! let _ = signer.sign_oneshot_to_vec(b"second");
+//! ```
+//!
 //! # Examples
 //!
 //! Sign and verify data given an RSA keypair:
@@ -68,10 +87,18 @@ impl RsaPssSaltlen {
     /// The salt length is set to the digest length.
     /// Corresponds to the special value `-1`.
     pub const DIGEST_LENGTH: Self = Self(-1);
-    /// The salt length is set to the maximum permissible value.
+    /// Signing uses the maximum permissible salt length; verification auto-detects it.
     /// Corresponds to the special value `-2`.
     pub const MAXIMUM_LENGTH: Self = Self(-2);
 }
+
+/// Incremental signature operation. A failed digest update invalidates the operation.
+pub struct Streaming {
+    failed: bool,
+}
+
+/// A single-message signature operation. Final signing or verification consumes it.
+pub struct OneShot;
 
 // The two operation types differ only in native initialization/update and
 // their key capability bound. Both own a native digest context and borrow
@@ -79,56 +106,81 @@ impl RsaPssSaltlen {
 macro_rules! signature_operation {
     ($(#[$doc:meta])* $kind:ident, $bound:ident, $init:ident, $update:ident) => {
         $(#[$doc])*
-        pub struct $kind<'a> {
+        pub struct $kind<'a, M = Streaming> {
             md_ctx: *mut ffi::EVP_MD_CTX,
             pctx: *mut ffi::EVP_PKEY_CTX,
             _p: PhantomData<&'a ()>,
+            mode: M,
         }
 
         // SAFETY: A native operation context is not thread-affine. Moving the
         // unique Rust owner between threads preserves the key's borrowed lifetime.
-        unsafe impl Send for $kind<'_> {}
+        unsafe impl<M: Send> Send for $kind<'_, M> {}
 
-        impl Drop for $kind<'_> {
+        impl<M> Drop for $kind<'_, M> {
             fn drop(&mut self) {
                 // SAFETY: This value owns md_ctx; pctx is released by the same call.
                 unsafe { EVP_MD_CTX_free(self.md_ctx) };
             }
         }
 
-        impl<'a> $kind<'a> {
-            /// Creates a new signature operation.
-            ///
-            /// This cannot be used with Ed25519 or Ed448 keys. Please refer to
-            /// `new_without_digest`.
-            ///
+        impl<'a> $kind<'a, Streaming> {
+            /// Creates an incremental prehashed signature operation.
+            /// Use [`Self::update`] followed by the streaming signature operation.
+            /// For single-message algorithms, use the [`OneShot`] specialization instead.
             /// # Errors
-            ///
-            /// The native context cannot be allocated or the digest/key combination is unsupported.
+            /// The native context cannot be allocated or the digest/key combination
+            /// does not support incremental signature operations.
             #[corresponds($init)]
             pub fn new<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
             where
                 T: $bound,
             {
-                Self::new_intern(Some(type_), pkey)
+                let operation = Self::new_intern(Some(type_), pkey, Streaming { failed: false })?;
+                // SAFETY: the initialized native context owns its digest, if any.
+                if unsafe { ffi::EVP_MD_CTX_get0_md(operation.md_ctx) }.is_null() {
+                    return Err(ErrorStack::internal_error_str("signature algorithm does not support incremental hashing"));
+                }
+                Ok(operation)
             }
 
-            /// Creates a new signature operation without a digest.
-            ///
-            /// Use this constructor for Ed25519 and other algorithms without a prehash.
-            ///
+            fn require_active(&self) -> Result<(), ErrorStack> {
+                if self.mode.failed {
+                    Err(ErrorStack::internal_error_str("signature digest update failed"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        impl<'a> $kind<'a, OneShot> {
+            /// Creates a single-message signature operation with an explicit digest.
+            /// The operation cannot accept streaming updates, and signing or verifying consumes it.
             /// # Errors
-            ///
+            /// The native context cannot be allocated or the digest/key combination is unsupported.
+            #[corresponds($init)]
+            pub fn new_oneshot<T>(type_: MessageDigest, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
+            where
+                T: $bound,
+            {
+                Self::new_intern(Some(type_), pkey, OneShot)
+            }
+
+            /// Creates a single-message signature operation without a digest.
+            /// Use this constructor for Ed25519 and other algorithms without a prehash.
+            /// # Errors
             /// The native context cannot be allocated or this key requires an explicit digest.
             #[corresponds($init)]
             pub fn new_without_digest<T>(pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
             where
                 T: $bound,
             {
-                Self::new_intern(None, pkey)
+                Self::new_intern(None, pkey, OneShot)
             }
+        }
 
-            fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>) -> Result<Self, ErrorStack>
+        impl<'a, M> $kind<'a, M> {
+            fn new_intern<T>(type_: Option<MessageDigest>, pkey: &'a PKeyRef<T>, mode: M) -> Result<Self, ErrorStack>
             where
                 T: $bound,
             {
@@ -139,6 +191,7 @@ macro_rules! signature_operation {
                     md_ctx: ctx,
                     pctx: ptr::null_mut(),
                     _p: PhantomData,
+                    mode,
                 };
                 // SAFETY: operation owns ctx and borrows a live key for 'a.
                 // The result stores a borrowed pkey context owned by the digest context.
@@ -229,6 +282,9 @@ macro_rules! signature_operation {
                 }
             }
 
+        }
+
+        impl $kind<'_, Streaming> {
             /// Feeds more data into the signature operation.
             ///
             /// Please note that PureEdDSA (Ed25519 and Ed448 keys) do not support streaming.
@@ -239,19 +295,20 @@ macro_rules! signature_operation {
             /// The algorithm does not support streaming or native digest processing fails.
             #[corresponds($update)]
             pub fn update(&mut self, buf: &[u8]) -> Result<(), ErrorStack> {
+                self.require_active()?;
                 // SAFETY: The live context is exclusively borrowed and buf is readable
                 // for buf.len() bytes throughout the native call.
-                unsafe {
-                    cvt(ffi::$update(
-                        self.md_ctx,
-                        buf.as_ptr().cast(),
-                        buf.len(),
-                    ))
+                let result = unsafe {
+                    cvt(ffi::$update(self.md_ctx, buf.as_ptr().cast(), buf.len()))
+                };
+                if result.is_err() {
+                    self.mode.failed = true;
                 }
+                result
             }
         }
 
-        impl Write for $kind<'_> {
+        impl Write for $kind<'_, Streaming> {
             fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
                 self.update(buf)?;
                 Ok(buf.len())
@@ -279,16 +336,16 @@ signature_operation!(
     EVP_DigestVerifyUpdate
 );
 
-impl Signer<'_> {
+impl<M> Signer<'_, M> {
     /// Computes an upper bound on the signature length.
     ///
-    /// The actual signature may be shorter than this value. Check the return value of
-    /// `sign` to get the exact length.
+    /// The actual signature may be shorter than this value. The signing operation
+    /// returns the exact length.
     ///
     /// # Errors
     ///
     /// Native signature initialization or capacity calculation fails.
-    #[corresponds(EVP_DigestSignFinal)]
+    #[corresponds(EVP_DigestSign)]
     pub fn signature_capacity(&mut self) -> Result<usize, ErrorStack> {
         // SAFETY: this signer exclusively owns a live digest context. The
         // native call queries the capacity through a writable size slot and
@@ -305,8 +362,11 @@ impl Signer<'_> {
             Ok(len)
         }
     }
+}
 
-    /// Writes the signature into the provided buffer, returning the number of bytes written.
+impl Signer<'_, Streaming> {
+    /// Writes the signature of the current digest snapshot into the provided buffer.
+    /// The digest is preserved, allowing additional updates or repeated snapshots.
     ///
     /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
@@ -316,6 +376,7 @@ impl Signer<'_> {
     /// The supplied buffer is too small or native signing fails.
     #[corresponds(EVP_DigestSignFinal)]
     pub fn sign(&mut self, buf: &mut [u8]) -> Result<usize, ErrorStack> {
+        self.require_active()?;
         // SAFETY: the signer exclusively owns its live digest context; the
         // output buffer and its writable length slot remain valid for the call.
         unsafe {
@@ -343,11 +404,13 @@ impl Signer<'_> {
         buf.truncate(len);
         Ok(buf)
     }
+}
 
-    /// Signs the data in data_buf and writes the signature into the buffer sig_buf, returning the
-    /// number of bytes written.
+impl Signer<'_, OneShot> {
+    /// Signs exactly `data_buf`, consuming the single-message operation and writing
+    /// the signature into `sig_buf`.
     ///
-    /// For PureEdDSA (Ed25519 and Ed448 keys) this is the only way to sign data.
+    /// This is the only supported operation for Ed25519 and other non-prehashed signatures.
     ///
     /// This method will fail if the buffer is not large enough for the signature. Use `signature_capacity`
     /// method to get an upper bound on the required size.
@@ -356,11 +419,7 @@ impl Signer<'_> {
     ///
     /// The output is too small or the native one-shot signing operation fails.
     #[corresponds(EVP_DigestSign)]
-    pub fn sign_oneshot(
-        &mut self,
-        sig_buf: &mut [u8],
-        data_buf: &[u8],
-    ) -> Result<usize, ErrorStack> {
+    pub fn sign_oneshot(self, sig_buf: &mut [u8], data_buf: &[u8]) -> Result<usize, ErrorStack> {
         // SAFETY: this signer owns the native digest context exclusively;
         // both input and writable output slices stay live with exact lengths.
         unsafe {
@@ -383,7 +442,7 @@ impl Signer<'_> {
     /// # Errors
     ///
     /// Capacity calculation or native one-shot signing fails.
-    pub fn sign_oneshot_to_vec(&mut self, data_buf: &[u8]) -> Result<Vec<u8>, ErrorStack> {
+    pub fn sign_oneshot_to_vec(mut self, data_buf: &[u8]) -> Result<Vec<u8>, ErrorStack> {
         let mut sig_buf = vec![0; self.signature_capacity()?];
         let len = self.sign_oneshot(&mut sig_buf, data_buf)?;
         // The advertised length is not always equal to the real length for things like DSA
@@ -392,14 +451,14 @@ impl Signer<'_> {
     }
 }
 
-impl Verifier<'_> {
-    /// Determines if the data fed into the `Verifier` matches the provided signature.
-    ///
+impl Verifier<'_, Streaming> {
+    /// Verifies the signature against the current digest snapshot without consuming it.
+    /// A native rejection, including a malformed signature, returns `Ok(false)`.
     /// # Errors
-    ///
-    /// Native verification fails for reasons other than a signature mismatch.
+    /// An earlier digest update failed or the native result is unexpected.
     #[corresponds(EVP_DigestVerifyFinal)]
     pub fn verify(&mut self, signature: &[u8]) -> Result<bool, ErrorStack> {
+        self.require_active()?;
         // SAFETY: the native verification context remains live and uniquely
         // borrowed; signature bytes remain readable for the synchronous call.
         unsafe {
@@ -414,14 +473,15 @@ impl Verifier<'_> {
             }
         }
     }
+}
 
-    /// Determines if the data given in buf matches the provided signature.
-    ///
+impl Verifier<'_, OneShot> {
+    /// Verifies a signature over exactly `buf`, consuming this single-message operation.
+    /// A native rejection, including a malformed signature, returns `Ok(false)`.
     /// # Errors
-    ///
-    /// Native verification fails for reasons other than a signature mismatch.
+    /// The native result is unexpected.
     #[corresponds(EVP_DigestVerify)]
-    pub fn verify_oneshot(&mut self, signature: &[u8], buf: &[u8]) -> Result<bool, ErrorStack> {
+    pub fn verify_oneshot(self, signature: &[u8], buf: &[u8]) -> Result<bool, ErrorStack> {
         // SAFETY: both borrowed slices and the exclusive native verification
         // context stay valid until BoringSSL returns its checked status code.
         unsafe {
@@ -519,6 +579,85 @@ mod test {
         let mut verifier = Verifier::new(MessageDigest::sha256(), &key).unwrap();
         verifier.update(b"hello world").unwrap();
         assert!(verifier.verify(&signature).unwrap());
+    }
+
+    #[test]
+    fn streaming_snapshots_and_single_message_signatures_agree() {
+        let key =
+            PKey::from_rsa(Rsa::private_key_from_pem(include_bytes!("../test/rsa.pem")).unwrap())
+                .unwrap();
+        let md = MessageDigest::sha256();
+        let mut signer = Signer::new(md, &key).unwrap();
+        signer.update(b"first").unwrap();
+        let first = signer.sign_to_vec().unwrap();
+        assert_eq!(
+            first,
+            Signer::new_oneshot(md, &key)
+                .unwrap()
+                .sign_oneshot_to_vec(b"first")
+                .unwrap()
+        );
+        signer.update(b"second").unwrap();
+        let both = signer.sign_to_vec().unwrap();
+        assert_eq!(
+            both,
+            Signer::new_oneshot(md, &key)
+                .unwrap()
+                .sign_oneshot_to_vec(b"firstsecond")
+                .unwrap()
+        );
+        let mut verifier = Verifier::new(md, &key).unwrap();
+        verifier.update(b"first").unwrap();
+        assert!(verifier.verify(&first).unwrap());
+        assert!(!verifier.verify(&both).unwrap());
+        verifier.update(b"second").unwrap();
+        assert!(verifier.verify(&both).unwrap());
+        assert!(
+            Verifier::new_oneshot(md, &key)
+                .unwrap()
+                .verify_oneshot(&both, b"firstsecond")
+                .unwrap()
+        );
+        assert!(
+            !Verifier::new_oneshot(md, &key)
+                .unwrap()
+                .verify_oneshot(&both, b"second")
+                .unwrap()
+        );
+        assert!(
+            Signer::new_oneshot(md, &key)
+                .unwrap()
+                .sign_oneshot(&mut [], b"first")
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn single_message_ed25519_does_not_accept_a_prehash() {
+        use crate::pkey::Id;
+        let key = PKey::generate(Id::ED25519).unwrap();
+        let md = MessageDigest::sha256();
+        assert!(Signer::new(md, &key).is_err());
+        assert!(Verifier::new(md, &key).is_err());
+        assert!(Signer::new_oneshot(md, &key).is_err());
+        assert!(Verifier::new_oneshot(md, &key).is_err());
+        let signature = Signer::new_without_digest(&key)
+            .unwrap()
+            .sign_oneshot_to_vec(b"")
+            .unwrap();
+        assert_eq!(signature.len(), 64);
+        assert!(
+            Verifier::new_without_digest(&key)
+                .unwrap()
+                .verify_oneshot(&signature, b"")
+                .unwrap()
+        );
+        assert!(
+            !Verifier::new_without_digest(&key)
+                .unwrap()
+                .verify_oneshot(&signature, b"different")
+                .unwrap()
+        );
     }
 
     #[test]

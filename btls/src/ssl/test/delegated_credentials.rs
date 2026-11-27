@@ -138,7 +138,7 @@ fn make_delegated_credential(
     signed.extend_from_slice(&credential);
     push_u16(&mut signed, DC_SIGNATURE_ALGORITHM);
 
-    let mut signer = Signer::new(MessageDigest::sha256(), certificate_key).unwrap();
+    let mut signer = Signer::new_oneshot(MessageDigest::sha256(), certificate_key).unwrap();
     signer.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
     signer
         .set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)
