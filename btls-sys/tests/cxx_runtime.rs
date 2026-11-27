@@ -138,6 +138,14 @@ fn reads_cmake_file_api_and_bundles_only_selected_archive() -> io::Result<()> {
         fs::read(fixture.0.join("cxx-runtime/libbtls_cxx_runtime_0.a"))?,
         fs::read(&runtime)?
     );
+    let export = fixture.0.join("export");
+    fs::create_dir(&export)?;
+    cxx_runtime::export_archives(&export, &selected)?;
+    assert_eq!(fs::read(export.join("libstdc++.a"))?, fs::read(&runtime)?);
+    assert_eq!(
+        resolve(None, std::slice::from_ref(&export), None)?,
+        [export.join("libstdc++.a")]
+    );
     fs::write(&runtime, b"INPUT(libstdc++.so)")?;
     assert!(cxx_runtime::emit(&fixture.0, &selected).is_err());
     Ok(())

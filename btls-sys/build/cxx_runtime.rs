@@ -237,6 +237,35 @@ pub fn resolve(
     Ok(archives)
 }
 
+fn validate_archive(archive: &Path) -> io::Result<PathBuf> {
+    let source = archive.canonicalize()?;
+    let mut magic = [0; 8];
+    fs::File::open(&source)?.read_exact(&mut magic)?;
+    if &magic != b"!<arch>\n" {
+        return Err(invalid(format!(
+            "{} is not a self-contained static archive",
+            source.display()
+        )));
+    }
+    println!("cargo:rerun-if-changed={}", archive.display());
+    if source != *archive {
+        println!("cargo:rerun-if-changed={}", source.display());
+    }
+    Ok(source)
+}
+
+/// Include the exact runtime archives in packages produced for prebuilt use.
+pub fn export_archives(directory: &Path, archives: &[PathBuf]) -> io::Result<()> {
+    for archive in archives {
+        let source = validate_archive(archive)?;
+        let name = archive
+            .file_name()
+            .ok_or_else(|| invalid("native runtime archive has no name"))?;
+        fs::copy(source, directory.join(name))?;
+    }
+    Ok(())
+}
+
 /// Copy the selected archives to distinct private names. This both avoids
 /// shadowing by a different native search directory and bundles the exact
 /// target runtime in the Rust rlib rather than relying on a final-link host.
@@ -245,19 +274,7 @@ pub fn emit(out: &Path, archives: &[PathBuf]) -> io::Result<()> {
     fs::create_dir_all(&directory)?;
     println!("cargo:rustc-link-search=native={}", directory.display());
     for (index, archive) in archives.iter().enumerate() {
-        let source = archive.canonicalize()?;
-        let mut magic = [0; 8];
-        fs::File::open(&source)?.read_exact(&mut magic)?;
-        if &magic != b"!<arch>\n" {
-            return Err(invalid(format!(
-                "{} is not a self-contained static archive",
-                source.display()
-            )));
-        }
-        println!("cargo:rerun-if-changed={}", archive.display());
-        if source != *archive {
-            println!("cargo:rerun-if-changed={}", source.display());
-        }
+        let source = validate_archive(archive)?;
         let name = format!("btls_cxx_runtime_{index}");
         fs::copy(&source, directory.join(format!("lib{name}.a")))?;
         println!("cargo:rustc-link-lib=static={name}");

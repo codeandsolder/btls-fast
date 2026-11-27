@@ -74,8 +74,9 @@
 //! dependency. A missing or ambiguous runtime is an error, never a dynamic
 //! fallback. With externally built BoringSSL, supply the matching static
 //! runtime archives beside libssl/libcrypto; the compiler ABI must match.
+//! Exporting a static-runtime build includes these archives in the package.
 //! Use the existing runtime-name override to disambiguate if both are
-//! provided. Other targets should use their normal platform runtime.
+//! provided. On other targets the feature leaves the platform runtime unchanged.
 //! This feature does not statically link libc or change its minimum ABI;
 //! final executable distribution still needs a compatible build sysroot.
 //!

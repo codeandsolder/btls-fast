@@ -680,11 +680,16 @@ fn install_artifacts(
     let lib_dir = install_dir.join("lib");
     fs::create_dir(&lib_dir)?;
 
-    for archive in find_archives(bssl_build_dir, &config.target_env, msvc_lib_subdir(config)?)? {
+    let archives = find_archives(bssl_build_dir, &config.target_env, msvc_lib_subdir(config)?)?;
+    for archive in &archives {
         let name = archive
             .file_name()
             .ok_or("native archive has no file name")?;
-        fs::copy(&archive, lib_dir.join(name))?;
+        fs::copy(archive, lib_dir.join(name))?;
+    }
+    if config.static_cxx_runtime() {
+        let runtime = resolve_static_runtime(config, bssl_build_dir, &archives)?;
+        cxx_runtime::export_archives(&lib_dir, &runtime)?;
     }
     if config.features.fips {
         let module = bssl_build_dir.join("bcm.o");
@@ -781,6 +786,33 @@ fn emit_rerun_if_changed(config: &Config) {
     }
 }
 
+fn resolve_static_runtime(
+    config: &Config,
+    build: &Path,
+    archives: &[PathBuf; 2],
+) -> io::Result<Vec<PathBuf>> {
+    let compiler = if config.env.path.is_none() {
+        Some(cxx_runtime::toolchain(build)?)
+    } else {
+        None
+    };
+    let explicit = config
+        .env
+        .cpp_runtime_lib
+        .as_ref()
+        .map(|name| {
+            name.to_str()
+                .ok_or_else(|| io::Error::other("C++ runtime name is not Unicode"))
+        })
+        .transpose()?;
+    let directories = archives
+        .iter()
+        .filter_map(|path| path.parent())
+        .map(Path::canonicalize)
+        .collect::<io::Result<Vec<_>>>()?;
+    cxx_runtime::resolve(compiler.as_ref(), &directories, explicit)
+}
+
 fn emit_link_directives(config: &Config, build: &Path, archives: &[PathBuf; 2]) -> io::Result<()> {
     let mut previous = None;
     for archive in archives {
@@ -796,26 +828,7 @@ fn emit_link_directives(config: &Config, build: &Path, archives: &[PathBuf; 2]) 
     println!("cargo:rustc-link-lib=static=ssl");
     println!("cargo:rustc-link-lib=static=crypto");
     if config.static_cxx_runtime() {
-        let compiler = if config.env.path.is_none() {
-            Some(cxx_runtime::toolchain(build)?)
-        } else {
-            None
-        };
-        let explicit = config
-            .env
-            .cpp_runtime_lib
-            .as_ref()
-            .map(|name| {
-                name.to_str()
-                    .ok_or_else(|| io::Error::other("C++ runtime name is not Unicode"))
-            })
-            .transpose()?;
-        let directories = archives
-            .iter()
-            .filter_map(|path| path.parent())
-            .map(Path::canonicalize)
-            .collect::<io::Result<Vec<_>>>()?;
-        let runtime = cxx_runtime::resolve(compiler.as_ref(), &directories, explicit)?;
+        let runtime = resolve_static_runtime(config, build, archives)?;
         cxx_runtime::emit(&config.out_dir, &runtime)?;
     } else if config.linux_cxx_runtime()
         && config.env.path.is_none()
