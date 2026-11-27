@@ -36,7 +36,7 @@ fn trusted_with_set_cert() {
 
     let mut client = server.client();
     client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
-    client.ctx().set_verify_cert_store(store.build()).unwrap();
+    client.ctx().set_verify_cert_store(&store.build()).unwrap();
 
     client.connect();
 }

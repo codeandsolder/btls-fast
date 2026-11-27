@@ -1927,7 +1927,7 @@ fn peer_signature_algorithm_mtls_server_sees_client() {
         store.add_cert(X509::from_pem(ROOT_CERT).unwrap()).unwrap();
         server_builder
             .ctx()
-            .set_verify_cert_store(store.build())
+            .set_verify_cert_store(&store.build())
             .unwrap();
         server_builder
             .ctx()
@@ -2017,7 +2017,7 @@ fn signature_algorithm_used_mtls_client() {
         store.add_cert(X509::from_pem(ROOT_CERT).unwrap()).unwrap();
         server_builder
             .ctx()
-            .set_verify_cert_store(store.build())
+            .set_verify_cert_store(&store.build())
             .unwrap();
         server_builder
             .ctx()

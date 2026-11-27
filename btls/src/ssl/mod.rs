@@ -61,7 +61,7 @@ use foreign_types::{ForeignType, ForeignTypeRef, Opaque};
 use openssl_macros::corresponds;
 use std::convert::TryInto;
 use std::ffi::{CStr, CString};
-use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong, c_void};
+use std::ffi::{c_char, c_int, c_long, c_uchar, c_uint, c_ulong};
 use std::fmt;
 use std::io::prelude::*;
 use std::io::{self, IoSlice};
@@ -97,8 +97,7 @@ use crate::util::native_input;
 use crate::x509::store::{X509Store, X509StoreBuilder, X509StoreBuilderRef, X509StoreRef};
 use crate::x509::verify::X509VerifyParamRef;
 use crate::x509::{
-    X509, X509Name, X509Ref, X509StoreContext, X509StoreContextRef, X509VerifyError,
-    X509VerifyResult,
+    X509, X509Name, X509Ref, X509StoreContextRef, X509VerifyError, X509VerifyResult,
 };
 use crate::{cvt, cvt_0i, cvt_n, cvt_p, init};
 use crate::{ffi, free_data_box};
@@ -509,16 +508,6 @@ static SSL_CALLBACKS: LazyLock<IndexRegistry<Ssl, CallbackRole>> =
 
 static SESSION_CTX_INDEX: IndexSlot<Ssl, SslContext> = IndexSlot::new(Ssl::new_ex_index);
 static X509_FLAG_INDEX: IndexSlot<SslContext, bool> = IndexSlot::new(SslContext::new_ex_index);
-
-type CertVerifyFn = unsafe extern "C" fn(*mut ffi::X509_STORE_CTX, *mut c_void) -> c_int;
-
-// Native getters are unavailable for these mirrored configuration values.
-static VERIFY_STORE_INDEX: IndexSlot<SslContext, Option<X509Store>> =
-    IndexSlot::new(SslContext::new_ex_index);
-static SSL_VERIFY_STORE_INDEX: IndexSlot<Ssl, Option<X509Store>> =
-    IndexSlot::new(Ssl::new_ex_index);
-static CERT_VERIFY_INDEX: IndexSlot<SslContext, Option<CertVerifyFn>> =
-    IndexSlot::new(SslContext::new_ex_index);
 
 /// An error returned from the SNI callback.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1203,13 +1192,11 @@ impl SslContextBuilder {
     {
         self.ctx.check_x509()?;
 
-        let target = self.ensure_slot(&CERT_VERIFY_INDEX)?;
         self.set_ex_data(
             SslContext::register_callback::<F>(CallbackRole::CertVerify)?,
             callback,
         )?;
-        self.set_ex_data(target, Some(raw_cert_verify::<F> as CertVerifyFn))?;
-        // SAFETY: both registered native callback slots are initialized.
+        // SAFETY: the typed native callback slot is initialized.
         unsafe {
             ffi::SSL_CTX_set_cert_verify_callback(
                 self.as_ptr(),
@@ -1471,19 +1458,17 @@ impl SslContextBuilder {
     /// Sets a custom certificate store for verifying peer certificates.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates. Native store installation or extra-data registration fails.
+    /// The context does not support X.509 certificates or native store installation fails.
     #[corresponds(SSL_CTX_set1_verify_cert_store)]
-    pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
+    pub fn set_verify_cert_store(&mut self, cert_store: &X509StoreRef) -> Result<(), ErrorStack> {
         self.ctx.check_x509()?;
-        let index = self.ensure_slot(&VERIFY_STORE_INDEX)?;
         // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
             cvt(ffi::SSL_CTX_set1_verify_cert_store(
                 self.as_ptr(),
                 cert_store.as_ptr(),
-            ))?;
-        };
-        self.set_ex_data(index, Some(cert_store))
+            ))
+        }
     }
 
     /// Replaces the context's certificate store, and keeps it immutable.
@@ -1540,13 +1525,10 @@ impl SslContextBuilder {
     /// if present, or defaults specified at OpenSSL build time otherwise.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates. Native initialization of the default trust paths fails.
+    /// The store is shared, the context does not support X.509 certificates, or native initialization fails.
     #[corresponds(SSL_CTX_set_default_verify_paths)]
     pub fn set_default_verify_paths(&mut self) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-
-        // SAFETY: The live X509-capable context is exclusively borrowed while native default verification paths are configured.
-        unsafe { cvt(ffi::SSL_CTX_set_default_verify_paths(self.as_ptr())) }
+        self.cert_store_mut()?.set_default_paths()
     }
 
     /// Loads trusted root certificates from a file.
@@ -1560,22 +1542,21 @@ impl SslContextBuilder {
     /// Loads trusted root certificates from a file and/or a directory.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates. A path contains a NUL byte or native certificate loading fails.
+    /// The store is shared, the context does not support X.509 certificates, a path contains a NUL byte, or native loading fails.
     #[corresponds(SSL_CTX_load_verify_locations)]
     pub fn load_verify_locations(
         &mut self,
         ca_file: Option<&Path>,
         ca_path: Option<&Path>,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-
+        let store = self.cert_store_mut()?;
         let ca_file = ca_file.map(path_to_cstring).transpose()?;
         let ca_path = ca_path.map(path_to_cstring).transpose()?;
 
         // SAFETY: Both optional C strings remain live through the native call and null pointers represent missing paths.
         unsafe {
-            cvt(ffi::SSL_CTX_load_verify_locations(
-                self.as_ptr(),
+            cvt(ffi::X509_STORE_load_locations(
+                store.as_ptr(),
                 ca_file.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
                 ca_path.as_ref().map_or(ptr::null(), |s| s.as_ptr()),
             ))
@@ -2423,17 +2404,6 @@ impl SslContextBuilder {
     ) -> Result<Option<T>, ErrorStack> {
         // SAFETY: the unpublished builder guarantees a uniquely owned context.
         unsafe { self.ctx.replace_ex_data(index, data) }
-    }
-
-    fn ensure_slot<T: 'static + Send + Sync>(
-        &mut self,
-        slot: &IndexSlot<SslContext, Option<T>>,
-    ) -> Result<Index<SslContext, Option<T>>, ErrorStack> {
-        let index = slot.register()?;
-        if self.ctx.ex_data(index).is_none() {
-            self.set_ex_data(index, None)?;
-        }
-        Ok(index)
     }
 
     /// Sets the context's session cache size limit, returning the previous limit.
@@ -4006,22 +3976,17 @@ impl SslRef {
     /// Sets a custom certificate store for verifying peer certificates.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates. Native store installation or extra-data registration fails.
+    /// The context does not support X.509 certificates or native store installation fails.
     #[corresponds(SSL_set1_verify_cert_store)]
-    pub fn set_verify_cert_store(&mut self, cert_store: X509Store) -> Result<(), ErrorStack> {
+    pub fn set_verify_cert_store(&mut self, cert_store: &X509StoreRef) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509()?;
-        let index = SSL_VERIFY_STORE_INDEX.register()?;
-        if self.ex_data(index).is_none() {
-            self.set_ex_data(index, None)?;
-        }
         // SAFETY: live native objects; BoringSSL takes its own store reference.
         unsafe {
             cvt(ffi::SSL_set1_verify_cert_store(
                 self.as_ptr(),
                 cert_store.as_ptr(),
-            ))?;
-        };
-        self.set_ex_data(index, Some(cert_store))
+            ))
+        }
     }
 
     /// Like [`SslContextBuilder::set_custom_verify_callback`].
@@ -4563,20 +4528,9 @@ impl SslRef {
             ));
         }
 
-        let changed = self.ssl_context().as_ptr() != ctx.as_ptr();
-        // SAFETY: The borrowed new context is live during the
-        // reconfiguration; native code retains its context reference and
-        // the caller clears stale per-connection verification state.
-        unsafe { cvt_p(ffi::SSL_set_SSL_CTX(self.as_ptr(), ctx.as_ptr()))? };
-        // BoringSSL copied the new context's certificate settings, dropping a per-connection store.
-        if changed
-            && let Some(store) = SSL_VERIFY_STORE_INDEX
-                .get()
-                .and_then(|index| self.ex_data_mut(index))
-        {
-            *store = None;
-        }
-        Ok(())
+        // SAFETY: the borrowed new context is live during reconfiguration;
+        // BoringSSL retains its context reference and replaces certificate settings.
+        unsafe { cvt_p(ffi::SSL_set_SSL_CTX(self.as_ptr(), ctx.as_ptr())).map(|_| ()) }
     }
 
     /// Returns the context corresponding to the current connection.
@@ -4601,7 +4555,10 @@ impl SslRef {
 
         // SAFETY: The X.509-enabled SSL object owns this native verification
         // parameter; the exclusive Rust borrow permits mutable access.
-        Ok(unsafe { X509VerifyParamRef::from_ptr_mut(ffi::SSL_get0_param(self.as_ptr())) })
+        unsafe {
+            cvt_p(ffi::SSL_get0_param(self.as_ptr()))
+                .map(|param| X509VerifyParamRef::from_ptr_mut(param))
+        }
     }
 
     /// Returns the certificate verification result.
@@ -4624,105 +4581,31 @@ impl SslRef {
         unsafe { X509VerifyError::from_raw(code) }
     }
 
-    /// Verifies the peer certificate chain as BoringSSL's built-in X.509 verifier does.
+    /// Runs BoringSSL's built-in X.509 verifier on the current peer chain.
     ///
     /// Call it from [`SslContextBuilder::set_custom_verify_callback`] to keep the built-in checks,
-    /// which lets [`SslContextBuilder::set_reverify_on_resume`] apply them to resumed sessions. It
-    /// uses the same verify store, this connection's [verify parameters](Self::verify_param_mut)
-    /// including the hostname, the ECH public name, and the verify and cert verify callbacks.
+    /// including when [`SslContextBuilder::set_reverify_on_resume`] is enabled. It uses the actual
+    /// native verify store, connection parameters, ECH name override and X.509 verification
+    /// callbacks. It does not call the custom TLS verifier recursively or modify the cached session.
+    /// Unlike implicit handshake verification, this explicit check is strict even with
+    /// [`SslVerifyMode::NONE`]. A mutable borrow excludes recursive invocation from X.509 callbacks,
+    /// which receive only a shared SSL reference through [`X509StoreContextRef::ssl`].
     ///
     /// On a full handshake BoringSSL reports a rejection through [`Self::verify_result`] as
     /// [`X509VerifyError::APPLICATION_VERIFICATION`]; a rejected resumption fails with
     /// `CERTIFICATE_VERIFY_FAILED` and keeps the resumed session's result.
-    #[corresponds(X509_verify_cert)]
-    pub fn verify_peer_cert_chain(&self) -> X509VerifyResult {
-        let context = self.ssl_context();
-        if !context.has_x509_support() {
-            return Err(X509VerifyError::INVALID_CALL);
-        }
-
-        // SAFETY: the context uses the X.509 method, and the session under verification owns the
-        // chain while this connection is borrowed.
-        let chain = unsafe { ffi::SSL_get_peer_full_cert_chain(self.as_ptr()) };
-        if chain.is_null() {
-            return Err(X509VerifyError::INVALID_CALL);
-        }
-        // SAFETY: The peer certificate-chain pointer was checked nonnull above;
-        // the live SSL connection owns the borrowed native X.509 stack.
-        let chain = unsafe { StackRef::<X509>::from_ptr(chain) };
-        let Some(leaf) = chain.get(0) else {
-            return Err(X509VerifyError::INVALID_CALL);
-        };
-
-        let store: &X509StoreRef = match (
-            self.slot_data(&SSL_VERIFY_STORE_INDEX),
-            context.slot_data(&VERIFY_STORE_INDEX),
-        ) {
-            (Some(Some(store)), _) | (_, Some(Some(store))) => store,
-            _ => context
-                .cert_store()
-                .map_err(|_| X509VerifyError::INVALID_CALL)?,
-        };
-
-        let Ok(mut store_ctx) = X509StoreContext::new() else {
-            return Err(X509VerifyError::OUT_OF_MEM);
-        };
-        store_ctx
-            .init(store, leaf, chain, |store_ctx| {
-                let purpose = if self.is_server() {
-                    c"ssl_client"
-                } else {
-                    c"ssl_server"
-                };
-                // SAFETY: mirrors BoringSSL's built-in verifier; `self` outlives `store_ctx`,
-                // which `init` cleans up before returning.
-                let ret = unsafe {
-                    let ctx = store_ctx.as_ptr();
-                    let param = ffi::X509_STORE_CTX_get0_param(ctx);
-                    cvt(ffi::X509_STORE_CTX_set_ex_data(
-                        ctx,
-                        ffi::SSL_get_ex_data_X509_STORE_CTX_idx(),
-                        self.as_ptr().cast(),
-                    ))?;
-                    cvt(ffi::X509_STORE_CTX_set_default(ctx, purpose.as_ptr()))?;
-                    cvt(ffi::X509_VERIFY_PARAM_set1(
-                        param,
-                        ffi::SSL_get0_param(self.as_ptr()),
-                    ))?;
-                    if let Some(name) = self.get_ech_name_override().filter(|name| !name.is_empty())
-                    {
-                        cvt(ffi::X509_VERIFY_PARAM_set1_host(
-                            param,
-                            name.as_ptr().cast(),
-                            name.len(),
-                        ))?;
-                    }
-                    if let Some(callback) = ffi::SSL_get_verify_callback(self.as_ptr()) {
-                        ffi::X509_STORE_CTX_set_verify_cb(ctx, Some(callback));
-                    }
-                    context
-                        .slot_data(&CERT_VERIFY_INDEX)
-                        .and_then(|callback| *callback)
-                        .map_or_else(
-                            || ffi::X509_verify_cert(ctx),
-                            |callback| callback(ctx, ptr::null_mut()),
-                        )
-                };
-
-                // A verify callback may accept a chain with a recorded error; the return decides.
-                Ok(if ret > 0 {
-                    // SAFETY: Clearing the current thread native error queue only affects
-                    // errors from this verification operation, after its result is saved.
-                    unsafe { ffi::ERR_clear_error() };
-                    Ok(())
-                } else {
-                    Err(store_ctx
-                        .verify_result()
-                        .err()
-                        .unwrap_or(X509VerifyError::UNSPECIFIED))
-                })
-            })
-            .unwrap_or(Err(X509VerifyError::UNSPECIFIED))
+    ///
+    /// # Errors
+    /// The peer chain or connection configuration is unavailable, or verification fails.
+    #[corresponds(SSL_verify_peer_cert_chain)]
+    pub fn verify_peer_cert_chain(&mut self) -> X509VerifyResult {
+        // SAFETY: exclusive access to the live SSL permits invoking its X.509
+        // verification callbacks. The native verifier checks the configuration
+        // and peer chain before using either, and leaves the session immutable.
+        let raw = unsafe { ffi::SSL_verify_peer_cert_chain(self.as_ptr()) };
+        let code = c_int::try_from(raw).map_err(|_| X509VerifyError::UNSPECIFIED)?;
+        // SAFETY: the checked native result is a scalar X.509 verification code.
+        unsafe { X509VerifyError::from_raw(code) }
     }
 
     /// Returns a shared reference to the SSL session.
