@@ -2,6 +2,8 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+use crate::native_input::validate_native_input;
+
 pub struct Config {
     pub manifest_dir: PathBuf,
     pub out_dir: PathBuf,
@@ -139,43 +141,13 @@ impl Config {
             );
         }
 
-        let is_precompiled_native_lib = self.env.path.is_some();
-        let is_vendored_source = !is_precompiled_native_lib && self.env.source_path.is_none();
-
-        if self.env.assume_patched && is_vendored_source {
-            return Err(
-                "`BORING_BSSL_{{,_FIPS}}_ASSUME_PATCHED` env variable is supposed to be used with\
-                `BORING_BSSL{{,_FIPS}}_PATH` or `BORING_BSSL{{,_FIPS}}_SOURCE_PATH` env variables",
-            );
-        }
-
-        if self.env.source_path.is_some() && is_precompiled_native_lib {
-            return Err("choose either a precompiled BoringSSL library or a source tree, not both");
-        }
-        if self.env.source_path.is_some() && !self.env.assume_patched {
-            return Err(
-                "external BoringSSL source must be patched before building; set BORING_BSSL{,_FIPS}_ASSUME_PATCHED to confirm. The build does not modify caller-owned sources",
-            );
-        }
-
-        let features_with_patches_enabled = self.features.allow_crl_extensions_bad_version
-            || self.features.rpk
-            || self.features.underscore_wildcards
-            || self.features.relax_cert_validation;
-
-        let patches_required = features_with_patches_enabled && !self.env.assume_patched;
-
-        if is_precompiled_native_lib && patches_required {
-            println!(
-                "cargo:warning=precompiled BoringSSL was provided, so patches will be ignored"
-            );
-        }
-
-        if self.env.export_to_install_dir.is_some() && is_precompiled_native_lib {
-            return Err(
-                "`BORING_BSSL{{,_FIPS_}}INSTALL_DIR` cannot be used together with a precompiled library",
-            );
-        }
+        validate_native_input(
+            self.env.path.as_deref(),
+            self.env.source_path.as_deref(),
+            self.env.include_path.as_deref(),
+            self.env.assume_patched,
+            self.env.export_to_install_dir.as_deref(),
+        )?;
         Ok(())
     }
 }
@@ -237,7 +209,7 @@ impl Env {
             include_path: boringssl_var("BORING_BSSL_INCLUDE_PATH").map(PathBuf::from), // gets BORING_BSSL_FIPS_INCLUDE_PATH if fips is enabled
             source_path: boringssl_var("BORING_BSSL_SOURCE_PATH").map(PathBuf::from), // gets BORING_BSSL_FIPS_SOURCE_PATH if fips is enabled
             assume_patched: boringssl_var("BORING_BSSL_ASSUME_PATCHED") // gets BORING_BSSL_FIPS_ASSUME_PATCHED if fips is enabled
-                .is_some_and(|v| !v.is_empty()),
+                .is_some_and(|v| v == "1"),
             sysroot: boringssl_var("BORING_BSSL_SYSROOT").map(PathBuf::from), // gets BORING_BSSL_FIPS_SYSROOT if fips is enabled
             compiler_external_toolchain: boringssl_var("BORING_BSSL_COMPILER_EXTERNAL_TOOLCHAIN") // gets BORING_BSSL_FIPS_COMPILER_EXTERNAL_TOOLCHAIN if fips is enabled
                 .map(PathBuf::from),

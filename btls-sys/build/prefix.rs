@@ -99,45 +99,6 @@ pub fn audit_prefixed_symbols(
     Ok(())
 }
 
-/// Locates the static archive cmake built for `library`, which is `crypto` or `ssl`.
-pub fn find_archive(
-    build_dir: &Path,
-    target_env: &str,
-    msvc_lib_subdir: Option<&str>,
-    library: &str,
-) -> io::Result<PathBuf> {
-    let library_name = if target_env == "msvc" {
-        format!("{library}.lib")
-    } else {
-        format!("lib{library}.a")
-    };
-    let mut candidates = Vec::new();
-
-    for subdir in ["lib", library, ""] {
-        let dir = build_dir.join(subdir);
-        if let Some(msvc_subdir) = msvc_lib_subdir {
-            candidates.push(dir.join(msvc_subdir).join(&library_name));
-        }
-        candidates.push(dir.join(&library_name));
-    }
-
-    candidates
-        .iter()
-        .find(|path| path.is_file())
-        .cloned()
-        .ok_or_else(|| {
-            let searched = candidates
-                .iter()
-                .map(|path| path.display().to_string())
-                .collect::<Vec<_>>()
-                .join(", ");
-            io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("could not find BoringSSL's {library} archive; searched: {searched}"),
-            )
-        })
-}
-
 fn prepare_generator_workspace(source_root: &Path, generator_root: &Path) -> io::Result<()> {
     if generator_root.exists() {
         fs::remove_dir_all(generator_root)?;
