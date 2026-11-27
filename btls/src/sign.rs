@@ -452,11 +452,10 @@ impl Signer<'_, OneShot> {
 }
 
 impl Verifier<'_, Streaming> {
-    /// Determines if the data fed into the `Verifier` matches the provided signature.
-    ///
+    /// Verifies the signature against the current digest snapshot without consuming it.
+    /// A native rejection, including a malformed signature, returns `Ok(false)`.
     /// # Errors
-    ///
-    /// Native verification fails for reasons other than a signature mismatch.
+    /// An earlier digest update failed or the native result is unexpected.
     #[corresponds(EVP_DigestVerifyFinal)]
     pub fn verify(&mut self, signature: &[u8]) -> Result<bool, ErrorStack> {
         self.require_active()?;
@@ -474,12 +473,13 @@ impl Verifier<'_, Streaming> {
             }
         }
     }
+}
 
-    /// Determines if the data given in buf matches the provided signature.
-    ///
+impl Verifier<'_, OneShot> {
+    /// Verifies a signature over exactly `buf`, consuming this single-message operation.
+    /// A native rejection, including a malformed signature, returns `Ok(false)`.
     /// # Errors
-    ///
-    /// Native verification fails for reasons other than a signature mismatch.
+    /// The native result is unexpected.
     #[corresponds(EVP_DigestVerify)]
     pub fn verify_oneshot(self, signature: &[u8], buf: &[u8]) -> Result<bool, ErrorStack> {
         // SAFETY: both borrowed slices and the exclusive native verification
