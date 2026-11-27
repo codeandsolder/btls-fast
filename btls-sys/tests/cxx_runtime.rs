@@ -85,7 +85,7 @@ fn prebuilt_requires_supplied_matching_archive_and_rejects_ambiguity() -> io::Re
     let dirs = std::slice::from_ref(&fixture.0);
     assert!(resolve(None, dirs, None).is_err());
     let gnu = fixture.archive("stdc++")?;
-    assert_eq!(resolve(None, dirs, None)?, [gnu.clone()]);
+    assert_eq!(resolve(None, dirs, None)?, std::slice::from_ref(&gnu));
     fixture.archive("c++")?;
     assert!(resolve(None, dirs, None).is_err());
     assert_eq!(resolve(None, dirs, Some("stdc++"))?, [gnu]);
@@ -132,7 +132,7 @@ fn reads_cmake_file_api_and_bundles_only_selected_archive() -> io::Result<()> {
     let runtime = fixture.archive("stdc++")?;
     let compiler = cxx_runtime::toolchain(&fixture.0)?;
     let selected = resolve(Some(&compiler), &[], None)?;
-    assert_eq!(selected, [runtime.clone()]);
+    assert_eq!(selected, std::slice::from_ref(&runtime));
     cxx_runtime::emit(&fixture.0, &selected)?;
     assert_eq!(
         fs::read(fixture.0.join("cxx-runtime/libbtls_cxx_runtime_0.a"))?,
