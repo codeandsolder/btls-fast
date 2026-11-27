@@ -19,7 +19,7 @@ rustdoc-args = ["--cfg", "docsrs"]
 [features]
 default = []
 
-# Use a FIPS-validated version of BoringSSL.
+# Enable the native FIPS build configuration; certification is deployment-specific.
 fips = ["btls-sys/fips"]
 
 # Interface for ML-KEM (FIPS 203) post-quantum key encapsulation. Does not affect ciphers used in TLS.

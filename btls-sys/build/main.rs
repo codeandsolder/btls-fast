@@ -540,6 +540,9 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
         apply_patch(config, "boringssl-audit-symbols.patch")?;
     }
 
+    println!("cargo:warning=applying legacy PEM secret cleanup patch to boringssl");
+    apply_patch(config, "boringssl-pem-secret-cleanup.patch")?;
+
     println!("cargo:warning=applying loongarch patch to boringssl");
     apply_patch(config, "boringssl-loongarch.patch")?;
 

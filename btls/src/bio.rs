@@ -33,6 +33,11 @@ impl<'a> MemBioSlice<'a> {
     pub const fn as_ptr(&self) -> *mut ffi::BIO {
         self.0
     }
+
+    pub fn remaining_len(&self) -> usize {
+        // SAFETY: this live read-only memory BIO borrows its original input.
+        unsafe { ffi::BIO_pending(self.0) }
+    }
 }
 
 pub struct MemBio(*mut ffi::BIO);

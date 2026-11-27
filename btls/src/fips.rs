@@ -1,4 +1,4 @@
-//! FIPS 140-2 support.
+//! Native FIPS mode query.
 //!
 //! See [OpenSSL's documentation] for details.
 //!
@@ -6,7 +6,7 @@
 use crate::ffi;
 use openssl_macros::corresponds;
 
-/// Determines if the library is running in the FIPS 140-2 mode of operation.
+/// Returns whether the native library reports FIPS mode. This is not a certification check.
 #[corresponds(FIPS_mode)]
 #[must_use = "Use this predicate to decide how to handle the current value or connection."]
 pub fn enabled() -> bool {

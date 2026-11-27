@@ -5,20 +5,35 @@ use crate::cvt;
 use crate::error::ErrorStack;
 use crate::hash::MessageDigest;
 use crate::symm::Cipher;
+use crate::util::SecretBytes;
 use std::fmt;
 
-/// Key and optional IV derived for a legacy cipher.
-#[derive(Eq, PartialEq)]
+/// Key and optional IV derived for a legacy cipher. The owned material is
+/// cleansed on drop; callers borrow the key and IV without copying them.
 pub struct KeyIvPair {
-    pub key: Vec<u8>,
-    pub iv: Option<Vec<u8>>,
+    key: SecretBytes,
+    iv: Option<SecretBytes>,
+}
+
+impl KeyIvPair {
+    /// Borrows the derived key.
+    #[must_use = "Use the derived key for the intended cryptographic operation."]
+    pub fn key(&self) -> &[u8] {
+        &self.key
+    }
+
+    /// Borrows the derived IV if the cipher uses one.
+    #[must_use = "Use the derived IV when initializing the selected cipher."]
+    pub fn iv(&self) -> Option<&[u8]> {
+        self.iv.as_deref()
+    }
 }
 
 impl fmt::Debug for KeyIvPair {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("KeyIvPair")
             .field("key_len", &self.key.len())
-            .field("iv_len", &self.iv.as_ref().map(Vec::len))
+            .field("iv_len", &self.iv().map(<[u8]>::len))
             .finish_non_exhaustive()
     }
 }
@@ -64,9 +79,11 @@ pub fn bytes_to_key(
         ));
     }
     ffi::init();
-    let mut key = vec![0; key_len];
-    let mut iv = iv_len.map(|len| vec![0; len]);
-    let iv_ptr = iv.as_mut().map_or(ptr::null_mut(), Vec::as_mut_ptr);
+    let mut key = SecretBytes::zeroed(key_len)?;
+    let mut iv = iv_len.map(SecretBytes::zeroed).transpose()?;
+    let iv_ptr = iv
+        .as_deref_mut()
+        .map_or(ptr::null_mut(), <[u8]>::as_mut_ptr);
     // SAFETY: the salt is null or exactly eight bytes; key and IV allocations
     // match the native cipher widths. The descriptors and input stay live.
     let result = unsafe {
@@ -82,12 +99,6 @@ pub fn bytes_to_key(
         )
     };
     if usize::try_from(result).ok() != Some(key_len) {
-        // SAFETY: each allocated output remains exclusively writable.
-        unsafe { ffi::OPENSSL_cleanse(key.as_mut_ptr().cast(), key.len()) };
-        if let Some(iv) = &mut iv {
-            // SAFETY: this allocated IV is exclusively writable.
-            unsafe { ffi::OPENSSL_cleanse(iv.as_mut_ptr().cast(), iv.len()) };
-        }
         if result <= 0 {
             return Err(ErrorStack::get());
         }
@@ -277,30 +288,26 @@ mod tests {
             233_u8, 136_u8, 139_u8, 27_u8, 71_u8, 242_u8, 119_u8, 175_u8, 65_u8, 207_u8,
         ];
 
-        let expected_key = vec![
+        let expected_key = [
             249_u8, 115_u8, 114_u8, 97_u8, 32_u8, 213_u8, 165_u8, 146_u8, 58_u8, 87_u8, 234_u8,
             3_u8, 43_u8, 250_u8, 97_u8, 114_u8, 26_u8, 98_u8, 245_u8, 246_u8, 238_u8, 177_u8,
             229_u8, 161_u8, 183_u8, 224_u8, 174_u8, 3_u8, 6_u8, 244_u8, 236_u8, 255_u8,
         ];
-        let expected_iv = vec![
+        let expected_iv = [
             4_u8, 223_u8, 153_u8, 219_u8, 28_u8, 142_u8, 234_u8, 68_u8, 227_u8, 69_u8, 98_u8,
             107_u8, 208_u8, 14_u8, 236_u8, 60_u8,
         ];
 
-        assert_eq!(
-            super::bytes_to_key(
-                Cipher::aes_256_cbc(),
-                MessageDigest::sha1(),
-                &data,
-                Some(&salt),
-                1,
-            )
-            .unwrap(),
-            super::KeyIvPair {
-                key: expected_key,
-                iv: Some(expected_iv),
-            }
-        );
+        let pair = super::bytes_to_key(
+            Cipher::aes_256_cbc(),
+            MessageDigest::sha1(),
+            &data,
+            Some(&salt),
+            1,
+        )
+        .unwrap();
+        assert_eq!(pair.key(), expected_key);
+        assert_eq!(pair.iv(), Some(expected_iv.as_slice()));
     }
 
     #[test]

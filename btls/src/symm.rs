@@ -60,7 +60,7 @@ use std::ptr;
 
 use crate::error::ErrorStack;
 use crate::nid::Nid;
-use crate::{cvt, cvt_p, try_int};
+use crate::{cvt, cvt_p, try_int, util::SecretBytes};
 
 #[derive(Copy, Clone)]
 pub enum Mode {
@@ -723,16 +723,14 @@ fn cipher(
     data: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
     let mut c = Crypter::new(t, mode, key, iv)?;
-    let mut out = vec![
-        0;
-        data.len().checked_add(t.block_size()).ok_or_else(|| {
-            ErrorStack::internal_error_str("cipher output length overflow")
-        })?
-    ];
+    let mut out = SecretBytes::zeroed(
+        data.len()
+            .checked_add(t.block_size())
+            .ok_or_else(|| ErrorStack::internal_error_str("cipher output length overflow"))?,
+    )?;
     let count = c.update(data, &mut out)?;
     let rest = c.finalize(&mut out[count..])?;
-    out.truncate(count + rest);
-    Ok(out)
+    out.into_vec(count + rest)
 }
 
 /// Like `encrypt`, but for AEAD ciphers such as AES GCM.
@@ -788,12 +786,11 @@ pub fn decrypt_aead(
     tag: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
     let mut c = Crypter::new(t, Mode::Decrypt, key, iv)?;
-    let mut out = vec![
-        0;
-        data.len().checked_add(t.block_size()).ok_or_else(|| {
-            ErrorStack::internal_error_str("cipher output length overflow")
-        })?
-    ];
+    let mut out = SecretBytes::zeroed(
+        data.len()
+            .checked_add(t.block_size())
+            .ok_or_else(|| ErrorStack::internal_error_str("cipher output length overflow"))?,
+    )?;
 
     c.aad_update(aad)?;
     let count = c.update(data, &mut out)?;
@@ -801,8 +798,7 @@ pub fn decrypt_aead(
     c.set_tag(tag)?;
     let rest = c.finalize(&mut out[count..])?;
 
-    out.truncate(count + rest);
-    Ok(out)
+    out.into_vec(count + rest)
 }
 
 use crate::ffi::{EVP_CIPHER_block_size, EVP_CIPHER_iv_length, EVP_CIPHER_key_length};
