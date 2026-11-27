@@ -182,7 +182,7 @@ impl signature::Signer<Vec<u8>> for BtlsSigner {
         };
         if self.algorithm == Algorithm::EdDSA {
             return Signer::new_without_digest(key)
-                .and_then(|mut signer| signer.sign_oneshot_to_vec(message))
+                .and_then(|signer| signer.sign_oneshot_to_vec(message))
                 .map_err(signature_error);
         }
         let md = digest(self.algorithm).map_err(|_| signature::Error::new())?;
@@ -195,7 +195,7 @@ impl signature::Signer<Vec<u8>> for BtlsSigner {
             raw.extend(sig.s().to_vec_padded(width).map_err(signature_error)?);
             return Ok(raw);
         }
-        let mut signer = Signer::new(md, key).map_err(signature_error)?;
+        let mut signer = Signer::new_oneshot(md, key).map_err(signature_error)?;
         if rsa_pss(self.algorithm) {
             signer
                 .set_rsa_padding(Padding::PKCS1_PSS)
@@ -242,7 +242,7 @@ impl signature::Verifier<Vec<u8>> for BtlsVerifier {
             }
             VerificationKey::Asymmetric(key) if self.algorithm == Algorithm::EdDSA => {
                 Verifier::new_without_digest(key)
-                    .and_then(|mut verifier| verifier.verify_oneshot(signature, message))
+                    .and_then(|verifier| verifier.verify_oneshot(signature, message))
                     .map_err(signature_error)?
             }
             VerificationKey::Asymmetric(key) => {
@@ -264,7 +264,7 @@ impl signature::Verifier<Vec<u8>> for BtlsVerifier {
                     sig.verify_digest(&hashed, &ec).map_err(signature_error)?;
                     true
                 } else {
-                    let mut verifier = Verifier::new(md, key).map_err(signature_error)?;
+                    let mut verifier = Verifier::new_oneshot(md, key).map_err(signature_error)?;
                     if rsa_pss(self.algorithm) {
                         verifier
                             .set_rsa_padding(Padding::PKCS1_PSS)
@@ -523,7 +523,7 @@ mod tests {
             (RsaPssSaltlen::custom(20), MessageDigest::sha256()),
             (RsaPssSaltlen::DIGEST_LENGTH, MessageDigest::sha384()),
         ] {
-            let mut signer = Signer::new(MessageDigest::sha256(), &native_key)?;
+            let mut signer = Signer::new_oneshot(MessageDigest::sha256(), &native_key)?;
             signer.set_rsa_padding(Padding::PKCS1_PSS)?;
             signer.set_rsa_mgf1_md(mgf)?;
             signer.set_rsa_pss_saltlen(salt)?;
