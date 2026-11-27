@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   sync:
-    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@343303848026ed142e48a6a82e7a889080b99b26 # main
+    uses: codeandsolder/ci-workflows/.github/workflows/upstream-tracking.yml@4c7fc62a9f9ec37aaa7c155d263cd5025e446a53 # main
     with:
       upstream-repository: 0x676e67/btls
       upstream-branch: main
