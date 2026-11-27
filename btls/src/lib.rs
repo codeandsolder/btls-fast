@@ -61,8 +61,23 @@
 //!
 //! `BoringSSL` requires a C++ runtime. The `BORING_BSSL_RUST_CPPLIB` variable
 //! can override the nonempty library name. By default, libc++ is selected on
-//! Apple, Android, `FreeBSD` and `OpenBSD` targets, libstdc++ on other Unix
-//! and GNU targets, and no explicit C++ runtime on MSVC.
+//! Apple, `FreeBSD` and `OpenBSD` targets, the NDK's shared libc++ on Android,
+//! and no explicit C++ runtime on MSVC. Linux GNU/musl source builds use
+//! the actual CMake-selected C++ runtime; prebuilt libraries must match
+//! the selected ABI.
+//!
+//! On Linux GNU or musl, executables that must not depend on a shared C++
+//! standard library can enable `static-cxx-runtime` (also automatic for
+//! Linux targets with Rust `crt-static`). The CMake-selected
+//! target compiler determines whether GNU libstdc++ or LLVM libc++ is used.
+//! The corresponding static archives are bundled into the Rust native
+//! dependency. A missing or ambiguous runtime is an error, never a dynamic
+//! fallback. With externally built BoringSSL, supply the matching static
+//! runtime archives beside libssl/libcrypto; the compiler ABI must match.
+//! Use the existing runtime-name override to disambiguate if both are
+//! provided. Other targets should use their normal platform runtime.
+//! This feature does not statically link libc or change its minimum ABI;
+//! final executable distribution still needs a compatible build sysroot.
 //!
 //! # Optional patches
 //!

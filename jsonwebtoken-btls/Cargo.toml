@@ -6,6 +6,9 @@ rust-version.workspace = true
 license = "Apache-2.0"
 description = "BoringSSL crypto provider for jsonwebtoken"
 
+[features]
+static-cxx-runtime = ["btls/static-cxx-runtime"]
+
 [dependencies]
 btls.workspace = true
 jsonwebtoken = { version = "12", default-features = false }

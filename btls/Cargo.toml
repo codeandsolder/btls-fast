@@ -17,6 +17,8 @@ features = ["rpk", "underscore-wildcards", "mlkem", "mldsa"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
+static-cxx-runtime = ["btls-sys/static-cxx-runtime"]
+
 default = []
 
 # Enable the native FIPS build configuration; certification is deployment-specific.

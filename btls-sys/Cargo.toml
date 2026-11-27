@@ -54,6 +54,9 @@ features = ["rpk", "underscore-wildcards", "mlkem"]
 rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
+# Bundle the target compiler’s static C++ runtime on Linux GNU/musl.
+static-cxx-runtime = []
+
 # Compile boringssl using the FIPS build flag if building boringssl from
 # scratch.
 #
@@ -94,3 +97,7 @@ relax-cert-validation = []
 [build-dependencies]
 bindgen = { workspace = true }
 cmake = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

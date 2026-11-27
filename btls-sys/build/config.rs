@@ -26,6 +26,7 @@ pub struct Config {
 )]
 pub struct Features {
     pub fips: bool,
+    pub static_cxx_runtime: bool,
     pub rpk: bool,
     pub underscore_wildcards: bool,
     pub prefix_symbols: bool,
@@ -115,7 +116,24 @@ impl Config {
         Ok(config)
     }
 
+    pub fn linux_cxx_runtime(&self) -> bool {
+        self.target_os == "linux" && matches!(self.target_env.as_str(), "gnu" | "musl")
+    }
+
+    pub fn static_cxx_runtime(&self) -> bool {
+        self.features.static_cxx_runtime
+            || (self.linux_cxx_runtime()
+                && self
+                    .target_features
+                    .iter()
+                    .any(|feature| feature == "crt-static"))
+    }
+
     fn check_feature_compatibility(&self) -> Result<(), &'static str> {
+        if self.features.static_cxx_runtime && !self.linux_cxx_runtime() {
+            return Err("static-cxx-runtime requires a Linux GNU or musl target");
+        }
+
         if self.features.fips && self.features.rpk {
             return Err("`fips` and `rpk` features are mutually exclusive");
         }
@@ -156,6 +174,7 @@ impl Features {
     const fn from_env() -> Self {
         Self {
             fips: cfg!(feature = "fips"),
+            static_cxx_runtime: cfg!(feature = "static-cxx-runtime"),
             rpk: cfg!(feature = "rpk"),
             underscore_wildcards: cfg!(feature = "underscore-wildcards"),
             prefix_symbols: cfg!(feature = "prefix-symbols"),
