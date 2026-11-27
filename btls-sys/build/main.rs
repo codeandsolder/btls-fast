@@ -13,6 +13,7 @@ mod cache;
 mod config;
 mod copy_tree;
 mod native_input;
+mod patches;
 mod prefix;
 
 use native_input::find_archives;
@@ -494,67 +495,11 @@ fn ensure_patches_applied(config: &Config) -> io::Result<()> {
         run_command(Command::new("git").arg("init").current_dir(src_path))?;
     }
 
-    if config.features.allow_crl_extensions_bad_version {
-        println!(
-            "cargo:warning=applying the patch for disabling certificate and \
-            CRL version validation for extensions"
-        );
-        apply_patch(config, "bad-cert-verification.patch")?;
-    }
-
-    println!("cargo:warning=applying post quantum crypto patch to boringssl");
-    apply_patch(config, "boring-pq.patch")?;
-
-    if config.features.rpk {
-        println!("cargo:warning=applying RPK patch to boringssl");
-        apply_patch(config, "rpk.patch")?;
-    }
-
-    if !config.features.fips {
-        for patch_name in [
-            "0001-boringssl-ffdhe.patch",
-            "0002-boringssl-legacy-ciphers.patch",
-            "0003-boringssl-tls-options.patch",
-            "0004-boringssl-extension-order.patch",
-            "0005-record-size-limit.patch",
-            "0006-delegated-credentials.patch",
-            "0007-boringssl-f5-padding.patch",
-            "0008-boringssl-sigalgs.patch",
-            "0009-boringssl-zstd-cert-compression.patch",
-            "0010-boringssl-build-compat.patch",
-            "0011-boringssl-seal-app-data.patch",
-            "0012-boringssl-cheap-error-reset.patch",
-            "0013-ech-grease-payload-policy.patch",
-        ] {
-            println!("cargo:warning=applying {patch_name} to boringssl");
-            apply_patch(config, patch_name)?;
+    for patch in patches::series()? {
+        if config.features.enables_patch(patch.condition) {
+            println!("cargo:warning=applying {} to BoringSSL", patch.file);
+            apply_patch(config, patch.file)?;
         }
-    }
-
-    // FIPS builds compile the same module source, so they need this fix too.
-    println!("cargo:warning=applying rand double-free fix to boringssl");
-    apply_patch(config, "boringssl-rand-double-free.patch")?;
-
-    // Only the symbol audit reads this tool, and only a prefixed build runs it.
-    if config.features.prefix_symbols {
-        println!("cargo:warning=applying symbol audit patch to boringssl");
-        apply_patch(config, "boringssl-audit-symbols.patch")?;
-    }
-
-    println!("cargo:warning=applying legacy PEM secret cleanup patch to boringssl");
-    apply_patch(config, "boringssl-pem-secret-cleanup.patch")?;
-
-    println!("cargo:warning=applying loongarch patch to boringssl");
-    apply_patch(config, "boringssl-loongarch.patch")?;
-
-    if config.features.underscore_wildcards {
-        println!("cargo:warning=applying underscore wildcards patch to boringssl");
-        apply_patch(config, "underscore-wildcards.patch")?;
-    }
-
-    if config.features.relax_cert_validation {
-        println!("cargo:warning=applying RSA key-usage enforcement relaxation patch");
-        apply_patch(config, "relax-cert-validation.patch")?;
     }
 
     Ok(())

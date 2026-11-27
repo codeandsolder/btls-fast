@@ -4,6 +4,17 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      scope:
+        description: Validation scope (tags always run the full suite)
+        type: choice
+        default: all
+        options:
+          - all
+          - native-features
+          - native-asan
+          - prefix-platforms
+          - platforms
 
 permissions:
   contents: read
@@ -14,6 +25,7 @@ env:
 
 jobs:
   test:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'platforms'
     name: Test
     runs-on: ${{ matrix.os }}
     strategy:
@@ -272,6 +284,7 @@ jobs:
         if: always()
 
   test-fips:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'native-features'
     name: Test FIPS integration
     runs-on: ubuntu-latest
     steps:
@@ -309,6 +322,7 @@ jobs:
       if: always()
 
   test-boringssl:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'native-asan'
     name: Test BoringSSL upstream test suite
     runs-on: ubuntu-latest
     steps:
@@ -327,31 +341,13 @@ jobs:
     - name: Apply btls-sys patches
       working-directory: btls-sys/deps/boringssl
       run: |
-        for p in \
-          bad-cert-verification.patch \
-          boring-pq.patch \
-          rpk.patch \
-          0001-boringssl-ffdhe.patch \
-          0002-boringssl-legacy-ciphers.patch \
-          0003-boringssl-tls-options.patch \
-          0004-boringssl-extension-order.patch \
-          0005-record-size-limit.patch \
-          0006-delegated-credentials.patch \
-          0007-boringssl-f5-padding.patch \
-          0008-boringssl-sigalgs.patch \
-          0009-boringssl-zstd-cert-compression.patch \
-          0010-boringssl-build-compat.patch \
-          0011-boringssl-seal-app-data.patch \
-          0012-boringssl-cheap-error-reset.patch \
-          0013-ech-grease-payload-policy.patch \
-          boringssl-rand-double-free.patch \
-          boringssl-pem-secret-cleanup.patch \
-          boringssl-loongarch.patch \
-          underscore-wildcards.patch \
-          relax-cert-validation.patch; do
-          echo "Applying $p"
-          patch -p1 < "../../patches/$p"
-        done
+        # Apply the same ordered manifest as the Cargo build, with every
+        # compatible non-FIPS patch enabled. The symbol-audit tool patch is
+        # harmless without prefixing and keeps this source identical to CI.
+        while read -r condition file; do
+          echo "Applying $file ($condition)"
+          git apply --whitespace=fix "../../patches/$file"
+        done < ../../patches/series
     - name: Install pinned Rust
       run: rustup show
     - name: Resolve fleet compiler
@@ -388,6 +384,7 @@ jobs:
       if: always()
 
   cross-build:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'platforms'
     name: Cross build from macOS to Linux
     runs-on: macos-latest
     strategy:
@@ -432,6 +429,7 @@ jobs:
         if: always()
 
   test-features:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'native-features'
     name: Test features
     runs-on: ubuntu-latest
     steps:
@@ -460,7 +458,7 @@ jobs:
       # expectations describe an older BoringSSL than the vendored one.
       - name: Run `prefix-symbols` tests with every compatible feature
         run: |
-          cargo test -p btls \
+          cargo test --locked -p btls \
             --features prefix-symbols,prf,mlkem,mldsa,credential,rpk,underscore-wildcards,relax-cert-validation
       - name: Run `allow-crl-extensions-bad-version` tests
         run: cargo test --locked -p btls-sys --features allow-crl-extensions-bad-version
@@ -489,6 +487,7 @@ jobs:
         if: always()
 
   prefix-symbols:
+    if: github.event_name != 'workflow_dispatch' || inputs.scope == 'all' || inputs.scope == 'prefix-platforms'
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:

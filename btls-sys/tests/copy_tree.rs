@@ -2,6 +2,8 @@
 mod copy_tree;
 #[path = "../build/native_input.rs"]
 mod native_input;
+#[path = "../build/patches.rs"]
+mod patches;
 
 use std::fs;
 use std::io;
@@ -135,5 +137,32 @@ fn archive_resolution_preserves_directory_priority() -> io::Result<()> {
         native_input::find_archives(root, "gnu", None)?,
         [preferred_ssl, crypto]
     );
+    Ok(())
+}
+
+#[test]
+fn patch_manifest_covers_every_patch() -> io::Result<()> {
+    use patches::Condition;
+    use std::collections::BTreeSet;
+    let series = patches::series()?;
+    let listed: BTreeSet<_> = series.iter().map(|patch| patch.file.to_owned()).collect();
+    let disk: BTreeSet<_> = fs::read_dir(Path::new(env!("CARGO_MANIFEST_DIR")).join("patches"))?
+        .map(|entry| entry.map(|entry| entry.file_name().to_string_lossy().into_owned()))
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|name| name.ends_with(".patch"))
+        .collect();
+    assert_eq!(listed, disk);
+    // These are mandatory for both FIPS and normal native builds.
+    for name in [
+        "boringssl-rand-double-free.patch",
+        "boringssl-pem-secret-cleanup.patch",
+    ] {
+        assert!(
+            series
+                .iter()
+                .any(|patch| patch.file == name && patch.condition == Condition::Always)
+        );
+    }
     Ok(())
 }

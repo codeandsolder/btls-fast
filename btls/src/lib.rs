@@ -56,7 +56,7 @@
 //! cargo test --features fips fips::is_enabled
 //! ```
 //!
-////! ## Linking with a C++ standard library
+//! ## Linking with a C++ standard library
 //!
 //! Recent versions of boringssl require some C++ standard library features, so btls needs to link
 //! with a STL implementation. This can be controlled using the `BORING_BSSL_RUST_CPPLIB` variable. If
