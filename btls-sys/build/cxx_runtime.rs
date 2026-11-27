@@ -1,4 +1,4 @@
-//! Resolve the static C++ runtime from the native compiler's CMake file API.
+//! Resolve the static C++ runtime from the native compiler's `CMake` file API.
 //! Never search the host's default library directories for a cross target.
 
 use std::{
@@ -17,7 +17,7 @@ fn invalid(message: impl Into<String>) -> io::Error {
     io::Error::other(message.into())
 }
 
-/// CMake retains its compiler identity and inferred implicit libraries even
+/// `CMake` retains its compiler identity and inferred implicit libraries even
 /// when Cargo reruns a build script. Reconfigure when the actual inputs change.
 pub fn prepare_configure(out: &Path, identity: &[u8]) -> io::Result<()> {
     let stamp = out.join("configure-inputs");
@@ -51,10 +51,12 @@ pub fn toolchain(build: &Path) -> io::Result<Toolchain> {
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .filter(|entry| {
-            entry
-                .file_name()
-                .to_str()
-                .is_some_and(|name| name.starts_with("index-") && name.ends_with(".json"))
+            entry.file_name().to_str().is_some_and(|name| {
+                name.starts_with("index-")
+                    && Path::new(name)
+                        .extension()
+                        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"))
+            })
         })
         .map(|entry| entry.path())
         .max()
@@ -194,7 +196,7 @@ pub fn dynamic_directory<'a>(compiler: &'a Toolchain, name: &str) -> Option<&'a 
         .map(PathBuf::as_path)
 }
 
-/// For compiled sources, the actual CMake C++ link line determines the ABI.
+/// For compiled sources, the actual `CMake` C++ link line determines the ABI.
 /// For prebuilt sources, only archives explicitly supplied with the native
 /// libraries are considered: a foreign compiler's ABI cannot be inferred
 /// from the Rust target triple or from the host's installed standard library.
@@ -203,19 +205,22 @@ pub fn resolve(
     prebuilt_directories: &[PathBuf],
     explicit: Option<&str>,
 ) -> io::Result<Vec<PathBuf>> {
-    let (gnu, llvm, directories) = if let Some(compiler) = compiler {
-        (
-            contains_library(compiler, "stdc++"),
-            contains_library(compiler, "c++"),
-            compiler.directories.as_slice(),
-        )
-    } else {
-        (
-            archive(prebuilt_directories, "stdc++").is_some(),
-            archive(prebuilt_directories, "c++").is_some(),
-            prebuilt_directories,
-        )
-    };
+    let (gnu, llvm, directories) = compiler.map_or_else(
+        || {
+            (
+                archive(prebuilt_directories, "stdc++").is_some(),
+                archive(prebuilt_directories, "c++").is_some(),
+                prebuilt_directories,
+            )
+        },
+        |compiler| {
+            (
+                contains_library(compiler, "stdc++"),
+                contains_library(compiler, "c++"),
+                compiler.directories.as_slice(),
+            )
+        },
+    );
     let runtime = choose(gnu, llvm, explicit)?;
     let required = |name| {
         archive(directories, name).ok_or_else(|| {
