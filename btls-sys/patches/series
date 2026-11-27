@@ -17,6 +17,7 @@ non-fips 0013-ech-grease-payload-policy.patch
 always boringssl-rand-double-free.patch
 prefix-symbols boringssl-audit-symbols.patch
 always boringssl-pem-secret-cleanup.patch
+always boringssl-x509-param-inherit.patch
 always boringssl-loongarch.patch
 underscore-wildcards underscore-wildcards.patch
 relax-cert-validation relax-cert-validation.patch

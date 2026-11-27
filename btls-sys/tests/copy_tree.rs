@@ -161,6 +161,7 @@ fn patch_manifest_covers_every_patch() -> io::Result<()> {
     for name in [
         "boringssl-rand-double-free.patch",
         "boringssl-pem-secret-cleanup.patch",
+        "boringssl-x509-param-inherit.patch",
     ] {
         assert!(
             series
