@@ -52,11 +52,9 @@ fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
 
 /// A type which wraps client-side streams in a TLS session.
 ///
-/// OpenSSL's default configuration is highly insecure. This connector manages the OpenSSL
-/// structures, configuring cipher suites, session options, hostname verification, and more.
-///
-/// OpenSSL's built in hostname verification is used when linking against OpenSSL 1.0.2 or 1.1.0,
-/// and a custom implementation is used when linking against OpenSSL 1.0.1.
+/// Configures BoringSSL cipher suites, session options, certificate verification,
+/// and hostname verification. Certificate verification is enabled by default,
+/// including when the caller provides its own trust store.
 #[derive(Clone, Debug)]
 pub struct SslConnector(SslContext);
 
@@ -69,28 +67,25 @@ impl SslConnector {
     ///
     /// Native context creation, CA-path initialization, or cipher configuration fails.
     pub fn builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
-        let mut ctx = ctx(method)?;
-        ctx.set_default_verify_paths()?;
-        ctx.set_cipher_list(
-            "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK",
-        )?;
-        ctx.set_verify(SslVerifyMode::PEER)?;
-
-        Ok(SslConnectorBuilder(ctx))
+        let mut builder = Self::bare_builder(method)?;
+        builder.set_default_verify_paths()?;
+        Ok(builder)
     }
 
     /// Creates a bare builder for TLS connections without default CA certificates.
     ///
-    /// The caller is responsible for providing a custom certificate store.
+    /// Peer and hostname verification remain enabled. The caller must provide
+    /// a custom trust store or explicitly configure another verification policy.
     ///
     /// # Errors
     ///
-    /// Native context creation or cipher configuration fails.
+    /// Native context creation, cipher configuration, or X.509 verification setup fails.
     pub fn bare_builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
         ctx.set_cipher_list(
             "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK",
         )?;
+        ctx.set_verify(SslVerifyMode::PEER)?;
 
         Ok(SslConnectorBuilder(ctx))
     }

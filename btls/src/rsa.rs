@@ -290,20 +290,6 @@ where
             }
         }
     }
-
-    /// Validates RSA parameters for correctness
-    #[corresponds(RSA_check_key)]
-    pub fn check_key(&self) -> Result<bool, ErrorStack> {
-        // SAFETY: The native RSA validation call observes the borrowed private key and returns a status code.
-        unsafe {
-            let result = ffi::RSA_check_key(self.as_ptr());
-            if result == -1 {
-                Err(ErrorStack::get())
-            } else {
-                Ok(result == 1)
-            }
-        }
-    }
 }
 
 impl<T> RsaRef<T>
@@ -360,6 +346,21 @@ where
         public_encrypt, ffi::RSA_public_encrypt
     }
 
+    /// Checks the basic validity of the RSA components.
+    ///
+    /// For public keys this checks the modulus and exponent. For private keys
+    /// with factors it also checks their consistency with the other components.
+    /// This does not prove that the key was generated securely.
+    ///
+    /// # Errors
+    ///
+    /// The native validity checks fail or cannot be completed.
+    #[corresponds(RSA_check_key)]
+    pub fn check_key(&self) -> Result<(), ErrorStack> {
+        // SAFETY: the live key remains borrowed during native validation.
+        unsafe { cvt(ffi::RSA_check_key(self.as_ptr())) }
+    }
+
     /// Returns a reference to the modulus of the key.
     #[corresponds(RSA_get0_key)]
     #[must_use = "The returned key component is the result of this accessor."]
@@ -390,6 +391,10 @@ impl Rsa<Public> {
     ///
     /// `n` is the modulus common to both public and private key.
     /// `e` is the public exponent.
+    ///
+    /// # Errors
+    ///
+    /// The components fail native validity checks or allocation fails.
     #[corresponds(RSA_new)]
     pub fn from_public_components(n: BigNum, e: BigNum) -> Result<Self, ErrorStack> {
         // SAFETY: the RSA allocation is owned immediately, so any native
@@ -403,6 +408,7 @@ impl Rsa<Public> {
                 ptr::null_mut(),
             ))?;
             mem::forget((n, e));
+            rsa.check_key()?;
             Ok(rsa)
         }
     }
@@ -511,10 +517,14 @@ impl RsaPrivateKeyBuilder {
         Ok(self)
     }
 
-    /// Returns the Rsa key.
-    #[must_use = "The returned owned value is the result of consuming the original owner."]
-    pub fn build(self) -> Rsa<Private> {
-        self.rsa
+    /// Returns the RSA key after native validity checks.
+    ///
+    /// # Errors
+    ///
+    /// The components fail native validity checks or validation cannot complete.
+    pub fn build(self) -> Result<Rsa<Private>, ErrorStack> {
+        self.rsa.check_key()?;
+        Ok(self.rsa)
     }
 }
 
@@ -771,7 +781,61 @@ mod test {
         let shared = key.clone();
         assert_eq!(key.n().to_vec(), shared.n().to_vec());
         drop(key);
-        assert!(shared.check_key().unwrap());
+        shared.check_key().unwrap();
+    }
+
+    #[test]
+    fn component_constructors_reject_invalid_rsa_keys_and_consume_errors() {
+        let key = Rsa::generate(2048).unwrap();
+        let modulus = key.n().to_owned().unwrap();
+        let exponent = key.e().to_owned().unwrap();
+        let public = Rsa::from_public_components(modulus, exponent).unwrap();
+        public.check_key().unwrap();
+
+        for e in [0, 1, 2, 4] {
+            let error = Rsa::from_public_components(
+                key.n().to_owned().unwrap(),
+                BigNum::from_u32(e).unwrap(),
+            )
+            .unwrap_err();
+            assert!(!error.errors().is_empty());
+            assert!(ErrorStack::get().errors().is_empty());
+        }
+
+        let mut even_modulus = key.n().to_vec();
+        *even_modulus.last_mut().unwrap() &= !1;
+        assert!(
+            Rsa::from_public_components(
+                BigNum::from_slice(&even_modulus).unwrap(),
+                key.e().to_owned().unwrap(),
+            )
+            .is_err()
+        );
+        assert!(ErrorStack::get().errors().is_empty());
+
+        let builder = RsaPrivateKeyBuilder::new(
+            key.n().to_owned().unwrap(),
+            key.e().to_owned().unwrap(),
+            key.n().to_owned().unwrap(),
+        )
+        .unwrap();
+        assert!(builder.build().is_err());
+        assert!(ErrorStack::get().errors().is_empty());
+
+        let rebuilt = RsaPrivateKeyBuilder::new(
+            key.n().to_owned().unwrap(),
+            key.e().to_owned().unwrap(),
+            key.d().to_owned().unwrap(),
+        )
+        .unwrap()
+        .set_factors(
+            key.p().unwrap().to_owned().unwrap(),
+            key.q().unwrap().to_owned().unwrap(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+        rebuilt.check_key().unwrap();
     }
 
     #[test]

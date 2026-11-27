@@ -1025,6 +1025,32 @@ fn connector_valid_hostname() {
 }
 
 #[test]
+fn bare_connector_requires_trusted_certificate_by_default() {
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+    let connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    let result = connector
+        .build()
+        .connect("foobar.com", server.connect_tcp());
+    assert!(
+        matches!(result, Err(HandshakeError::Failure(ref mid)) if mid.ssl().verify_result().is_err())
+    );
+}
+
+#[test]
+fn bare_connector_uses_caller_trust_store() {
+    let server = Server::builder().build();
+    let mut connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    let mut stream = connector
+        .build()
+        .connect("foobar.com", server.connect_tcp())
+        .unwrap();
+    stream.read_exact(&mut [0]).unwrap();
+}
+
+#[test]
 fn connector_invalid_hostname() {
     let mut server = Server::builder();
     server.should_error();
