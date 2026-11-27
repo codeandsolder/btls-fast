@@ -279,6 +279,68 @@ fn retry() {
 }
 
 #[test]
+fn replacing_pending_async_verifier_discards_old_result() {
+    use crate::ssl::BoxCustomVerifyFinish;
+    use std::future::{poll_fn, ready};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Poll, Waker};
+
+    let mut server = Server::builder();
+    server.err_cb(|error| {
+        let HandshakeError::Failure(handshake) = error else {
+            panic!("expected fatal verification alert");
+        };
+        assert_eq!(
+            handshake.error().to_string(),
+            "[SSLV3_ALERT_CERTIFICATE_REVOKED]"
+        );
+    });
+    let server = server.build();
+    let old_polls = Arc::new(AtomicUsize::new(0));
+    let mut client = server.client();
+    let polls = Arc::clone(&old_polls);
+    client
+        .ctx()
+        .set_async_custom_verify_callback(SslVerifyMode::PEER, move |_| {
+            let polls = Arc::clone(&polls);
+            Ok(Box::pin(poll_fn(move |_| {
+                if polls.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Poll::Pending
+                } else {
+                    let accept: BoxCustomVerifyFinish = Box::new(|_| Ok(()));
+                    Poll::Ready(Ok(accept))
+                }
+            })))
+        })
+        .unwrap();
+    let mut client = client.build().builder();
+    client
+        .ssl()
+        .set_task_waker(Some(Waker::noop().clone()))
+        .unwrap();
+    let HandshakeError::WouldBlock(mut handshake) = client.connect_err() else {
+        panic!("expected pending verifier");
+    };
+    assert_eq!(handshake.error().code(), ErrorCode::WANT_CERTIFICATE_VERIFY);
+    let new_calls = Arc::new(AtomicUsize::new(0));
+    let calls = Arc::clone(&new_calls);
+    handshake
+        .ssl_mut()
+        .set_async_custom_verify_callback(SslVerifyMode::PEER, move |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Box::pin(ready(Err(SslAlert::CERTIFICATE_REVOKED))))
+        })
+        .unwrap();
+    assert!(matches!(
+        handshake.handshake(),
+        Err(HandshakeError::Failure(_))
+    ));
+    assert_eq!(old_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(new_calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn copied_custom_verifier_survives_context_switch() {
     use crate::ssl::{SslContextBuilder, SslMethod};
     use std::sync::Arc;

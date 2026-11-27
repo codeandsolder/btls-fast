@@ -14,6 +14,7 @@ use std::convert::identity;
 use std::future::Future;
 use std::pin::Pin;
 use std::ptr::NonNull;
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 /// The type of futures to pass to [`SslContextBuilder::set_async_select_certificate_callback`].
@@ -57,10 +58,17 @@ pub type ExDataFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 type BoxSelectCertFinishFor<T> =
     Box<dyn FnOnce(ClientHello<'_>) -> Result<T, AsyncSelectCertError>>;
-type SelectCertFutureIndex<T> = Index<
-    Ssl,
-    MutOnly<Option<ExDataFuture<Result<BoxSelectCertFinishFor<T>, AsyncSelectCertError>>>>,
->;
+// Every callback registration has its own identity, even when two closures
+// have the same Rust type. Keep that identity alive while a future is pending.
+struct PendingFuture<R> {
+    owner: Arc<()>,
+    future: ExDataFuture<R>,
+}
+
+type FutureData<R> = MutOnly<Option<PendingFuture<R>>>;
+type FutureIndex<R> = Index<Ssl, FutureData<R>>;
+type SelectCertFutureIndex<T> =
+    FutureIndex<Result<BoxSelectCertFinishFor<T>, AsyncSelectCertError>>;
 
 // The native callback runs synchronously on the thread driving the SSL. Scope
 // the runtime's waker to that connection and poll, without allocating an
@@ -142,20 +150,21 @@ pub(super) fn take_pending(ssl: &SslRef, code: ErrorCode) -> bool {
 }
 
 static TASK_WAKER_INDEX: IndexSlot<Ssl, Option<Waker>> = IndexSlot::new(Ssl::new_ex_index);
-type SelectCertFutureData<T> =
-    MutOnly<Option<ExDataFuture<Result<BoxSelectCertFinishFor<T>, AsyncSelectCertError>>>>;
+type SelectCertFutureData<T> = FutureData<Result<BoxSelectCertFinishFor<T>, AsyncSelectCertError>>;
 static SELECT_CERT_FUTURE_INDEX: IndexSlot<Ssl, SelectCertFutureData<()>> =
     IndexSlot::new(Ssl::new_ex_index);
 static SELECT_CERT_ACTION_FUTURE_INDEX: IndexSlot<Ssl, SelectCertFutureData<SelectCertAction>> =
     IndexSlot::new(Ssl::new_ex_index);
 static SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX: IndexSlot<
     Ssl,
-    MutOnly<Option<BoxPrivateKeyMethodFuture>>,
+    FutureData<Result<BoxPrivateKeyMethodFinish, AsyncPrivateKeyMethodError>>,
 > = IndexSlot::new(Ssl::new_ex_index);
-static SELECT_GET_SESSION_FUTURE_INDEX: IndexSlot<Ssl, MutOnly<Option<BoxGetSessionFuture>>> =
+static SELECT_GET_SESSION_FUTURE_INDEX: IndexSlot<Ssl, FutureData<Option<BoxGetSessionFinish>>> =
     IndexSlot::new(Ssl::new_ex_index);
-static SELECT_CUSTOM_VERIFY_FUTURE_INDEX: IndexSlot<Ssl, MutOnly<Option<BoxCustomVerifyFuture>>> =
-    IndexSlot::new(Ssl::new_ex_index);
+static SELECT_CUSTOM_VERIFY_FUTURE_INDEX: IndexSlot<
+    Ssl,
+    FutureData<Result<BoxCustomVerifyFinish, SslAlert>>,
+> = IndexSlot::new(Ssl::new_ex_index);
 
 impl SslContextBuilder {
     /// Sets a callback that is called before most [`ClientHello`] processing
@@ -255,7 +264,10 @@ impl SslContextBuilder {
         method: impl AsyncPrivateKeyMethod,
     ) -> Result<(), ErrorStack> {
         SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX.register()?;
-        self.set_private_key_method(AsyncPrivateKeyMethodBridge(method))
+        self.set_private_key_method(AsyncPrivateKeyMethodBridge {
+            method,
+            owner: Arc::new(()),
+        })
     }
 
     /// Sets a callback that is called when a client proposed to resume a session
@@ -286,10 +298,12 @@ impl SslContextBuilder {
         F: Fn(&mut SslRef, &[u8]) -> Option<BoxGetSessionFuture> + Send + Sync + 'static,
     {
         let index = SELECT_GET_SESSION_FUTURE_INDEX.register()?;
+        let owner = Arc::new(());
         let async_callback = move |ssl: &mut SslRef, id: &[u8]| {
             let fut_poll_result = with_ex_data_future(
                 &mut *ssl,
                 index,
+                &owner,
                 |ssl| ssl,
                 |ssl| callback(ssl, id).ok_or(()),
                 |option| option.ok_or(()),
@@ -355,7 +369,10 @@ impl SslCredentialBuilder {
         method: impl AsyncPrivateKeyMethod,
     ) -> Result<(), ErrorStack> {
         SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX.register()?;
-        self.set_private_key_method(AsyncPrivateKeyMethodBridge(method))
+        self.set_private_key_method(AsyncPrivateKeyMethodBridge {
+            method,
+            owner: Arc::new(()),
+        })
     }
 }
 
@@ -392,15 +409,17 @@ impl SslRef {
 
 fn async_custom_verify_callback<F>(
     callback: F,
-    index: Index<Ssl, MutOnly<Option<BoxCustomVerifyFuture>>>,
+    index: FutureIndex<Result<BoxCustomVerifyFinish, SslAlert>>,
 ) -> impl Fn(&mut SslRef) -> Result<(), SslVerifyError>
 where
     F: Fn(&mut SslRef) -> Result<BoxCustomVerifyFuture, SslAlert> + Send + Sync + 'static,
 {
+    let owner = Arc::new(());
     move |ssl| {
         let fut_poll_result = with_ex_data_future(
             &mut *ssl,
             index,
+            &owner,
             |ssl| ssl,
             &callback,
             identity,
@@ -469,7 +488,10 @@ pub trait AsyncPrivateKeyMethod: Send + Sync + 'static {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct AsyncPrivateKeyMethodError;
 
-struct AsyncPrivateKeyMethodBridge<M>(M);
+struct AsyncPrivateKeyMethodBridge<M> {
+    method: M,
+    owner: Arc<()>,
+}
 
 impl<M: AsyncPrivateKeyMethod> PrivateKeyMethod for AsyncPrivateKeyMethodBridge<M> {
     fn sign(
@@ -479,8 +501,8 @@ impl<M: AsyncPrivateKeyMethod> PrivateKeyMethod for AsyncPrivateKeyMethodBridge<
         signature_algorithm: SslSignatureAlgorithm,
         output: &mut [u8],
     ) -> Result<usize, PrivateKeyMethodError> {
-        with_private_key_method(ssl, output, |ssl, output| {
-            self.0.sign(ssl, input, signature_algorithm, output)
+        with_private_key_method(ssl, output, &self.owner, |ssl, output| {
+            self.method.sign(ssl, input, signature_algorithm, output)
         })
     }
 
@@ -490,8 +512,8 @@ impl<M: AsyncPrivateKeyMethod> PrivateKeyMethod for AsyncPrivateKeyMethodBridge<
         input: &[u8],
         output: &mut [u8],
     ) -> Result<usize, PrivateKeyMethodError> {
-        with_private_key_method(ssl, output, |ssl, output| {
-            self.0.decrypt(ssl, input, output)
+        with_private_key_method(ssl, output, &self.owner, |ssl, output| {
+            self.method.decrypt(ssl, input, output)
         })
     }
 
@@ -500,7 +522,7 @@ impl<M: AsyncPrivateKeyMethod> PrivateKeyMethod for AsyncPrivateKeyMethodBridge<
         ssl: &mut SslRef,
         output: &mut [u8],
     ) -> Result<usize, PrivateKeyMethodError> {
-        with_private_key_method(ssl, output, |_, _| {
+        with_private_key_method(ssl, output, &self.owner, |_, _| {
             // This should never be reached, if it does, that's a bug on btls's side,
             // which called `complete` without having been returned to with a pending
             // future from `sign` or `decrypt`.
@@ -526,10 +548,12 @@ where
         + Sync
         + 'static,
 {
+    let owner = Arc::new(());
     move |mut client_hello| {
         let fut_poll_result = with_ex_data_future(
             &mut client_hello,
             index,
+            &owner,
             ClientHello::ssl_mut,
             &callback,
             identity,
@@ -558,6 +582,7 @@ where
 fn with_private_key_method(
     ssl: &mut SslRef,
     output: &mut [u8],
+    owner: &Arc<()>,
     create_fut: impl FnOnce(
         &mut SslRef,
         &mut [u8],
@@ -568,6 +593,7 @@ fn with_private_key_method(
         SELECT_PRIVATE_KEY_METHOD_FUTURE_INDEX
             .get()
             .ok_or(PrivateKeyMethodError::FAILURE)?,
+        owner,
         |ssl| ssl,
         |ssl| create_fut(ssl, output),
         identity,
@@ -584,54 +610,50 @@ fn with_private_key_method(
     finish(ssl, output).or(Err(PrivateKeyMethodError::FAILURE))
 }
 
-/// Creates and drives a future stored in `ssl_handle`'s `Ssl` at ex data index `index`.
-///
-/// This function won't even bother storing the future in `index` if the future
-/// created by `create_fut` returns `Poll::Ready(_)` on the first poll call.
+/// Polls the future belonging to this callback registration, or creates one.
+/// A replacement callback cannot consume a previous registration's result.
+/// Ready and panicking futures are not retained; pending polls reuse the
+/// existing native extra-data allocation.
 fn with_ex_data_future<H, R: 'static, T, E>(
     ssl_handle: &mut H,
-    index: Index<Ssl, MutOnly<Option<ExDataFuture<R>>>>,
+    index: FutureIndex<R>,
+    owner: &Arc<()>,
     get_ssl_mut: impl Fn(&mut H) -> &mut SslRef,
     create_fut: impl FnOnce(&mut H) -> Result<ExDataFuture<R>, E>,
     into_result: impl Fn(R) -> Result<T, E>,
     failure: E,
 ) -> Poll<Result<T, E>> {
     let ssl = get_ssl_mut(ssl_handle);
+    // Detach the future before polling. In particular, if its poll panics,
+    // the native callback's unwind boundary cannot leave a poisoned future in
+    // the slot to be polled again. A new owner drops the old future here.
+    let previous = ssl
+        .ex_data_mut(index)
+        .and_then(|data| data.get_mut().take());
     let Some(waker) = callback_waker(ssl) else {
         return Poll::Ready(Err(failure));
     };
-
+    let (mut future, retained_owner) =
+        match previous.filter(|pending| Arc::ptr_eq(&pending.owner, owner)) {
+            Some(pending) => (pending.future, Some(pending.owner)),
+            None => (create_fut(ssl_handle)?, None),
+        };
     let mut ctx = Context::from_waker(&waker);
-
-    if let Some(data) = ssl.ex_data_mut(index).map(MutOnly::get_mut)
-        && let Some(future) = data.as_mut()
-    {
-        match future.as_mut().poll(&mut ctx) {
-            Poll::Ready(result) => {
-                *data = None;
-                return Poll::Ready(into_result(result));
+    match future.as_mut().poll(&mut ctx) {
+        Poll::Ready(result) => Poll::Ready(into_result(result)),
+        Poll::Pending => {
+            let pending = PendingFuture {
+                owner: retained_owner.unwrap_or_else(|| Arc::clone(owner)),
+                future,
+            };
+            let ssl = get_ssl_mut(ssl_handle);
+            if let Some(data) = ssl.ex_data_mut(index) {
+                *data.get_mut() = Some(pending);
+            } else if ssl.set_ex_data(index, MutOnly::new(Some(pending))).is_err() {
+                return Poll::Ready(Err(failure));
             }
-            Poll::Pending => {
-                mark_pending(ssl);
-                return Poll::Pending;
-            }
-        }
-    }
-    {
-        let mut fut = create_fut(ssl_handle)?;
-
-        match fut.as_mut().poll(&mut ctx) {
-            Poll::Ready(fut_result) => Poll::Ready(into_result(fut_result)),
-            Poll::Pending => {
-                let ssl = get_ssl_mut(ssl_handle);
-                match ssl.set_ex_data(index, MutOnly::new(Some(fut))) {
-                    Ok(()) => {
-                        mark_pending(ssl);
-                        Poll::Pending
-                    }
-                    Err(_) => Poll::Ready(Err(failure)),
-                }
-            }
+            mark_pending(ssl);
+            Poll::Pending
         }
     }
 }
@@ -640,12 +662,113 @@ fn with_ex_data_future<H, R: 'static, T, E>(
 mod scope_tests {
     use super::*;
     use crate::ssl::{SslContext, SslMethod};
-    use std::sync::Arc;
     use std::task::Wake;
 
     struct Noop;
     impl Wake for Noop {
         fn wake(self: Arc<Self>) {}
+    }
+
+    #[test]
+    fn future_identity_and_unwind_are_bound_to_registration() {
+        use std::future::{poll_fn, ready};
+        let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+        let mut ssl = Ssl::new(&ctx).unwrap();
+        ssl.set_task_waker(Some(Waker::noop().clone())).unwrap();
+        let index = Ssl::new_ex_index::<FutureData<u32>>().unwrap();
+        let first = Arc::new(());
+        let second = Arc::new(());
+        let mut polls = 0;
+        let create = |_: &mut SslRef| -> Result<ExDataFuture<u32>, ()> {
+            let mut first_poll = true;
+            Ok(Box::pin(poll_fn(move |_| {
+                if std::mem::take(&mut first_poll) {
+                    Poll::Pending
+                } else {
+                    Poll::Ready(1)
+                }
+            })))
+        };
+        assert_eq!(
+            with_ex_data_future(&mut *ssl, index, &first, |ssl| ssl, create, Ok, ()),
+            Poll::Pending
+        );
+        assert_eq!(
+            with_ex_data_future(
+                &mut *ssl,
+                index,
+                &first,
+                |ssl| ssl,
+                |_| panic!("recreated pending future"),
+                Ok,
+                ()
+            ),
+            Poll::Ready(Ok(1))
+        );
+        assert_eq!(
+            with_ex_data_future(&mut *ssl, index, &first, |ssl| ssl, create, Ok, ()),
+            Poll::Pending
+        );
+        assert_eq!(
+            with_ex_data_future(
+                &mut *ssl,
+                index,
+                &second,
+                |ssl| ssl,
+                |_| Ok(Box::pin(ready(2))),
+                Ok,
+                ()
+            ),
+            Poll::Ready(Ok(2))
+        );
+        let create_panicking = |_: &mut SslRef| -> Result<ExDataFuture<u32>, ()> {
+            let mut first_poll = true;
+            Ok(Box::pin(poll_fn(move |_| {
+                assert!(std::mem::take(&mut first_poll), "pending future panicked");
+                Poll::Pending
+            })))
+        };
+        assert_eq!(
+            with_ex_data_future(
+                &mut *ssl,
+                index,
+                &first,
+                |ssl| ssl,
+                create_panicking,
+                Ok,
+                ()
+            ),
+            Poll::Pending
+        );
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            with_ex_data_future(
+                &mut *ssl,
+                index,
+                &first,
+                |ssl| ssl,
+                |_| panic!("recreated pending future"),
+                Ok,
+                (),
+            )
+        }));
+        assert!(result.is_err());
+        assert!(ssl.ex_data_mut(index).unwrap().get_mut().is_none());
+        assert_eq!(
+            with_ex_data_future(
+                &mut *ssl,
+                index,
+                &first,
+                |ssl| ssl,
+                |_| {
+                    polls += 1;
+                    Ok(Box::pin(ready(3)))
+                },
+                Ok,
+                ()
+            ),
+            Poll::Ready(Ok(3))
+        );
+        assert_eq!(polls, 1);
     }
 
     #[test]
