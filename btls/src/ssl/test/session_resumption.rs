@@ -5,7 +5,6 @@ use crate::pkey::PKey;
 use crate::ssl::ClientSession;
 use crate::ssl::ConnectConfiguration;
 use crate::ssl::HmacCtxRef;
-use crate::ssl::SslConnector;
 use crate::ssl::SslMethod;
 use crate::ssl::SslRef;
 use crate::ssl::SslSession;
@@ -15,6 +14,7 @@ use crate::ssl::SslVerifyMode;
 use crate::ssl::SslVersion;
 use crate::ssl::connector::earliest_not_after;
 use crate::ssl::test::MessageDigest;
+use crate::ssl::{SslConnector, SslConnectorBuilder};
 use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
 use crate::symm::Cipher;
 use crate::symm::CipherCtxRef;
@@ -149,6 +149,33 @@ fn client_session_cache_apis() {
     assert_eq!(verify_count.load(Ordering::SeqCst), 2);
 }
 
+type Sessions = Arc<Mutex<Vec<ClientSession>>>;
+
+fn collect_sessions(connector: &mut SslConnectorBuilder, sessions: &Sessions) {
+    let issued = Arc::clone(sessions);
+    connector
+        .set_client_session_callback(move |_, session| issued.lock().unwrap().push(session))
+        .unwrap();
+}
+
+fn trusted_connector() -> SslConnectorBuilder {
+    let mut connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    connector.set_ca_file("test/root-ca.pem").unwrap();
+    connector
+}
+
+fn issue_session(
+    config: ConnectConfiguration,
+    server: &Server,
+    domain: &str,
+    sessions: &Sessions,
+) -> ClientSession {
+    let mut stream = config.connect(domain, server.connect_tcp()).unwrap();
+    // Reading processes tickets sent after the handshake.
+    stream.read_exact(&mut [0]).unwrap();
+    sessions.lock().unwrap().drain(..).next_back().unwrap()
+}
+
 #[test]
 fn client_session_resumes_within_scope_and_domain() {
     let mut server = Server::builder();
@@ -160,22 +187,13 @@ fn client_session_resumes_within_scope_and_domain() {
         let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
         connector.set_ca_file("test/root-ca.pem").unwrap();
         connector.set_session_id_context(scope).unwrap();
-        let sessions = sessions.clone();
-        connector
-            .set_client_session_callback(move |_, session| {
-                sessions.lock().unwrap().push(session);
-            })
-            .unwrap();
+        collect_sessions(&mut connector, &sessions);
         connector.build()
     };
     let issue = |connector: &SslConnector, configure: fn(&mut ConnectConfiguration)| {
         let mut config = connector.configure().unwrap();
         configure(&mut config);
-        let mut stream = config.connect("foobar.com", server.connect_tcp()).unwrap();
-        // Reading processes the tickets sent after the handshake.
-        stream.read_exact(&mut [0]).unwrap();
-        let session = sessions.lock().unwrap().drain(..).next_back().unwrap();
-        session
+        issue_session(config, &server, "foobar.com", &sessions)
     };
     let offers = |connector: &SslConnector,
                   session: &ClientSession,
@@ -237,6 +255,127 @@ fn client_session_resumes_within_scope_and_domain() {
 }
 
 #[test]
+fn cached_session_rechecks_current_hostname_policy_before_client_hello() {
+    use crate::x509::verify::X509CheckFlags;
+    for version in [SslVersion::TLS1_2, SslVersion::TLS1_3] {
+        let mut server = Server::builder();
+        server.expected_connections_count(3);
+        server.should_error_when(|index| index == 2);
+        server
+            .ctx()
+            .set_certificate_chain_file("test/cert-wildcard.pem")
+            .unwrap();
+        server.ctx().set_min_proto_version(Some(version)).unwrap();
+        server.ctx().set_max_proto_version(Some(version)).unwrap();
+        let server = server.build();
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connector = trusted_connector();
+        collect_sessions(&mut connector, &sessions);
+        let connector = connector.build();
+        let session = issue_session(
+            connector.configure().unwrap(),
+            &server,
+            "yes.foobar.com",
+            &sessions,
+        );
+        let mut second = connector
+            .configure()
+            .unwrap()
+            .client_session(session.clone())
+            .connect("yes.foobar.com", server.connect_tcp())
+            .unwrap();
+        assert!(second.ssl().session_reused());
+        second.read_exact(&mut [0]).unwrap();
+        let session = if version == SslVersion::TLS1_3 {
+            sessions.lock().unwrap().drain(..).next_back().unwrap()
+        } else {
+            session
+        };
+        // Change the verification policy after `into_ssl` has tentatively
+        // installed the session. The cached wildcard must not bypass it.
+        let mut ssl = connector
+            .configure()
+            .unwrap()
+            .client_session(session)
+            .into_ssl("yes.foobar.com")
+            .unwrap();
+        assert!(ssl.session().is_some());
+        ssl.verify_param_mut()
+            .unwrap()
+            .set_hostflags(X509CheckFlags::NO_WILDCARDS);
+        let result = ssl.connect(server.connect_tcp());
+        assert!(
+            matches!(result, Err(crate::ssl::HandshakeError::Failure(ref mid)) if mid.ssl().verify_result() == Err(crate::x509::X509VerifyError::HOSTNAME_MISMATCH))
+        );
+    }
+}
+
+#[test]
+fn cached_session_rechecks_current_trust_store() {
+    let mut server = Server::builder();
+    server.expected_connections_count(2);
+    server.should_error_when(|index| index == 1);
+    let server = server.build();
+    let sessions = Arc::new(Mutex::new(Vec::new()));
+    let mut connector = trusted_connector();
+    connector.set_session_id_context(b"shared scope").unwrap();
+    collect_sessions(&mut connector, &sessions);
+    let connector = connector.build();
+    let session = issue_session(
+        connector.configure().unwrap(),
+        &server,
+        "foobar.com",
+        &sessions,
+    );
+    let mut untrusted = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    untrusted.set_session_id_context(b"shared scope").unwrap();
+    let result = untrusted
+        .build()
+        .configure()
+        .unwrap()
+        .client_session(session)
+        .connect("foobar.com", server.connect_tcp());
+    assert!(
+        matches!(result, Err(crate::ssl::HandshakeError::Failure(ref mid)) if mid.ssl().verify_result().is_err())
+    );
+}
+
+#[test]
+fn cached_session_does_not_skip_custom_verification() {
+    let mut server = Server::builder();
+    server.expected_connections_count(2);
+    let server = server.build();
+    let sessions = Arc::new(Mutex::new(Vec::new()));
+    let mut connector = trusted_connector();
+    collect_sessions(&mut connector, &sessions);
+    let connector = connector.build();
+    let session = issue_session(
+        connector.configure().unwrap(),
+        &server,
+        "foobar.com",
+        &sessions,
+    );
+    let calls = Arc::new(AtomicU8::new(0));
+    let mut ssl = connector
+        .configure()
+        .unwrap()
+        .client_session(session)
+        .into_ssl("foobar.com")
+        .unwrap();
+    let verified = Arc::clone(&calls);
+    ssl.set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+        verified.fetch_add(1, Ordering::SeqCst);
+        ssl.verify_peer_cert_chain()
+            .map_err(|_| SslVerifyError::Invalid(crate::ssl::SslAlert::BAD_CERTIFICATE))
+    })
+    .unwrap();
+    let mut stream = ssl.connect(server.connect_tcp()).unwrap();
+    stream.read_exact(&mut [0]).unwrap();
+    assert!(!stream.ssl().session_reused());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn client_session_is_not_offered_after_its_chain_expires() {
     // A foobar.com leaf from the test root that expired a day ago.
     let day: i64 = 24 * 60 * 60;
@@ -278,10 +417,7 @@ fn client_session_is_not_offered_after_its_chain_expires() {
     let sessions = Arc::new(Mutex::new(Vec::new()));
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
     connector.set_ca_file("test/root-ca.pem").unwrap();
-    let issued = sessions.clone();
-    connector
-        .set_client_session_callback(move |_, session| issued.lock().unwrap().push(session))
-        .unwrap();
+    collect_sessions(&mut connector, &sessions);
     let connector = connector.build();
 
     // Verified as of a time inside the validity period.
@@ -290,9 +426,7 @@ fn client_session_is_not_offered_after_its_chain_expires() {
         .verify_param_mut()
         .unwrap()
         .set_time(now - day - day / 2);
-    let mut stream = config.connect("foobar.com", server.connect_tcp()).unwrap();
-    stream.read_exact(&mut [0]).unwrap();
-    let session = sessions.lock().unwrap().pop().unwrap();
+    let session = issue_session(config, &server, "foobar.com", &sessions);
     let not_after = session.session().peer_chain_not_after();
     assert!(not_after.is_some());
     assert_eq!(not_after, earliest_not_after([&*leaf]));

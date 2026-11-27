@@ -1,0 +1,224 @@
+diff --git a/crypto/x509/x509_lu.cc b/crypto/x509/x509_lu.cc
+index 126bf334d..316185b0f 100644
+--- a/crypto/x509/x509_lu.cc
++++ b/crypto/x509/x509_lu.cc
+@@ -565,6 +565,10 @@ void X509_STORE_set_verify_cb(X509_STORE *ctx,
+   impl->verify_cb = verify_cb;
+ }
+ 
++X509_STORE_CTX_verify_cb X509_STORE_get_verify_cb(const X509_STORE *store) {
++  return FromOpaque(store)->verify_cb;
++}
++
+ X509_STORE *X509_STORE_CTX_get0_store(const X509_STORE_CTX *ctx) {
+   return ctx->ctx;
+ }
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index ca1c2d50b..9a2004041 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2347,6 +2347,30 @@ OPENSSL_EXPORT int SSL_CTX_get_session_cache_mode(const SSL_CTX *ctx);
+ // It is an error to call this function after the handshake has begun.
+ OPENSSL_EXPORT int SSL_set_session(SSL *ssl, SSL_SESSION *session);
+ 
++// SSL_set_session_with_validator configures a client session and a callback
++// which must approve the session immediately before it is offered. A rejected
++// session is dropped and a full handshake is attempted instead. The callback
++// must not mutate ssl or session. Unlike SSL_set_session, invalid call state
++// returns zero rather than aborting.
++OPENSSL_EXPORT int SSL_set_session_with_validator(
++    SSL *ssl, SSL_SESSION *session,
++    int (*validator)(const SSL *ssl, const SSL_SESSION *session));
++
++// SSL_client_session_uses_builtin_authentication returns whether the SSL uses
++// the built-in X.509 authentication policy, without custom verification,
++// OCSP policy callbacks, PSKs, or client authentication credentials.
++OPENSSL_EXPORT int SSL_client_session_uses_builtin_authentication(
++    const SSL *ssl);
++
++// SSL_check_client_session_x509 revalidates the immutable cached peer chain
++// against the current SSL verification parameters and trust store, without
++// invoking application authentication callbacks. Returns zero if the policy
++// cannot be checked or the chain is unacceptable. No error queue entries from
++// the attempted verification are left behind.
++OPENSSL_EXPORT int SSL_check_client_session_x509(
++    const SSL *ssl, const SSL_SESSION *session);
++
++
+ // SSL_DEFAULT_SESSION_TIMEOUT is the default lifetime, in seconds, of a
+ // session in TLS 1.2 or earlier. This is how long we are willing to use the
+ // secret to encrypt traffic without fresh key material.
+diff --git a/include/openssl/x509.h b/include/openssl/x509.h
+index df57bb390..026874465 100644
+--- a/include/openssl/x509.h
++++ b/include/openssl/x509.h
+@@ -5204,6 +5204,12 @@ OPENSSL_EXPORT void X509_STORE_CTX_set_verify_cb(
+ OPENSSL_EXPORT void X509_STORE_set_verify_cb(
+     X509_STORE *store, X509_STORE_CTX_verify_cb verify_cb);
+ 
++// X509_STORE_get_verify_cb returns the configured verification callback, or
++// NULL if the store uses the built-in verification policy.
++OPENSSL_EXPORT X509_STORE_CTX_verify_cb X509_STORE_get_verify_cb(
++    const X509_STORE *store);
++
++
+ // X509_STORE_set_verify_cb_func is a deprecated alias for
+ // `X509_STORE_set_verify_cb`.
+ #define X509_STORE_set_verify_cb_func(store, func) \
+diff --git a/ssl/handshake_client.cc b/ssl/handshake_client.cc
+index 3d57f34da..eabb4b17c 100644
+--- a/ssl/handshake_client.cc
++++ b/ssl/handshake_client.cc
+@@ -370,7 +370,9 @@ static enum ssl_hs_wait_t do_start_connect(SSL_HANDSHAKE *hs) {
+         hs->pake_prover != nullptr ||
+         !ssl_session_is_time_valid(ssl, ssl->session.get()) ||
+         SSL_is_quic(ssl) != int{ssl->session->is_quic} ||
+-        ssl->s3->initial_handshake_complete) {
++        ssl->s3->initial_handshake_complete ||
++        (hs->config->client_session_validator != nullptr &&
++         !hs->config->client_session_validator(ssl, ssl->session.get()))) {
+       ssl_set_session(ssl, nullptr);
+       session_type = SSLSessionType::kNotResumable;
+     }
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 8efc21e06..f9a6c416a 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -3477,6 +3477,10 @@ struct SSL_CONFIG {
+ 
+   X509_VERIFY_PARAM *param = nullptr;
+ 
++  // Optional application validation of the cached client session, performed
++  // before offering it. This does not change ordinary SSL_set_session calls.
++  int (*client_session_validator)(const SSL *, const SSL_SESSION *) = nullptr;
++
+   // crypto
+   UniquePtr<SSLCipherPreferenceList> cipher_list;  // for TLS 1.2 ciphers.
+ 
+diff --git a/ssl/ssl_session.cc b/ssl/ssl_session.cc
+index 8c08eb87f..bc3fe15c5 100644
+--- a/ssl/ssl_session.cc
++++ b/ssl/ssl_session.cc
+@@ -1154,6 +1154,23 @@ int SSL_set_session(SSL *ssl, SSL_SESSION *session) {
+   }
+ 
+   ssl_set_session(ssl_impl, FromOpaque(session));
++  if (ssl_impl->config) {
++    ssl_impl->config->client_session_validator = nullptr;
++  }
++  return 1;
++}
++
++int SSL_set_session_with_validator(
++    SSL *ssl, SSL_SESSION *session,
++    int (*validator)(const SSL *, const SSL_SESSION *)) {
++  auto *impl = FromOpaque(ssl);
++  if (!impl->config || !impl->s3->hs || impl->s3->initial_handshake_complete ||
++      impl->s3->hs->state != 0 || !session || !validator) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
++  }
++  ssl_set_session(impl, FromOpaque(session));
++  impl->config->client_session_validator = validator;
+   return 1;
+ }
+ 
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index cc441ee12..b0c9d596a 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -199,9 +199,10 @@ static void ssl_crypto_x509_session_clear(SSLSession *session) {
+   session->x509_chain_without_leaf = nullptr;
+ }
+ 
+-static bool ssl_crypto_x509_session_verify_cert_chain(SSLSession *session,
+-                                                      SSL_HANDSHAKE *hs,
+-                                                      uint8_t *out_alert) {
++static bool ssl_crypto_x509_verify_cert_chain(const SSLSession *session,
++                                               SSL_HANDSHAKE *hs,
++                                               long *out_verify_result,
++                                               uint8_t *out_alert) {
+   if (session->peer_cert_type != TLSEXT_cert_type_x509) {
+     return false;
+   }
+@@ -256,11 +257,11 @@ static bool ssl_crypto_x509_session_verify_cert_chain(SSLSession *session,
+     verify_ret = X509_verify_cert(ctx.get());
+   }
+ 
+-  session->verify_result = X509_STORE_CTX_get_error(ctx.get());
++  *out_verify_result = X509_STORE_CTX_get_error(ctx.get());
+ 
+   // If `SSL_VERIFY_NONE`, the error is non-fatal, but we keep the result.
+   if (verify_ret <= 0 && hs->config->verify_mode != SSL_VERIFY_NONE) {
+-    *out_alert = SSL_alert_from_verify_result(session->verify_result);
++    *out_alert = SSL_alert_from_verify_result(*out_verify_result);
+     return false;
+   }
+ 
+@@ -268,6 +269,13 @@ static bool ssl_crypto_x509_session_verify_cert_chain(SSLSession *session,
+   return true;
+ }
+ 
++static bool ssl_crypto_x509_session_verify_cert_chain(SSLSession *session,
++                                                      SSL_HANDSHAKE *hs,
++                                                      uint8_t *out_alert) {
++  return ssl_crypto_x509_verify_cert_chain(session, hs, &session->verify_result,
++                                            out_alert);
++}
++
+ static void ssl_crypto_x509_hs_flush_cached_ca_names(SSL_HANDSHAKE *hs) {
+   sk_X509_NAME_pop_free(hs->cached_x509_ca_names, X509_NAME_free);
+   hs->cached_x509_ca_names = nullptr;
+@@ -414,6 +422,52 @@ STACK_OF(X509) *SSL_get_peer_full_cert_chain(const SSL *ssl) {
+   return session->x509_chain;
+ }
+ 
++int SSL_client_session_uses_builtin_authentication(const SSL *ssl) {
++  const auto *impl = FromOpaque(ssl);
++  const SSL_CONFIG *config = impl->config.get();
++  const SSLContext *context = impl->ctx.get();
++  if (impl->server || context->x509_method != &ssl_crypto_x509_method ||
++      !config || config->custom_verify_callback || config->verify_callback ||
++      context->app_verify_callback || context->legacy_ocsp_callback ||
++      context->reverify_on_resume || context->client_cert_cb ||
++      config->psk_client_callback || config->cert->cert_cb ||
++      !config->cert->credentials.empty()) {
++    return 0;
++  }
++  const SSLCredential *legacy = config->cert->legacy_credential.get();
++  if (legacy->pubkey || legacy->privkey || legacy->key_method) {
++    return 0;
++  }
++  const X509_STORE *store = config->cert->verify_store != nullptr
++                                ? config->cert->verify_store
++                                : context->cert_store;
++  return store != nullptr && X509_STORE_get_verify_cb(store) == nullptr;
++}
++
++int SSL_check_client_session_x509(const SSL *ssl,
++                                   const SSL_SESSION *session) {
++  const auto *impl = FromOpaque(ssl);
++  const auto *cached = FromOpaque(session);
++  if (!SSL_client_session_uses_builtin_authentication(ssl) || !impl->s3->hs ||
++      !cached || cached->is_server ||
++      cached->x509_method != &ssl_crypto_x509_method ||
++      cached->peer_cert_type != TLSEXT_cert_type_x509 ||
++      !cached->x509_chain || sk_X509_num(cached->x509_chain) == 0) {
++    return 0;
++  }
++  // No verification is requested. The caller deliberately accepts the
++  // existing certificate authentication without checking its trust chain.
++  if (impl->config->verify_mode == SSL_VERIFY_NONE) {
++    return 1;
++  }
++  long verify_result = X509_V_ERR_UNSPECIFIED;
++  uint8_t alert = SSL_AD_INTERNAL_ERROR;
++  bool ok = ssl_crypto_x509_verify_cert_chain(cached, impl->s3->hs.get(),
++                                              &verify_result, &alert);
++  ERR_clear_error();
++  return ok;
++}
++
+ int SSL_CTX_set_purpose(SSL_CTX *ctx, int purpose) {
+   auto *ctx_impl = FromOpaque(ctx);
+   check_ssl_ctx_x509_method(ctx_impl);
