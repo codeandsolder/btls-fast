@@ -1531,7 +1531,8 @@ impl X509ReqBuilder {
     /// cannot be encoded, or native signing fails.
     #[corresponds(X509_REQ_sign_ctx)]
     pub fn sign(self, signer: Signer<'_, OneShot>) -> Result<X509Req, ErrorStack> {
-        if !signer.matches_key(&self.0.public_key()?) {
+        let subject_key = self.0.public_key()?;
+        if !signer.matches_key(&subject_key) {
             return Err(ErrorStack::internal_error_str(
                 "CSR signing key does not match subject public key",
             ));
@@ -1539,10 +1540,7 @@ impl X509ReqBuilder {
         // SAFETY: both owners are live and unique. Native consumes the digest
         // state and resets it; signer is dropped without further access.
         unsafe {
-            cvt(ffi::X509_REQ_sign_ctx(
-                self.0.as_ptr(),
-                signer.native_context(),
-            ))?;
+            signer.sign_native(self.0.as_ptr(), ffi::X509_REQ_sign_ctx)?;
         }
         Ok(self.0)
     }

@@ -485,16 +485,6 @@ fn x509_req_builder() {
 
 #[test]
 fn certificate_and_request_support_configured_signers() {
-    use crate::pkey::Id;
-    use crate::rsa::Padding;
-    use crate::sign::RsaPssSaltlen;
-
-    let rsa = pkey();
-    let ed25519 = PKey::generate(Id::ED25519).unwrap();
-    let mut name = X509Name::builder().unwrap();
-    name.append_entry_by_nid(Nid::COMMONNAME, "signing test")
-        .unwrap();
-    let name = name.build().unwrap();
     fn configure(key: &PKey<Private>, algorithm: Nid) -> Signer<'_, crate::sign::OneShot> {
         if algorithm == Nid::RSASSAPSS {
             let mut signer = Signer::new_oneshot(MessageDigest::sha256(), key).unwrap();
@@ -508,6 +498,17 @@ fn certificate_and_request_support_configured_signers() {
             Signer::new_without_digest(key).unwrap()
         }
     }
+
+    use crate::pkey::Id;
+    use crate::rsa::Padding;
+    use crate::sign::RsaPssSaltlen;
+
+    let rsa = pkey();
+    let ed25519 = PKey::generate(Id::ED25519).unwrap();
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "signing test")
+        .unwrap();
+    let name = name.build().unwrap();
     for (key, algorithm) in [(&rsa, Nid::RSASSAPSS), (&ed25519, Nid::ED25519)] {
         let mut builder = X509::builder().unwrap();
         builder.set_version(2).unwrap();
