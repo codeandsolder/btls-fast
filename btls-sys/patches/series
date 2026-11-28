@@ -35,3 +35,4 @@ always boringssl-context-identity.patch
 always boringssl-checked-ca-list.patch
 always boringssl-atomic-cert-chain.patch
 always boringssl-atomic-cert-chain-tests.patch
+always boringssl-handshake-config-query.patch

@@ -307,11 +307,16 @@ impl SslRef {
 
     /// Selects the legacy codepoint 0xffa5 of the transport parameters extension instead of the
     /// standard 57, for draft versions of QUIC.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_quic_use_legacy_codepoint)]
-    pub fn set_quic_use_legacy_codepoint(&mut self, use_legacy: bool) {
+    pub fn set_quic_use_legacy_codepoint(&mut self, use_legacy: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: the connection is exclusively borrowed, and bool converts
         // infallibly to the C ABI integer flag.
-        unsafe { ffi::SSL_set_quic_use_legacy_codepoint(self.as_ptr(), use_legacy.into()) }
+        unsafe { ffi::SSL_set_quic_use_legacy_codepoint(self.as_ptr(), use_legacy.into()) };
+        Ok(())
     }
 
     /// Sets the context a server accepts 0-RTT under. BoringSSL stores it in the tickets it

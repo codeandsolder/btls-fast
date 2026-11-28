@@ -17,7 +17,7 @@ fn handshake(request: Option<u16>, server_enabled: bool) -> (Option<Vec<u8>>, bo
             Ok(())
         })
         .unwrap();
-    server.ssl_cb(move |ssl| ssl.set_server_padding_enabled(server_enabled));
+    server.ssl_cb(move |ssl| ssl.set_server_padding_enabled(server_enabled).unwrap());
     let server = server.build();
 
     let mut client = server.client();
@@ -28,7 +28,10 @@ fn handshake(request: Option<u16>, server_enabled: bool) -> (Option<Vec<u8>>, bo
     let client = client.build();
     let mut connection = client.builder();
     if let Some(num_bytes) = request {
-        connection.ssl().set_server_padding_request(num_bytes);
+        connection
+            .ssl()
+            .set_server_padding_request(num_bytes)
+            .unwrap();
     }
     let stream = connection.connect();
 

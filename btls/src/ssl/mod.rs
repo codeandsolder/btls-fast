@@ -3804,18 +3804,28 @@ impl SslRef {
                 "cannot change verification mode or callbacks during custom verification",
             ));
         }
-        self.require_verification_config()
+        self.require_handshake_config()
     }
 
-    fn require_verification_config(&self) -> Result<(), ErrorStack> {
-        // SAFETY: the getter works with any certificate method and returns -1
-        // when the configuration has been discarded.
-        if unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) } < 0 {
-            return Err(ErrorStack::internal_error_str(
-                "TLS verification configuration unavailable",
-            ));
+    /// Returns whether native handshake configuration remains available.
+    ///
+    /// BoringSSL may discard configuration after a completed handshake.
+    /// Negotiated connection properties remain available.
+    #[corresponds(SSL_has_handshake_config)]
+    #[must_use = "Use this predicate to decide whether configuration can be inspected or changed."]
+    pub fn has_handshake_config(&self) -> bool {
+        // SAFETY: The live SSL is borrowed for a read-only native query.
+        unsafe { ffi::SSL_has_handshake_config(self.as_ptr()) != 0 }
+    }
+
+    fn require_handshake_config(&self) -> Result<(), ErrorStack> {
+        if self.has_handshake_config() {
+            Ok(())
+        } else {
+            Err(ErrorStack::internal_error_str(
+                "TLS handshake configuration unavailable",
+            ))
         }
-        Ok(())
     }
 
     /// Sets the certificate verification depth.
@@ -3828,7 +3838,7 @@ impl SslRef {
     pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
         let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ssl_context().check_x509()?;
-        self.require_verification_config()?;
+        self.require_handshake_config()?;
 
         // SAFETY: the live SSL connection is exclusively borrowed and depth
         // has been checked against the native signed integer range.
@@ -3989,11 +3999,16 @@ impl SslRef {
     }
 
     /// Configures whether ClientHello extensions should be permuted.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_permute_extensions)]
-    pub fn set_permute_extensions(&mut self, enabled: bool) {
+    pub fn set_permute_extensions(&mut self, enabled: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The uniquely borrowed SSL connection receives
         // a scalar extension-permutation flag.
-        unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), c_int::from(enabled)) }
+        unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), c_int::from(enabled)) };
+        Ok(())
     }
 
     /// Sets the [RFC 8449] record size limit for this connection only.
@@ -4004,12 +4019,17 @@ impl SslRef {
     /// change the limit.
     ///
     /// [RFC 8449]: https://www.rfc-editor.org/rfc/rfc8449
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[cfg(not(feature = "fips"))]
     #[corresponds(SSL_set_record_size_limit)]
-    pub fn set_record_size_limit(&mut self, limit: u16) {
+    pub fn set_record_size_limit(&mut self, limit: u16) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The native connection is exclusively borrowed
         // while BoringSSL installs its scalar record-size setting.
-        unsafe { ffi::SSL_set_record_size_limit(self.as_ptr(), limit as _) }
+        unsafe { ffi::SSL_set_record_size_limit(self.as_ptr(), limit as _) };
+        Ok(())
     }
 
     /// Like [`SslContextBuilder::set_alpn_protos`].
@@ -4034,15 +4054,21 @@ impl SslRef {
         }
     }
 
-    /// Returns the stack of available SslCiphers for `SSL`, sorted by preference.
+    /// Returns the configured cipher list, sorted by preference.
+    ///
+    /// Returns `None` if the handshake configuration has been discarded.
     #[corresponds(SSL_get_ciphers)]
     #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
-    pub fn ciphers(&self) -> &StackRef<SslCipher> {
-        // SAFETY: The live connection owns the returned cipher stack;
-        // the wrapper only borrows it while that connection remains live.
+    pub fn ciphers(&self) -> Option<&StackRef<SslCipher>> {
+        // SAFETY: The live connection owns the optional native cipher stack.
+        // Check for null before constructing a borrowed reference.
         unsafe {
             let cipher_list = ffi::SSL_get_ciphers(self.as_ptr());
-            StackRef::from_ptr(cipher_list)
+            if cipher_list.is_null() {
+                None
+            } else {
+                Some(StackRef::from_ptr(cipher_list))
+            }
         }
     }
 
@@ -5146,8 +5172,12 @@ impl SslRef {
 
     /// Enables ECH GREASE when no supported ECH configuration is available.
     /// Set before the first ClientHello. This does not enable real ECH.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_enable_ech_grease)]
-    pub fn set_enable_ech_grease(&mut self, enable: bool) {
+    pub fn set_enable_ech_grease(&mut self, enable: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         let enable = c_int::from(enable);
 
         // SAFETY: The exclusively borrowed connection receives a scalar ECH
@@ -5155,6 +5185,7 @@ impl SslRef {
         unsafe {
             ffi::SSL_set_enable_ech_grease(self.as_ptr(), enable);
         }
+        Ok(())
     }
 
     /// Sets the compliance policy on `SSL`.
@@ -5382,12 +5413,17 @@ impl SslRef {
     /// one (17513). Defaults to the new codepoint.
     ///
     /// Both peers must use the same codepoint for ALPS to be negotiated.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_alps_use_new_codepoint)]
-    pub fn set_alps_use_new_codepoint(&mut self, enable: bool) {
+    pub fn set_alps_use_new_codepoint(&mut self, enable: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         let enable = c_int::from(enable);
         // SAFETY: The native connection receives a scalar
         // ALPS codepoint-selection flag.
-        unsafe { ffi::SSL_set_alps_use_new_codepoint(self.as_ptr(), enable) }
+        unsafe { ffi::SSL_set_alps_use_new_codepoint(self.as_ptr(), enable) };
+        Ok(())
     }
 
     /// Overrides [`SslContextBuilder::set_tls13_ciphers`] for this connection.
@@ -5410,19 +5446,29 @@ impl SslRef {
     ///
     /// Servers answer only over TLS 1.3, and not for more than 16 KiB. The extension is
     /// experimental in BoringSSL.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_server_padding_request)]
-    pub fn set_server_padding_request(&mut self, num_bytes: u16) {
+    pub fn set_server_padding_request(&mut self, num_bytes: u16) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The uniquely borrowed SSL connection
         // receives a scalar padding size and no pointer is retained.
-        unsafe { ffi::SSL_set_server_padding_request(self.as_ptr(), num_bytes) }
+        unsafe { ffi::SSL_set_server_padding_request(self.as_ptr(), num_bytes) };
+        Ok(())
     }
 
     /// Sets whether a server answers the client's server padding request.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_server_padding_enabled)]
-    pub fn set_server_padding_enabled(&mut self, enabled: bool) {
+    pub fn set_server_padding_enabled(&mut self, enabled: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The uniquely borrowed SSL connection
         // receives a scalar boolean converted to a native integer.
-        unsafe { ffi::SSL_set_server_padding_enabled(self.as_ptr(), c_int::from(enabled)) }
+        unsafe { ffi::SSL_set_server_padding_enabled(self.as_ptr(), c_int::from(enabled)) };
+        Ok(())
     }
 
     /// Returns whether the server sent the padding requested with

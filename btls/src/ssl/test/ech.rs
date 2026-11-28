@@ -208,7 +208,7 @@ fn ech_grease() {
 
     let mut client = server.client_with_root_ca().build().builder();
     // Verified with a pcap locally that the ECH extension gets sent due to GREASE
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
 
     let ssl_stream = client.connect();
     assert!(!ssl_stream.ssl().ech_accepted());
@@ -223,7 +223,7 @@ fn ech_grease_policy_accepts_retry_configs() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, None);
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     client
@@ -246,7 +246,7 @@ fn ech_grease_policy_accepts_retry_configs() {
 #[test]
 fn ech_real_configuration_bypasses_custom_grease_policy() {
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, Some(ECH_CONFIG_LIST));
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     client
         .ssl()
         .set_ech_grease_callback(|_, _| panic!("real ECH used GREASE policy"))
@@ -258,7 +258,7 @@ fn ech_real_configuration_bypasses_custom_grease_policy() {
 #[test]
 fn ech_rejection_does_not_invoke_custom_grease_policy() {
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG_2, ECH_KEY_2, Some(ECH_CONFIG_LIST));
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     client
         .ssl()
         .set_ech_grease_callback(|_, _| panic!("rejected real ECH used GREASE policy"))

@@ -543,7 +543,7 @@ fn application_settings() {
                 Ok(proto)
             })
             .unwrap();
-        builder.ssl_cb(move |ssl| ssl.set_alps_use_new_codepoint(new_codepoint[1]));
+        builder.ssl_cb(move |ssl| ssl.set_alps_use_new_codepoint(new_codepoint[1]).unwrap());
         builder.io_cb(move |s| {
             let received = s.ssl().peer_application_settings().map(ToOwned::to_owned);
             tx.send(received).unwrap();
@@ -552,7 +552,10 @@ fn application_settings() {
 
         let mut builder = server.client().build().builder();
         builder.ssl().set_alpn_protos(b"\x02h2").unwrap();
-        builder.ssl().set_alps_use_new_codepoint(new_codepoint[0]);
+        builder
+            .ssl()
+            .set_alps_use_new_codepoint(new_codepoint[0])
+            .unwrap();
         builder
             .ssl()
             .add_application_settings(b"h2", client)
@@ -1463,12 +1466,31 @@ fn certificate_configuration_shedding_is_reported() {
     client.ssl().set_private_key(&key).unwrap();
     assert!(client.ssl().certificate().is_some());
     assert!(client.ssl().private_key().is_some());
+    assert!(client.ssl().has_handshake_config());
+    assert!(client.ssl().ciphers().is_some());
     // SAFETY: Enable native handshake configuration shedding on the uniquely
     // owned connection before the handshake starts.
     unsafe { crate::ffi::SSL_set_shed_handshake_config(client.ssl().as_ptr(), 1) };
     let mut stream = client.connect();
     assert!(stream.ssl().certificate().is_none());
     assert!(stream.ssl().private_key().is_none());
+    assert!(!stream.ssl().has_handshake_config());
+    assert!(stream.ssl().ciphers().is_none());
+    assert!(stream.ssl().current_cipher().is_some());
+    assert!(stream.ssl().session_id_context().is_none());
+    assert!(stream.ssl_mut().set_permute_extensions(true).is_err());
+    assert!(stream.ssl_mut().set_enable_ech_grease(true).is_err());
+    assert!(stream.ssl_mut().set_alps_use_new_codepoint(false).is_err());
+    assert!(stream.ssl_mut().set_server_padding_request(128).is_err());
+    assert!(stream.ssl_mut().set_server_padding_enabled(true).is_err());
+    assert!(
+        stream
+            .ssl_mut()
+            .set_quic_use_legacy_codepoint(true)
+            .is_err()
+    );
+    #[cfg(not(feature = "fips"))]
+    assert!(stream.ssl_mut().set_record_size_limit(512).is_err());
     let names = X509Name::load_client_ca_file("test/root-ca.pem").unwrap();
     assert!(stream.ssl_mut().set_client_ca_list(&names).is_err());
     assert_eq!(names.len(), 1);
@@ -1980,7 +2002,7 @@ fn test_ssl_set_compliance() {
         "ECDHE-RSA-AES256-GCM-SHA384",
     ];
 
-    let ciphers = ssl.ciphers();
+    let ciphers = ssl.ciphers().unwrap();
     assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
 
     for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
@@ -2001,7 +2023,7 @@ fn test_ssl_set_compliance() {
             "ECDHE-RSA-AES256-GCM-SHA384",
         ];
 
-        let ciphers = ssl.ciphers();
+        let ciphers = ssl.ciphers().unwrap();
         assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
 
         for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
