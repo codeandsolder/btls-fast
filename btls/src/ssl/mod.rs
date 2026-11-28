@@ -3370,17 +3370,28 @@ impl SslSessionRef {
     }
 }
 
-foreign_type_and_impl_send_sync! {
-    type CType = ffi::SSL;
-    fn drop = ffi::SSL_free;
-
-    /// The state of an SSL/TLS session.
+foreign_type! {
+    /// The state of an SSL/TLS connection.
+    ///
+    /// Connections can move between threads, but cannot be accessed concurrently.
+    /// Even native read-only getters may populate connection-local caches.
+    ///
+    /// ```compile_fail
+    /// fn requires_sync<T: Sync>() {}
+    /// requires_sync::<btls::ssl::Ssl>();
+    /// ```
+    ///
+    /// ```compile_fail
+    /// fn requires_sync<T: Sync>() {}
+    /// requires_sync::<btls::ssl::SslRef>();
+    /// ```
     ///
     /// `Ssl` objects are created from an [`SslContext`], which provides configuration defaults.
-    /// These defaults can be overridden on a per-`Ssl` basis, however.
-    ///
-    /// [`SslContext`]: struct.SslContext.html
-    pub struct Ssl;
+    /// These defaults can be overridden on a per-`Ssl` basis.
+    pub unsafe type Ssl: Send {
+        type CType = ffi::SSL;
+        fn drop = ffi::SSL_free;
+    }
 }
 
 impl fmt::Debug for Ssl {

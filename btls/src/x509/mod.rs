@@ -70,12 +70,25 @@ struct ContextInputs {
 static CONTEXT_INPUTS_INDEX: IndexSlot<X509StoreContext, ContextInputs> =
     IndexSlot::new(X509StoreContext::new_ex_index);
 
-foreign_type_and_impl_send_sync! {
-    type CType = ffi::X509_STORE_CTX;
-    fn drop = ffi::X509_STORE_CTX_free;
-
+foreign_type! {
     /// An `X509` certificate store context.
-    pub struct X509StoreContext;
+    ///
+    /// Verification contexts permit exclusive ownership transfer, not concurrent access.
+    /// A callback context may also borrow a non-`Sync` TLS connection.
+    ///
+    /// ```compile_fail
+    /// fn requires_sync<T: Sync>() {}
+    /// requires_sync::<btls::x509::X509StoreContext>();
+    /// ```
+    ///
+    /// ```compile_fail
+    /// fn requires_sync<T: Sync>() {}
+    /// requires_sync::<btls::x509::X509StoreContextRef>();
+    /// ```
+    pub unsafe type X509StoreContext: Send {
+        type CType = ffi::X509_STORE_CTX;
+        fn drop = ffi::X509_STORE_CTX_free;
+    }
 }
 
 impl X509StoreContext {
