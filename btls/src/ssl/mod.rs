@@ -3438,12 +3438,48 @@ impl Ssl {
         }
     }
 
+    /// Configures the connection as a client.
+    ///
+    /// Callbacks cannot change the connection role.
+    ///
+    /// ```compile_fail,E0599
+    /// fn callback(ssl: &mut btls::ssl::SslRef) {
+    ///     ssl.set_connect_state();
+    /// }
+    /// ```
+    #[corresponds(SSL_set_connect_state)]
+    ///
+    /// # Errors
+    /// The connection has already been configured for the opposite role.
+    pub fn set_connect_state(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: the owner exclusively borrows the live connection; native
+        // rejects any attempt to change the established role.
+        unsafe { cvt(ffi::SSL_set_connect_state(self.as_ptr())) }
+    }
+
+    /// Configures the connection as a server.
+    ///
+    /// Callbacks cannot change the connection role.
+    ///
+    /// ```compile_fail,E0599
+    /// fn callback(ssl: &mut btls::ssl::SslRef) {
+    ///     ssl.set_accept_state();
+    /// }
+    /// ```
+    #[corresponds(SSL_set_accept_state)]
+    ///
+    /// # Errors
+    /// The connection has already been configured for the opposite role.
+    pub fn set_accept_state(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: the owner exclusively borrows the live connection; native
+        // rejects any attempt to change the established role.
+        unsafe { cvt(ffi::SSL_set_accept_state(self.as_ptr())) }
+    }
+
     /// Initiates a client-side TLS handshake, returning a [`MidHandshakeSslStream`].
     ///
     /// This method is guaranteed to return without calling any callback defined
     /// in the internal [`Ssl`] or [`SslContext`].
-    ///
-    /// See [`SslStreamBuilder::setup_connect`] for more details.
     ///
     /// # Warning
     ///
@@ -3452,12 +3488,12 @@ impl Ssl {
     ///
     /// # Errors
     ///
-    /// Allocating the stream's native BIO transport fails before the handshake.
+    /// Native BIO allocation fails, or the connection has the opposite role.
     pub fn setup_connect<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
-        Ok(SslStreamBuilder::new(self, stream)?.setup_connect())
+        self.setup_stream(stream, false)
     }
 
     /// Attempts a client-side TLS handshake.
@@ -3485,8 +3521,6 @@ impl Ssl {
     /// This method is guaranteed to return without calling any callback defined
     /// in the internal [`Ssl`] or [`SslContext`].
     ///
-    /// See [`SslStreamBuilder::setup_accept`] for more details.
-    ///
     /// # Warning
     ///
     /// `BoringSSL`'s default configuration is insecure. It is highly recommended to use
@@ -3494,12 +3528,30 @@ impl Ssl {
     ///
     /// # Errors
     ///
-    /// Allocating the stream's native BIO transport fails before the handshake.
+    /// Native BIO allocation fails, or the connection has the opposite role.
     pub fn setup_accept<S>(self, stream: S) -> Result<MidHandshakeSslStream<S>, ErrorStack>
     where
         S: Read + Write,
     {
-        Ok(SslStreamBuilder::new(self, stream)?.setup_accept())
+        self.setup_stream(stream, true)
+    }
+
+    fn setup_stream<S: Read + Write>(
+        mut self,
+        stream: S,
+        server: bool,
+    ) -> Result<MidHandshakeSslStream<S>, ErrorStack> {
+        let code = if server {
+            self.set_accept_state()?;
+            ErrorCode::WANT_READ
+        } else {
+            self.set_connect_state()?;
+            ErrorCode::WANT_WRITE
+        };
+        Ok(MidHandshakeSslStream::not_started(
+            SslStream::new(self, stream)?,
+            code,
+        ))
     }
 
     /// Attempts a server-side TLS handshake.
@@ -5461,6 +5513,20 @@ pub struct MidHandshakeSslStream<S> {
 }
 
 impl<S> MidHandshakeSslStream<S> {
+    fn not_started(stream: SslStream<S>, code: ErrorCode) -> Self {
+        Self {
+            stream,
+            error: Error {
+                code,
+                async_callback_pending: false,
+                cause: Some(InnerError::Io(io::Error::new(
+                    io::ErrorKind::WouldBlock,
+                    "TLS handshake has not started yet",
+                ))),
+            },
+        }
+    }
+
     /// Returns a shared reference to the inner stream.
     #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn get_ref(&self) -> &S {
@@ -5750,25 +5816,13 @@ impl<S: Read + Write> SslStream<S> {
         }
     }
 
-    /// Returns the session's shutdown state.
+    /// Returns the local and peer shutdown state.
     #[corresponds(SSL_get_shutdown)]
     #[must_use = "Inspect the peer and local TLS shutdown state."]
-    pub fn get_shutdown(&mut self) -> ShutdownState {
-        // SAFETY: the native getter reads flags from a live SSL object.
-        unsafe {
-            let bits = ffi::SSL_get_shutdown(self.ssl.as_ptr());
-            ShutdownState::from_bits_retain(bits)
-        }
-    }
-
-    /// Sets the session's shutdown state.
-    ///
-    /// This can be used to tell OpenSSL that the session should be cached even if a full two-way
-    /// shutdown was not completed.
-    #[corresponds(SSL_set_shutdown)]
-    pub fn set_shutdown(&mut self, state: ShutdownState) {
-        // SAFETY: the borrowed live SSL object receives a native flag bitset.
-        unsafe { ffi::SSL_set_shutdown(self.ssl.as_ptr(), state.bits()) }
+    pub fn get_shutdown(&self) -> ShutdownState {
+        // SAFETY: the live native connection is borrowed on its owning thread.
+        let bits = unsafe { ffi::SSL_get_shutdown(self.ssl.as_ptr()) };
+        ShutdownState::from_bits_retain(bits)
     }
 
     /// Initiates a client-side TLS handshake.
@@ -5949,156 +6003,6 @@ impl<S: Read + Write> Write for SslStream<S> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.get_mut().flush()
-    }
-}
-
-/// A partially constructed `SslStream`, useful for unusual handshakes.
-pub struct SslStreamBuilder<S> {
-    inner: SslStream<S>,
-}
-
-impl<S> SslStreamBuilder<S>
-where
-    S: Read + Write,
-{
-    /// Begin creating an `SslStream` atop `stream`.
-    ///
-    /// # Errors
-    ///
-    /// The native BIO transport cannot be constructed.
-    pub fn new(ssl: Ssl, stream: S) -> Result<Self, ErrorStack> {
-        Ok(Self {
-            inner: SslStream::new(ssl, stream)?,
-        })
-    }
-
-    fn pending(self, code: ErrorCode, message: &'static str) -> MidHandshakeSslStream<S> {
-        MidHandshakeSslStream {
-            stream: self.inner,
-            error: Error {
-                code,
-                async_callback_pending: false,
-                cause: Some(InnerError::Io(io::Error::new(
-                    io::ErrorKind::WouldBlock,
-                    message,
-                ))),
-            },
-        }
-    }
-
-    /// Configure as an outgoing stream from a client.
-    #[corresponds(SSL_set_connect_state)]
-    pub fn set_connect_state(&mut self) {
-        // SAFETY: the builder owns a live SSL object and exclusively borrows it.
-        unsafe { ffi::SSL_set_connect_state(self.inner.ssl.as_ptr()) }
-    }
-
-    /// Configure as an incoming stream to a server.
-    #[corresponds(SSL_set_accept_state)]
-    pub fn set_accept_state(&mut self) {
-        // SAFETY: the builder owns a live SSL object and exclusively borrows it.
-        unsafe { ffi::SSL_set_accept_state(self.inner.ssl.as_ptr()) }
-    }
-
-    /// Initiates a client-side TLS handshake, returning a [`MidHandshakeSslStream`].
-    ///
-    /// This method calls [`Self::set_connect_state`] and returns without actually
-    /// initiating the handshake. The caller is then free to call
-    /// [`MidHandshakeSslStream`] and loop on [`HandshakeError::WouldBlock`].
-    #[must_use = "Drive the returned handshake state; dropping it discards the underlying stream."]
-    pub fn setup_connect(mut self) -> MidHandshakeSslStream<S> {
-        self.set_connect_state();
-
-        self.pending(
-            ErrorCode::WANT_WRITE,
-            "connect handshake has not started yet",
-        )
-    }
-
-    /// Attempts a client-side TLS handshake.
-    ///
-    /// This is a convenience method which combines [`Self::setup_connect`] and
-    /// [`MidHandshakeSslStream::handshake`].
-    ///
-    /// # Errors
-    ///
-    /// The handshake fails or needs additional I/O readiness.
-    pub fn connect(self) -> Result<SslStream<S>, HandshakeError<S>> {
-        self.setup_connect().handshake()
-    }
-
-    /// Initiates a server-side TLS handshake, returning a [`MidHandshakeSslStream`].
-    ///
-    /// This method calls [`Self::set_accept_state`] and returns without actually
-    /// initiating the handshake. The caller is then free to call
-    /// [`MidHandshakeSslStream`] and loop on [`HandshakeError::WouldBlock`].
-    #[must_use = "Drive the returned handshake state; dropping it discards the underlying stream."]
-    pub fn setup_accept(mut self) -> MidHandshakeSslStream<S> {
-        self.set_accept_state();
-
-        self.pending(ErrorCode::WANT_READ, "accept handshake has not started yet")
-    }
-
-    /// Attempts a server-side TLS handshake.
-    ///
-    /// This is a convenience method which combines [`Self::setup_accept`] and
-    /// [`MidHandshakeSslStream::handshake`].
-    ///
-    /// # Errors
-    ///
-    /// The handshake fails or needs additional I/O readiness.
-    pub fn accept(self) -> Result<SslStream<S>, HandshakeError<S>> {
-        self.setup_accept().handshake()
-    }
-
-    /// Initiates the handshake.
-    ///
-    /// This will fail if `set_accept_state` or `set_connect_state` was not called first.
-    #[corresponds(SSL_do_handshake)]
-    pub fn handshake(self) -> Result<SslStream<S>, HandshakeError<S>> {
-        let mut stream = self.inner;
-        // SAFETY: The builder owns the live SSL handle and BIO while BoringSSL
-        // advances this handshake and uses its installed callbacks.
-        let ret = unsafe { ffi::SSL_do_handshake(stream.ssl.as_ptr()) };
-        if ret > 0 {
-            Ok(stream)
-        } else {
-            let error = stream.make_error(ret);
-            Err(if error.would_block() {
-                HandshakeError::WouldBlock(MidHandshakeSslStream { stream, error })
-            } else {
-                HandshakeError::Failure(MidHandshakeSslStream { stream, error })
-            })
-        }
-    }
-}
-
-impl<S> SslStreamBuilder<S> {
-    /// Returns a shared reference to the underlying stream.
-    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
-    pub fn get_ref(&self) -> &S {
-        self.inner.get_ref()
-    }
-
-    /// Returns a mutable reference to the underlying stream.
-    ///
-    /// # Warning
-    ///
-    /// It is inadvisable to read from or write to the underlying stream as it
-    /// will most likely corrupt the SSL session.
-    pub fn get_mut(&mut self) -> &mut S {
-        self.inner.get_mut()
-    }
-
-    /// Returns a shared reference to the `Ssl` object associated with this builder.
-    #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
-    pub fn ssl(&self) -> &SslRef {
-        &self.inner.ssl
-    }
-
-    /// Returns a mutable reference to the `Ssl` object associated with this builder.
-    pub fn ssl_mut(&mut self) -> &mut SslRef {
-        &mut self.inner.ssl
     }
 }
 

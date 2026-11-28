@@ -147,36 +147,6 @@ impl SslContextBuilder {
 }
 
 impl Ssl {
-    /// Makes the connection a client, for connections without a BIO such as QUIC ones.
-    ///
-    /// Callbacks cannot change the connection role.
-    ///
-    /// ```compile_fail,E0599
-    /// fn callback(ssl: &mut btls::ssl::SslRef) {
-    ///     ssl.set_connect_state();
-    /// }
-    /// ```
-    #[corresponds(SSL_set_connect_state)]
-    pub fn set_connect_state(&mut self) {
-        // SAFETY: only the owner of this connection may change its role.
-        unsafe { ffi::SSL_set_connect_state(self.as_ptr()) }
-    }
-
-    /// Makes the connection a server, for connections without a BIO such as QUIC ones.
-    ///
-    /// Callbacks cannot change the connection role.
-    ///
-    /// ```compile_fail,E0599
-    /// fn callback(ssl: &mut btls::ssl::SslRef) {
-    ///     ssl.set_accept_state();
-    /// }
-    /// ```
-    #[corresponds(SSL_set_accept_state)]
-    pub fn set_accept_state(&mut self) {
-        // SAFETY: only the owner of this connection may change its role.
-        unsafe { ffi::SSL_set_accept_state(self.as_ptr()) }
-    }
-
     /// Advances the handshake of a connection without a BIO, such as a QUIC one. Streams use
     /// [`SslStream::do_handshake`](super::SslStream::do_handshake) instead.
     ///

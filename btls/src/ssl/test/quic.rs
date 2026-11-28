@@ -137,7 +137,7 @@ fn client_context(sessions: Arc<Mutex<Vec<SslSession>>>) -> SslContext {
 fn client(ctx: &SslContext, session: Option<&SslSession>) -> Ssl {
     let mut ssl = Ssl::new(ctx).unwrap();
     ssl.set_ex_data(*RECORDED, Recorded::default()).unwrap();
-    ssl.set_connect_state();
+    ssl.set_connect_state().unwrap();
     ssl.set_quic_transport_params(b"client params").unwrap();
     if let Some(session) = session {
         unsafe { ssl.set_session(session).unwrap() };
@@ -148,7 +148,7 @@ fn client(ctx: &SslContext, session: Option<&SslSession>) -> Ssl {
 fn server(ctx: &SslContext, early_data_context: &[u8]) -> Ssl {
     let mut ssl = Ssl::new(ctx).unwrap();
     ssl.set_ex_data(*RECORDED, Recorded::default()).unwrap();
-    ssl.set_accept_state();
+    ssl.set_accept_state().unwrap();
     ssl.set_quic_transport_params(b"server params").unwrap();
     ssl.set_quic_early_data_context(early_data_context).unwrap();
     ssl
