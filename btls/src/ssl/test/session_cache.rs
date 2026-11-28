@@ -1,8 +1,12 @@
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::{Arc, Mutex};
 
 use super::server::Server;
-use crate::ssl::{SslContext, SslMethod, SslOptions, SslVersion};
+use crate::error::ErrorStack;
+use crate::ssl::{
+    ErrorCode, HandshakeError, SessionLookupError, Ssl, SslContext, SslMethod, SslOptions,
+    SslSessionCacheMode, SslVersion,
+};
 
 #[test]
 fn shared_cache_membership_and_destruction_notifications() {
@@ -35,9 +39,8 @@ fn shared_cache_membership_and_destruction_notifications() {
         })
         .unwrap();
     let context_in_callback = Arc::clone(&context);
-    server.io_cb(move |mut stream| {
+    server.io_cb(move |stream| {
         *context_in_callback.lock().unwrap() = Some(stream.ssl().session_context().to_owned());
-        stream.write_all(&[0]).unwrap();
     });
 
     let server = server.build();
@@ -75,4 +78,91 @@ fn shared_cache_membership_and_destruction_notifications() {
     assert_eq!(other.session_count(), 1);
     other.flush_sessions(0);
     assert_eq!(other.session_count(), 0);
+}
+
+#[test]
+fn lookup_failures_are_distinct_from_misses() {
+    // All four forms of failure must reach the server error queue instead of
+    // triggering a successful full handshake.
+    for failure in [
+        "sync error",
+        "panic",
+        "async creation",
+        "async without waker",
+    ] {
+        let mut server = Server::builder();
+        server
+            .ctx()
+            .set_max_proto_version(Some(SslVersion::TLS1_2))
+            .unwrap();
+        server.ctx().set_options(SslOptions::NO_TICKET);
+        server
+            .ctx()
+            .set_session_cache_mode(SslSessionCacheMode::SERVER | SslSessionCacheMode::NO_INTERNAL);
+        server
+            .ctx()
+            .set_session_id_context(b"lookup errors")
+            .unwrap();
+        // SAFETY: these callbacks never supply a session, so no resumption
+        // authentication claim is made.
+        unsafe {
+            match failure {
+                "sync error" => server
+                    .ctx()
+                    .set_get_session_callback(|_, _| {
+                        Err(SessionLookupError::Failed(ErrorStack::internal_error_str(
+                            "lookup failed",
+                        )))
+                    })
+                    .unwrap(),
+                "panic" => server
+                    .ctx()
+                    .set_get_session_callback(|_, _| panic!("lookup panicked"))
+                    .unwrap(),
+                "async creation" => {
+                    server.ssl_cb(|ssl| {
+                        ssl.set_task_waker(Some(std::task::Waker::noop().clone()))
+                            .unwrap()
+                    });
+                    server
+                        .ctx()
+                        .set_async_get_session_callback(|_, _| {
+                            Err(ErrorStack::internal_error_str("lookup creation failed"))
+                        })
+                        .unwrap();
+                }
+                _ => server
+                    .ctx()
+                    .set_async_get_session_callback(|_, _| {
+                        panic!("lookup must not start without a task waker")
+                    })
+                    .unwrap(),
+            }
+        }
+        let expected = match failure {
+            "sync error" => "lookup failed",
+            "panic" => "session lookup callback panicked",
+            "async creation" => "lookup creation failed",
+            _ => "async TLS callback requires a task waker",
+        };
+        server.err_cb(move |error| {
+            let HandshakeError::Failure(stream) = error else {
+                panic!("unexpected lookup error: {error}");
+            };
+            assert_eq!(stream.error().code(), ErrorCode::SSL);
+            assert!(
+                stream.error().to_string().contains(expected),
+                "{}",
+                stream.error()
+            );
+        });
+        let server = server.build();
+        let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+        assert!(
+            Ssl::new(&ctx)
+                .unwrap()
+                .connect(server.connect_tcp())
+                .is_err()
+        );
+    }
 }

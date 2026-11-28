@@ -481,9 +481,8 @@ static PSK_SERVER_INDEX: IndexSlot<SslContext, PskServerCallback> =
 type RemoveSessionCallback = Box<dyn Fn(&SslSessionRef) + Send + Sync>;
 static REMOVE_SESSION_INDEX: IndexSlot<SslContext, RemoveSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
-type GetSessionCallback = Box<
-    dyn Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError> + Send + Sync,
->;
+type GetSessionCallback =
+    Box<dyn Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, SessionLookupError> + Send + Sync>;
 static GET_SESSION_INDEX: IndexSlot<SslContext, GetSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
 type KeylogCallback = Box<dyn Fn(&SslRef, &str) + Send + Sync>;
@@ -2112,7 +2111,8 @@ impl SslContextBuilder {
     ///
     /// The callback is passed a reference to the session ID provided by the client. It should
     /// return the session corresponding to that ID if available. This is only used for servers, not
-    /// clients.
+    /// clients. Return `Ok(None)` for a cache miss, [`SessionLookupError::Pending`] to
+    /// retry later, or [`SessionLookupError::Failed`] to abort the handshake.
     ///
     /// # Safety
     ///
@@ -2127,7 +2127,7 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_sess_set_get_cb)]
     pub unsafe fn set_get_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
-        F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError>
+        F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, SessionLookupError>
             + 'static
             + Sync
             + Send,
@@ -2900,12 +2900,22 @@ impl SslContextRef {
     }
 }
 
-/// Error returned by the callback to get a session when operation
-/// could not complete and should be retried later.
+/// Non-successful result of an external server session lookup.
 ///
-/// See [`SslContextBuilder::set_get_session_callback`].
+/// A cache miss is `Ok(None)`, distinct from a failed lookup.
 #[derive(Debug)]
-pub struct GetSessionPendingError;
+pub enum SessionLookupError {
+    /// The lookup must be retried when asynchronous progress is available.
+    Pending,
+    /// The lookup failed; the connection must not silently proceed.
+    Failed(ErrorStack),
+}
+
+impl From<ErrorStack> for SessionLookupError {
+    fn from(error: ErrorStack) -> Self {
+        Self::Failed(error)
+    }
+}
 
 /// Information about the state of a cipher.
 pub struct CipherBits {

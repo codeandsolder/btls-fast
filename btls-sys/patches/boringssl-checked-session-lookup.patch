@@ -1,0 +1,231 @@
+diff --git a/include/openssl/prefix_symbols.h b/include/openssl/prefix_symbols.h
+index e41c0eb55..bc9755aac 100644
+--- a/include/openssl/prefix_symbols.h
++++ b/include/openssl/prefix_symbols.h
+@@ -2321,7 +2321,6 @@
+ #pragma redefine_extname SSL_library_init BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_library_init)
+ #pragma redefine_extname SSL_load_client_CA_file BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_load_client_CA_file)
+ #pragma redefine_extname SSL_load_error_strings BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_load_error_strings)
+-#pragma redefine_extname SSL_magic_pending_session_ptr BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_magic_pending_session_ptr)
+ #pragma redefine_extname SSL_marshal_ech_config BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_marshal_ech_config)
+ #pragma redefine_extname SSL_max_seal_overhead BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_max_seal_overhead)
+ #pragma redefine_extname SSL_need_tmp_RSA BORINGSSL_ADD_USER_LABEL_AND_PREFIX(SSL_need_tmp_RSA)
+@@ -5475,7 +5474,6 @@
+ #define SSL_library_init BORINGSSL_ADD_PREFIX(SSL_library_init)
+ #define SSL_load_client_CA_file BORINGSSL_ADD_PREFIX(SSL_load_client_CA_file)
+ #define SSL_load_error_strings BORINGSSL_ADD_PREFIX(SSL_load_error_strings)
+-#define SSL_magic_pending_session_ptr BORINGSSL_ADD_PREFIX(SSL_magic_pending_session_ptr)
+ #define SSL_marshal_ech_config BORINGSSL_ADD_PREFIX(SSL_marshal_ech_config)
+ #define SSL_max_seal_overhead BORINGSSL_ADD_PREFIX(SSL_max_seal_overhead)
+ #define SSL_need_tmp_RSA BORINGSSL_ADD_PREFIX(SSL_need_tmp_RSA)
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index d69f5ce58..9e134ab29 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -521,7 +521,7 @@ OPENSSL_EXPORT int SSL_get_error(const SSL *ssl, int ret_code);
+ // lookup callback indicated the session was unavailable. The caller may retry
+ // the operation when lookup has completed.
+ //
+-// See also `SSL_CTX_sess_set_get_cb` and `SSL_magic_pending_session_ptr`.
++// See also `SSL_CTX_sess_set_get_cb`.
+ #define SSL_ERROR_PENDING_SESSION 11
+ 
+ // SSL_ERROR_PENDING_CERTIFICATE indicates the operation failed because the
+@@ -2659,43 +2659,31 @@ OPENSSL_EXPORT void SSL_CTX_sess_set_remove_cb(
+ // `SSL_CTX_sess_set_remove_cb`.
+ OPENSSL_EXPORT SSL_remove_session_cb SSL_CTX_sess_get_remove_cb(SSL_CTX *ctx);
+ 
+-// SSL_get_session_cb is the type of the callback that is called to look up a
+-// session by ID for a server.
+-typedef SSL_SESSION *(*SSL_get_session_cb)(SSL *ssl, const uint8_t *id,
+-                                           int id_len, int *out_copy);
+-
+-// SSL_CTX_sess_set_get_cb sets a callback to look up a session by ID for a
+-// server. The callback is passed the session ID and should return a matching
+-// `SSL_SESSION` or NULL if not found. It should set `*out_copy` to zero and
+-// return a new reference to the session. This callback is not used for a
+-// client.
+-//
+-// For historical reasons, if `*out_copy` is set to one (default), the SSL
+-// library will take a new reference to the returned `SSL_SESSION`, expecting
+-// the callback to return a non-owning pointer. This is not recommended. If
+-// `ctx` and thus the callback is used on multiple threads, the session may be
+-// removed and invalidated before the SSL library calls `SSL_SESSION_up_ref`,
+-// whereas the callback may synchronize internally.
+-//
+-// To look up a session asynchronously, the callback may return
+-// `SSL_magic_pending_session_ptr`. See the documentation for that function and
+-// `SSL_ERROR_PENDING_SESSION`.
+-//
+-// If the internal session cache is enabled, the callback is only consulted if
+-// the internal cache does not return a match.
++// A server session lookup either finds an owned session, misses, needs
++// asynchronous progress, or fails. Failure is distinct from a cache miss.
++enum ssl_session_lookup_result_t BORINGSSL_ENUM_INT {
++  ssl_session_lookup_error = 0,
++  ssl_session_lookup_miss = 1,
++  ssl_session_lookup_found = 2,
++  ssl_session_lookup_pending = 3,
++};
++
++// SSL_get_session_cb looks up a session by ID. On found, it transfers one
++// owned session reference through out_session. On all other results, the
++// output must remain NULL. On error, the callback may supply an error queue
++// entry. Pending causes SSL_ERROR_PENDING_SESSION and may be retried later.
++// The caller is responsible for authenticating sessions for the server scope.
++typedef enum ssl_session_lookup_result_t (*SSL_get_session_cb)(
++    SSL *ssl, const uint8_t *id, size_t id_len, SSL_SESSION **out_session);
++
++// SSL_CTX_sess_set_get_cb sets the external server session lookup callback.
++// If the internal session cache is enabled, this is only consulted on a miss.
+ OPENSSL_EXPORT void SSL_CTX_sess_set_get_cb(SSL_CTX *ctx,
+                                             SSL_get_session_cb get_session_cb);
+ 
+-// SSL_CTX_sess_get_get_cb returns the callback set by
+-// `SSL_CTX_sess_set_get_cb`.
++// SSL_CTX_sess_get_get_cb returns the configured external lookup callback.
+ OPENSSL_EXPORT SSL_get_session_cb SSL_CTX_sess_get_get_cb(SSL_CTX *ctx);
+ 
+-// SSL_magic_pending_session_ptr returns a magic `SSL_SESSION`* which indicates
+-// that the session isn't currently unavailable. `SSL_get_error` will then
+-// return `SSL_ERROR_PENDING_SESSION` and the handshake can be retried later
+-// when the lookup has completed.
+-OPENSSL_EXPORT SSL_SESSION *SSL_magic_pending_session_ptr(void);
+-
+ // SSL_CTX_set_resumption_across_names_enabled configures whether `ctx`, as a
+ // TLS 1.3 server, signals its sessions are compatible with any identity in the
+ // server certificate, e.g. all DNS names in the subjectAlternateNames list.
+diff --git a/ssl/internal.h b/ssl/internal.h
+index f688481ef..78250cf2d 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -4313,8 +4313,7 @@ class SSLContext : public ssl_ctx_st, public RefCounted<SSLContext> {
+   // it.
+   int (*new_session_cb)(SSL *ssl, SSL_SESSION *sess) = nullptr;
+   void (*remove_session_cb)(SSL_CTX *ctx, SSL_SESSION *sess) = nullptr;
+-  SSL_SESSION *(*get_session_cb)(SSL *ssl, const uint8_t *data, int len,
+-                                 int *copy) = nullptr;
++  SSL_get_session_cb get_session_cb = nullptr;
+ 
+   // if defined, these override the X509_verify_cert() calls
+   int (*app_verify_callback)(X509_STORE_CTX *store_ctx, void *arg) = nullptr;
+diff --git a/ssl/ssl_session.cc b/ssl/ssl_session.cc
+index 05c05c5b1..f62a0c381 100644
+--- a/ssl/ssl_session.cc
++++ b/ssl/ssl_session.cc
+@@ -35,11 +35,6 @@
+ 
+ BSSL_NAMESPACE_BEGIN
+ 
+-// The address of this is a magic value, a pointer to which is returned by
+-// SSL_magic_pending_session_ptr(). It allows a session callback to indicate
+-// that it needs to asynchronously fetch session information.
+-static const char g_pending_session_magic = 0;
+-
+ static ExDataClass g_ex_data_class(/*with_app_data=*/true);
+ 
+ // Requires the context's cache lock.
+@@ -555,32 +550,24 @@ static enum ssl_hs_wait_t ssl_lookup_session(SSL_HANDSHAKE *hs,
+ 
+   // Fall back to the external cache, if it exists.
+   if (!session && ssl->session_ctx->get_session_cb != nullptr) {
+-    int copy = 1;
+-    SSL_SESSION *cb_session = ssl->session_ctx->get_session_cb(
+-        ssl, session_id.data(), session_id.size(), &copy);
+-    if (cb_session == nullptr) {
++    SSL_SESSION *out = nullptr;
++    auto result = ssl->session_ctx->get_session_cb(
++        ssl, session_id.data(), session_id.size(), &out);
++    session.reset(FromOpaque(out));
++    if (result == ssl_session_lookup_miss && !session) {
+       return ssl_hs_ok;
+     }
+-
+-    if (cb_session == SSL_magic_pending_session_ptr()) {
+-      // This pointer is not actually a session.
++    if (result == ssl_session_lookup_pending && !session) {
+       return ssl_hs_pending_session;
+     }
+-    session.reset(FromOpaque(cb_session));
+-
+-    // Increment reference count now if the session callback asks us to do so
+-    // (note that if the session structures returned by the callback are shared
+-    // between threads, it must handle the reference count itself [i.e. copy ==
+-    // 0], or things won't be thread-safe).
+-    if (copy) {
+-      SSL_SESSION_up_ref(session.get());
+-    }
+-
+-    // A callback must return the requested session with the same certificate
+-    // representation. Reject mismatches before caching or resumption.
+-    if (Span(session->session_id) != session_id ||
++    if (result != ssl_session_lookup_found || !session ||
++        Span(session->session_id) != session_id ||
+         session->x509_method != ssl->session_ctx->x509_method) {
+-      return ssl_hs_ok;
++      if (ERR_peek_error() == 0) {
++        OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++      }
++      ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_INTERNAL_ERROR);
++      return ssl_hs_error;
+     }
+ 
+     // Add the externally cached session to the internal cache if necessary.
+@@ -1071,9 +1058,7 @@ SSL_SESSION *SSL_SESSION_copy_without_early_data(SSL_SESSION *session) {
+   return copy.release();
+ }
+ 
+-SSL_SESSION *SSL_magic_pending_session_ptr() {
+-  return (SSL_SESSION *)&g_pending_session_magic;
+-}
++
+ 
+ SSL_SESSION *SSL_get_session(const SSL *ssl) {
+   return ssl_get_session(FromOpaque(ssl));
+@@ -1222,16 +1207,11 @@ void (*SSL_CTX_sess_get_remove_cb(SSL_CTX *ctx))(SSL_CTX *ctx,
+   return FromOpaque(ctx)->remove_session_cb;
+ }
+ 
+-void SSL_CTX_sess_set_get_cb(SSL_CTX *ctx,
+-                             SSL_SESSION *(*cb)(SSL *ssl, const uint8_t *id,
+-                                                int id_len, int *out_copy)) {
++void SSL_CTX_sess_set_get_cb(SSL_CTX *ctx, SSL_get_session_cb cb) {
+   FromOpaque(ctx)->get_session_cb = cb;
+ }
+ 
+-SSL_SESSION *(*SSL_CTX_sess_get_get_cb(SSL_CTX *ctx))(SSL *ssl,
+-                                                      const uint8_t *id,
+-                                                      int id_len,
+-                                                      int *out_copy) {
++SSL_get_session_cb SSL_CTX_sess_get_get_cb(SSL_CTX *ctx) {
+   return FromOpaque(ctx)->get_session_cb;
+ }
+ 
+diff --git a/ssl/test/test_config.cc b/ssl/test/test_config.cc
+index bd547a8a5..a16ee914d 100644
+--- a/ssl/test/test_config.cc
++++ b/ssl/test/test_config.cc
+@@ -1085,17 +1085,15 @@ static void InfoCallback(const SSL *ssl, int type, int val) {
+   }
+ }
+ 
+-static SSL_SESSION *GetSessionCallback(SSL *ssl, const uint8_t *data, int len,
+-                                       int *copy) {
++static ssl_session_lookup_result_t GetSessionCallback(
++    SSL *ssl, const uint8_t *data, size_t len, SSL_SESSION **out) {
+   TestState *async_state = GetTestState(ssl);
+   if (async_state->session) {
+-    *copy = 0;
+-    return async_state->session.release();
+-  } else if (async_state->pending_session) {
+-    return SSL_magic_pending_session_ptr();
+-  } else {
+-    return nullptr;
++    *out = async_state->session.release();
++    return ssl_session_lookup_found;
+   }
++  return async_state->pending_session ? ssl_session_lookup_pending
++                                      : ssl_session_lookup_miss;
+ }
+ 
+ static void CurrentTimeCallback(const SSL *ssl, timeval *out_clock) {
