@@ -348,7 +348,25 @@ fn equal_width_digests_remain_bound_to_the_extracted_key() {
     let mut other_output = [0; 32];
     key.expand(b"info", &mut bound_output).unwrap();
     imported.expand(b"info", &mut other_output).unwrap();
-    assert_ne!(bound_output, other_output);
+    // Independent Python standard-library HMAC reference values.
+    assert_eq!(
+        bound_output.as_slice(),
+        decode("9ca0d662557439e3b83365f2da4626d35da195c6d9d1779f09838cf9e408966e")
+    );
+    assert_eq!(
+        other_output.as_slice(),
+        decode("fa571b190fb3918a1020386fe8041c7eae59118c5ef6266b130230a5b5b33f4f")
+    );
+    let key_512 = sha512_256.extract(b"salt", b"key").unwrap();
+    assert_eq!(
+        key_512.as_prk().as_bytes(),
+        decode("0262b537d2a1e5da74731cf95bfb2198490e7b3078faff43b284163a3ceec972")
+    );
+    key_512.expand(b"info", &mut other_output).unwrap();
+    assert_eq!(
+        other_output.as_slice(),
+        decode("ad634aaa909c56fc550c3f096cc5a7c85084983f48618908f592b0e37bc8d5c9")
+    );
     let mut backing = [0xa5; 64];
     let borrowed = sha256.extract_into(b"salt", b"key", &mut backing).unwrap();
     let mut borrowed_output = [0; 32];

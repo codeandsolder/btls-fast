@@ -124,6 +124,14 @@ impl HkdfSuite {
         self.digest.size()
     }
 
+    fn checked_width(self) -> Result<usize, ErrorStack> {
+        let width = self.prk_size();
+        if width == 0 || width > ffi::EVP_MAX_MD_SIZE as usize {
+            return Err(ErrorStack::internal_error_str("invalid HKDF digest width"));
+        }
+        Ok(width)
+    }
+
     /// Computes HKDF-Extract as specified in [RFC 5869, Section
     /// 2.2](https://www.rfc-editor.org/rfc/rfc5869.html#section-2.2).
     ///
@@ -169,10 +177,7 @@ impl HkdfSuite {
         ikm: &[u8],
         out: &'a mut [u8],
     ) -> Result<HkdfPrkRef<'a>, ErrorStack> {
-        let width = self.prk_size();
-        if width == 0 || width > ffi::EVP_MAX_MD_SIZE as usize {
-            return Err(ErrorStack::internal_error_str("invalid HKDF digest width"));
-        }
+        let width = self.checked_width()?;
         let out = out.get_mut(..width).ok_or_else(|| {
             ErrorStack::internal_error_str("HKDF PRK buffer is shorter than the digest output")
         })?;
@@ -211,10 +216,7 @@ impl HkdfSuite {
     /// # Errors
     /// The digest width is invalid or the PRK is shorter than HashLen.
     pub fn import_prk(self, bytes: &[u8]) -> Result<HkdfPrkRef<'_>, ErrorStack> {
-        let width = self.prk_size();
-        if width == 0 || width > ffi::EVP_MAX_MD_SIZE as usize {
-            return Err(ErrorStack::internal_error_str("invalid HKDF digest width"));
-        }
+        let width = self.checked_width()?;
         if bytes.len() < width {
             return Err(ErrorStack::internal_error_str(
                 "HKDF PRK is shorter than the digest output",
