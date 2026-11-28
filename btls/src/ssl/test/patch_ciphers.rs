@@ -422,7 +422,7 @@ fn payload(len: usize) -> Vec<u8> {
 
 fn cipher_ids_for_rule(rule: &str) -> Vec<u16> {
     let mut context = PublicSslContext::builder(SslMethod::tls()).unwrap();
-    context.set_strict_cipher_list(rule).unwrap();
+    context.set_cipher_list(rule).unwrap();
     let mut ids = context
         .ciphers()
         .expect("cipher rule produced no cipher stack")

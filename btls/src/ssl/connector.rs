@@ -13,7 +13,7 @@ use crate::ex_data::IndexSlot;
 use crate::ffi;
 use crate::ssl::{
     HandshakeError, NameType, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
-    SslMode, SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
+    SslMode, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode, SslVersion,
 };
 use crate::stack::StackRef;
 use crate::util::catch_native;
@@ -74,9 +74,9 @@ impl SslConnector {
     /// Native context creation, cipher configuration, or X.509 verification setup fails.
     pub fn bare_builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
-        ctx.set_cipher_list(
-            "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK",
-        )?;
+        // These are supported native selectors. BoringSSL has no anonymous,
+        // NULL, MD5, DES, RC4, IDEA, SEED, DSS or SRP cipher suites.
+        ctx.set_cipher_list("DEFAULT:!3DES:!aPSK")?;
         ctx.set_verify_mode(SslVerifyMode::PEER)?;
 
         Ok(SslConnectorBuilder(ctx))
@@ -602,63 +602,10 @@ impl SslAcceptor {
     /// Native context creation or cipher configuration fails.
     pub fn mozilla_intermediate_v5(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
-        ctx.set_options(SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1);
+        ctx.set_min_proto_version(Some(SslVersion::TLS1_2))?;
         ctx.set_cipher_list(
             "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:\
              ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
-        )?;
-        Ok(SslAcceptorBuilder(ctx))
-    }
-
-    /// Creates a new builder configured to connect to non-legacy clients. This should generally be
-    /// considered a reasonable default choice.
-    ///
-    /// This corresponds to the intermediate configuration of version 4 of Mozilla's server side TLS
-    /// recommendations, limited to supported server cipher suites. See its [documentation][docs] for more details on specifics.
-    ///
-    /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
-    // FIXME remove in next major version
-    ///
-    /// # Errors
-    ///
-    /// Native context creation or cipher configuration fails.
-    pub fn mozilla_intermediate(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
-        let mut ctx = ctx(method)?;
-        ctx.set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
-        ctx.set_options(SslOptions::NO_TLSV1_3);
-        ctx.set_cipher_list(
-            "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:\
-             ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-             ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:\
-             ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA384:\
-             ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:\
-             AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:\
-             AES256-SHA:DES-CBC3-SHA:!DSS",
-        )?;
-        Ok(SslAcceptorBuilder(ctx))
-    }
-
-    /// Creates a new builder configured to connect to modern clients.
-    ///
-    /// This corresponds to the modern configuration of version 4 of Mozilla's server side TLS recommendations.
-    /// See its [documentation][docs] for more details on specifics.
-    ///
-    /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
-    // FIXME remove in next major version
-    ///
-    /// # Errors
-    ///
-    /// Native context creation or cipher configuration fails.
-    pub fn mozilla_modern(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
-        let mut ctx = ctx(method)?;
-        ctx.set_options(
-            SslOptions::CIPHER_SERVER_PREFERENCE | SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1,
-        );
-        ctx.set_options(SslOptions::NO_TLSV1_3);
-        ctx.set_cipher_list(
-            "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:\
-             ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-             ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256",
         )?;
         Ok(SslAcceptorBuilder(ctx))
     }

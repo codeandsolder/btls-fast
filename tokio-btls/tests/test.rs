@@ -54,7 +54,7 @@ async fn server() {
     let addr = listener.local_addr().unwrap();
 
     let server = async move {
-        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+        let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
         acceptor
             .set_private_key_file("tests/key.pem", SslFiletype::PEM)
             .unwrap();
@@ -118,7 +118,7 @@ async fn buffered_reads_preserve_record_boundaries() {
     let expected = records.concat();
 
     let server = async {
-        let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+        let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
         acceptor
             .set_private_key_file("tests/key.pem", SslFiletype::PEM)
             .unwrap();

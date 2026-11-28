@@ -32,7 +32,7 @@
 //! use std::thread;
 //!
 //!
-//! let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+//! let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
 //! acceptor.set_private_key_file("key.pem", SslFiletype::PEM).unwrap();
 //! acceptor.set_certificate_chain_file("certs.pem").unwrap();
 //! acceptor.check_private_key().unwrap();
@@ -1768,42 +1768,14 @@ impl SslContextBuilder {
         unsafe { cvt(ffi::SSL_CTX_use_PrivateKey(self.as_ptr(), key.as_ptr())) }
     }
 
-    /// Sets the list of supported ciphers for protocols before TLSv1.3, ignoring meaningless entries.
-    ///
-    /// See [`SslContextBuilder::set_strict_cipher_list()`].
-    ///
-    /// The `set_ciphersuites` method controls the cipher suites for TLSv1.3 in OpenSSL.
-    /// BoringSSL doesn't implement `set_ciphersuites`; use [`Self::set_tls13_ciphers`] instead.
-    /// See [ssl.h](https://github.com/google/boringssl/blob/master/include/openssl/ssl.h#L1542-L1544).
-    ///
-    /// See [`ciphers`] for details on the format.
-    ///
-    /// [`ciphers`]: https://www.openssl.org/docs/manmaster/apps/ciphers.html
-    #[corresponds(SSL_CTX_set_cipher_list)]
-    pub fn set_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
-        let cipher_list = CString::new(cipher_list).map_err(ErrorStack::internal_error)?;
-        // SAFETY: The validated NUL-terminated cipher rule is borrowed for a
-        // synchronous native configuration of this exclusively borrowed context.
-        unsafe {
-            cvt(ffi::SSL_CTX_set_cipher_list(
-                self.as_ptr(),
-                cipher_list.as_ptr(),
-            ))
-        }
-    }
-
-    /// Sets the list of supported ciphers for protocols before TLSv1.3 but do not
-    /// tolerate anything meaningless in the cipher list.
-    ///
-    /// The `set_ciphersuites` method controls the cipher suites for TLSv1.3 in OpenSSL.
-    /// BoringSSL doesn't implement `set_ciphersuites`; use [`Self::set_tls13_ciphers`] instead.
-    /// See <https://github.com/google/boringssl/blob/main/include/openssl/ssl.h#L1685>
-    ///
-    /// See [`ciphers`] for details on the format.
-    ///
-    /// [`ciphers`]: <https://docs.openssl.org/master/man1/openssl-ciphers/>.
+    /// Sets the TLS 1.2 and earlier cipher rule, rejecting unknown or misplaced entries.
+    /// TLS 1.3 uses [`Self::set_tls13_ciphers`] instead. On failure the previous
+    /// cipher configuration is unchanged.
+    /// # Errors
+    /// The rule is invalid, contains a TLS 1.3 cipher, selects no ciphers, or
+    /// native configuration fails.
     #[corresponds(SSL_CTX_set_strict_cipher_list)]
-    pub fn set_strict_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
+    pub fn set_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
         let cipher_list = CString::new(cipher_list).map_err(ErrorStack::internal_error)?;
         // SAFETY: The NUL-terminated cipher rule remains valid for the
         // synchronous setter, which updates this uniquely borrowed context.
