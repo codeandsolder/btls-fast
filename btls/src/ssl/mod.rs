@@ -1297,8 +1297,8 @@ impl SslContextBuilder {
         self.set_ex_data(CTX_VERIFY_INDEX.register()?, Some(Arc::new(callback)))?;
         // SAFETY: the live context owns the registered callback state.
         unsafe {
-            ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), Some(raw_verify))
-        };
+            ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), Some(raw_verify));
+        }
         Ok(())
     }
 
@@ -1347,8 +1347,8 @@ impl SslContextBuilder {
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(raw_custom_verify),
-            )
-        };
+            );
+        }
         Ok(())
     }
 
@@ -4027,8 +4027,8 @@ impl SslRef {
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(ssl_raw_verify),
-            )
-        };
+            );
+        }
         Ok(())
     }
 
@@ -4044,8 +4044,8 @@ impl SslRef {
             cvt(ffi::SSL_clear_verify_callback(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
-            ))?
-        };
+            ))?;
+        }
         if let Some(index) = SSL_VERIFY_INDEX.get()
             && let Some(data) = self.ex_data_mut(index)
         {
@@ -4095,8 +4095,8 @@ impl SslRef {
                 self.as_ptr(),
                 c_int::from(mode.bits()),
                 Some(ssl_raw_custom_verify),
-            )
-        };
+            );
+        }
         async_callbacks::cancel_custom_verify_future(self);
         Ok(())
     }
