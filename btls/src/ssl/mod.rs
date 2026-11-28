@@ -66,7 +66,7 @@ use std::fmt;
 use std::io::prelude::*;
 use std::io::{self, IoSlice};
 use std::marker::PhantomData;
-use std::mem::{self, ManuallyDrop, MaybeUninit};
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::Deref;
 use std::panic::resume_unwind;
 use std::path::Path;
@@ -90,7 +90,7 @@ use crate::ssl::callbacks::{
 };
 use crate::ssl::ech::SslEchKeys;
 use crate::ssl::error::InnerError;
-use crate::stack::{Stack, StackRef, Stackable};
+use crate::stack::{StackRef, Stackable};
 use crate::symm::CipherCtxRef;
 use crate::try_int;
 use crate::util::native_input;
@@ -1119,6 +1119,22 @@ pub struct SslContextBuilder {
     has_shared_cert_store: bool,
 }
 
+// These setters borrow native X.509 inputs and share the capability and
+// return-code checks. The native functions never consume their arguments.
+macro_rules! checked_x509_setter {
+    ($(#[$meta:meta])* $name:ident($arg:ident: $ty:ty) => $native:ident) => {
+        $(#[$meta])*
+        #[corresponds($native)]
+        pub fn $name(&mut self, $arg: &$ty) -> Result<(), ErrorStack> {
+            self.configure_x509(|native| {
+                // SAFETY: The checked, exclusively borrowed owner and the
+                // borrowed X.509 input both stay live throughout the call.
+                unsafe { ffi::$native(native, $arg.as_ptr()) }
+            })
+        }
+    };
+}
+
 impl SslContextBuilder {
     /// Creates a new `SslContextBuilder`.
     #[corresponds(SSL_CTX_new)]
@@ -1584,36 +1600,32 @@ impl SslContextBuilder {
         }
     }
 
-    /// Sets the list of CA names sent to the client.
-    ///
-    /// The CA certificates must still be added to the trust root - they are not automatically set
-    /// as trusted by this method.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates.
-    #[corresponds(SSL_CTX_set1_client_CA_list)]
-    pub fn set_client_ca_list(&mut self, list: &StackRef<X509Name>) -> Result<(), ErrorStack> {
+    fn configure_x509(
+        &mut self,
+        configure: impl FnOnce(*mut ffi::SSL_CTX) -> c_int,
+    ) -> Result<(), ErrorStack> {
         self.ctx.check_x509()?;
-        // SAFETY: Native code copies the borrowed names before replacing the list.
-        unsafe {
-            cvt(ffi::SSL_CTX_set1_client_CA_list(
-                self.as_ptr(),
-                list.as_ptr(),
-            ))
-        }
+        cvt(configure(self.as_ptr()))
     }
 
-    /// Add the provided CA certificate to the list sent by the server to the client when
-    /// requesting client-side TLS authentication.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates. Native insertion of the CA name fails.
-    #[corresponds(SSL_CTX_add_client_CA)]
-    pub fn add_client_ca(&mut self, cacert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
+    checked_x509_setter! {
+        /// Sets the list of CA names sent to the client.
+        ///
+        /// The CA certificates must still be added to the trust root - they are not automatically set
+        /// as trusted by this method.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates.
+        set_client_ca_list(list: StackRef<X509Name>) => SSL_CTX_set1_client_CA_list
+    }
 
-        // SAFETY: The CA certificate is borrowed while the live context adds its own retained reference.
-        unsafe { cvt(ffi::SSL_CTX_add_client_CA(self.as_ptr(), cacert.as_ptr())) }
+    checked_x509_setter! {
+        /// Add the provided CA certificate to the list sent by the server to the client when
+        /// requesting client-side TLS authentication.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates. Native insertion of the CA name fails.
+        add_client_ca(cacert: X509Ref) => SSL_CTX_add_client_CA
     }
 
     /// Sets the application-defined context identifier for sessions.
@@ -1655,17 +1667,11 @@ impl SslContextBuilder {
         file: P,
         file_type: SslFiletype,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-
         let file = path_to_cstring(file.as_ref())?;
-        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
-        unsafe {
-            cvt(ffi::SSL_CTX_use_certificate_file(
-                self.as_ptr(),
-                file.as_ptr(),
-                file_type.as_raw(),
-            ))
-        }
+        self.configure_x509(|ctx| {
+            // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
+            unsafe { ffi::SSL_CTX_use_certificate_file(ctx, file.as_ptr(), file_type.as_raw()) }
+        })
     }
 
     /// Loads a certificate chain from a file.
@@ -1678,59 +1684,41 @@ impl SslContextBuilder {
         &mut self,
         file: P,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
         let file = path_to_cstring(file.as_ref())?;
-        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
-        unsafe {
-            cvt(ffi::SSL_CTX_use_certificate_chain_file(
-                self.as_ptr(),
-                file.as_ptr(),
-            ))
-        }
+        self.configure_x509(|ctx| {
+            // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
+            unsafe { ffi::SSL_CTX_use_certificate_chain_file(ctx, file.as_ptr()) }
+        })
     }
 
-    /// Replaces the complete certificate chain, starting with the leaf.
-    ///
-    /// The caller retains ownership of every certificate. A failure leaves
-    /// the previous chain and key unchanged. On success, a private key that
-    /// does not match the new leaf is discarded.
-    ///
-    /// # Errors
-    /// The context does not support X.509, the chain is empty, or installation fails.
-    #[corresponds(SSL_CTX_use_certificate_chain)]
-    pub fn set_certificate_chain(&mut self, chain: &StackRef<X509>) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-        // SAFETY: Native code serializes the borrowed chain before committing it.
-        unsafe {
-            cvt(ffi::SSL_CTX_use_certificate_chain(
-                self.as_ptr(),
-                chain.as_ptr(),
-            ))
-        }
+    checked_x509_setter! {
+        /// Replaces the complete certificate chain, starting with the leaf.
+        ///
+        /// The caller retains ownership of every certificate. A failure leaves
+        /// the previous chain and key unchanged. On success, a private key that
+        /// does not match the new leaf is discarded.
+        ///
+        /// # Errors
+        /// The context does not support X.509, the chain is empty, or installation fails.
+        set_certificate_chain(chain: StackRef<X509>) => SSL_CTX_use_certificate_chain
     }
 
-    /// Sets the leaf certificate.
-    ///
-    /// Use `add_chain_cert` to add the remainder of the certificate chain.
-    #[corresponds(SSL_CTX_use_certificate)]
-    pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-        // SAFETY: The borrowed certificate remains live while the context installs its own reference.
-        unsafe { cvt(ffi::SSL_CTX_use_certificate(self.as_ptr(), cert.as_ptr())) }
+    checked_x509_setter! {
+        /// Sets the leaf certificate.
+        ///
+        /// Use `add_chain_cert` to add the remainder of the certificate chain.
+        set_certificate(cert: X509Ref) => SSL_CTX_use_certificate
     }
 
-    /// Appends a certificate to the certificate chain.
-    ///
-    /// This chain should contain all certificates necessary to go from the certificate specified by
-    /// `set_certificate` to a trusted root.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates. Native insertion of the certificate fails.
-    #[corresponds(SSL_CTX_add1_chain_cert)]
-    pub fn add_chain_cert(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-        // SAFETY: Native code copies the borrowed certificate into the chain.
-        unsafe { cvt(ffi::SSL_CTX_add1_chain_cert(self.as_ptr(), cert.as_ptr())) }
+    checked_x509_setter! {
+        /// Appends a certificate to the certificate chain.
+        ///
+        /// This chain should contain all certificates necessary to go from the certificate specified by
+        /// `set_certificate` to a trusted root.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates. Native insertion of the certificate fails.
+        add_chain_cert(cert: X509Ref) => SSL_CTX_add1_chain_cert
     }
 
     /// Loads the private key from a file.
@@ -3665,6 +3653,15 @@ impl fmt::Debug for SslRef {
 }
 
 impl SslRef {
+    fn configure_x509(
+        &mut self,
+        configure: impl FnOnce(*mut ffi::SSL) -> c_int,
+    ) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
+        self.ssl_context().check_x509()?;
+        cvt(configure(self.as_ptr()))
+    }
+
     fn get_raw_rbio(&self) -> *mut ffi::BIO {
         // SAFETY: This live connection holds its owned BIO, and the getter only
         // returns its borrowed pointer for internal use.
@@ -5001,51 +4998,31 @@ impl SslRef {
         }
     }
 
-    /// Replaces the complete certificate chain, starting with the leaf.
-    ///
-    /// A failed replacement leaves the previous chain and key unchanged.
-    /// On success, a mismatching private key is discarded.
-    ///
-    /// # Errors
-    /// X.509 configuration is unavailable, the chain is empty, or installation fails.
-    #[corresponds(SSL_use_certificate_chain)]
-    pub fn set_certificate_chain(&mut self, chain: &StackRef<X509>) -> Result<(), ErrorStack> {
-        self.ssl_context().check_x509()?;
-        // SAFETY: Native code serializes the borrowed chain before committing it.
-        unsafe {
-            cvt(ffi::SSL_use_certificate_chain(
-                self.as_ptr(),
-                chain.as_ptr(),
-            ))
-        }
+    checked_x509_setter! {
+        /// Replaces the complete certificate chain, starting with the leaf.
+        ///
+        /// A failed replacement leaves the previous chain and key unchanged.
+        /// On success, a mismatching private key is discarded.
+        ///
+        /// # Errors
+        /// X.509 configuration is unavailable, the chain is empty, or installation fails.
+        set_certificate_chain(chain: StackRef<X509>) => SSL_use_certificate_chain
     }
 
-    /// Sets the certificate.
-    #[corresponds(SSL_use_certificate)]
-    pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ssl_context().check_x509()?;
-        // SAFETY: The certificate remains live until BoringSSL
-        // retains its own reference in the exclusively borrowed connection.
-        unsafe {
-            cvt(ffi::SSL_use_certificate(self.as_ptr(), cert.as_ptr()))?;
-        }
-
-        Ok(())
+    checked_x509_setter! {
+        /// Sets the certificate.
+        set_certificate(cert: X509Ref) => SSL_use_certificate
     }
 
-    /// Sets the list of CA names sent to the client.
-    ///
-    /// The CA certificates must still be added to the trust root - they are not automatically set
-    /// as trusted by this method.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates.
-    #[corresponds(SSL_set1_client_CA_list)]
-    pub fn set_client_ca_list(&mut self, list: &StackRef<X509Name>) -> Result<(), ErrorStack> {
-        self.ssl_context().check_x509()?;
-        // SAFETY: The names remain borrowed throughout native conversion.
-        // The native setter reports failure without consuming the input.
-        unsafe { cvt(ffi::SSL_set1_client_CA_list(self.as_ptr(), list.as_ptr())) }
+    checked_x509_setter! {
+        /// Sets the list of CA names sent to the client.
+        ///
+        /// The CA certificates must still be added to the trust root - they are not automatically set
+        /// as trusted by this method.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates.
+        set_client_ca_list(list: StackRef<X509Name>) => SSL_set1_client_CA_list
     }
 
     /// Sets the private key.
@@ -5079,13 +5056,9 @@ impl SslRef {
         SslMode::from_bits_retain(bits)
     }
 
-    /// Appends `cert` to the chain associated with the current certificate of `SSL`.
-    #[corresponds(SSL_add1_chain_cert)]
-    pub fn add_chain_cert(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ssl_context().check_x509()?;
-        // SAFETY: The live connection borrows this certificate while
-        // BoringSSL increments and stores its own reference.
-        unsafe { cvt(ffi::SSL_add1_chain_cert(self.as_ptr(), cert.as_ptr())) }
+    checked_x509_setter! {
+        /// Appends `cert` to the chain associated with the current certificate of `SSL`.
+        add_chain_cert(cert: X509Ref) => SSL_add1_chain_cert
     }
 
     /// Configures `ech_config_list` on `SSL` for offering ECH during handshakes. If the server
@@ -5535,10 +5508,12 @@ pub struct Sealed {
 // `CRYPTO_IVEC` when `iovec` has the same field layout.
 #[cfg(all(unix, not(feature = "fips")))]
 const _: () = assert!(
-    mem::size_of::<IoSlice<'static>>() == mem::size_of::<ffi::CRYPTO_IVEC>()
-        && mem::align_of::<IoSlice<'static>>() == mem::align_of::<ffi::CRYPTO_IVEC>()
-        && mem::offset_of!(libc::iovec, iov_base) == mem::offset_of!(ffi::CRYPTO_IVEC, in_)
-        && mem::offset_of!(libc::iovec, iov_len) == mem::offset_of!(ffi::CRYPTO_IVEC, len)
+    std::mem::size_of::<IoSlice<'static>>() == std::mem::size_of::<ffi::CRYPTO_IVEC>()
+        && std::mem::align_of::<IoSlice<'static>>() == std::mem::align_of::<ffi::CRYPTO_IVEC>()
+        && std::mem::offset_of!(libc::iovec, iov_base)
+            == std::mem::offset_of!(ffi::CRYPTO_IVEC, in_)
+        && std::mem::offset_of!(libc::iovec, iov_len)
+            == std::mem::offset_of!(ffi::CRYPTO_IVEC, len)
 );
 
 /// Passes `bufs` to `f` as `CRYPTO_IVEC`s.

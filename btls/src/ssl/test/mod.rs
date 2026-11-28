@@ -1887,51 +1887,61 @@ fn set_tls13_ciphers_orders_offer_and_selection() {
     assert!(ctx.set_tls13_ciphers(&[Tls13Cipher(0xc02f)]).is_err());
 }
 
+fn assert_compliance_configuration(
+    min: Option<SslVersion>,
+    max: Option<SslVersion>,
+    ciphers: &crate::stack::StackRef<ssl::SslCipher>,
+    expected: &[&str],
+) {
+    assert_eq!(min, Some(SslVersion::TLS1_2));
+    assert_eq!(max, Some(SslVersion::TLS1_3));
+    assert_eq!(ciphers.len(), expected.len());
+    for (cipher, name) in ciphers.into_iter().zip(expected) {
+        assert_eq!(cipher.name(), Some(*name));
+    }
+}
+
 #[test]
 fn test_set_compliance() {
-    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.set_compliance_policy(CompliancePolicy::FIPS_202205)
-        .unwrap();
-
-    assert_eq!(ctx.max_proto_version().unwrap(), SslVersion::TLS1_3);
-    assert_eq!(ctx.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-    const FIPS_CIPHERS: [&str; 4] = [
-        "ECDHE-ECDSA-AES128-GCM-SHA256",
-        "ECDHE-RSA-AES128-GCM-SHA256",
-        "ECDHE-ECDSA-AES256-GCM-SHA384",
-        "ECDHE-RSA-AES256-GCM-SHA384",
+    let policies: [(CompliancePolicy, &[&str]); 2] = [
+        (
+            CompliancePolicy::FIPS_202205,
+            &[
+                "ECDHE-ECDSA-AES128-GCM-SHA256",
+                "ECDHE-RSA-AES128-GCM-SHA256",
+                "ECDHE-ECDSA-AES256-GCM-SHA384",
+                "ECDHE-RSA-AES256-GCM-SHA384",
+            ],
+        ),
+        (
+            CompliancePolicy::WPA3_192_202304,
+            &[
+                "ECDHE-ECDSA-AES256-GCM-SHA384",
+                "ECDHE-RSA-AES256-GCM-SHA384",
+            ],
+        ),
     ];
-
-    let ciphers = ctx.ciphers().unwrap();
-    assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
-
-    for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
-        assert_eq!(cipher.0.name(), Some(cipher.1));
-    }
-
-    {
+    for (policy, expected) in policies {
         let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-        ctx.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
-            .unwrap();
+        ctx.set_compliance_policy(policy).unwrap();
+        assert_compliance_configuration(
+            ctx.min_proto_version(),
+            ctx.max_proto_version(),
+            ctx.ciphers().unwrap(),
+            expected,
+        );
+        assert!(ctx.set_compliance_policy(CompliancePolicy::NONE).is_err());
 
-        assert_eq!(ctx.max_proto_version().unwrap(), SslVersion::TLS1_3);
-        assert_eq!(ctx.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-        const WPA3_192_CIPHERS: [&str; 2] = [
-            "ECDHE-ECDSA-AES256-GCM-SHA384",
-            "ECDHE-RSA-AES256-GCM-SHA384",
-        ];
-
-        let ciphers = ctx.ciphers().unwrap();
-        assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
-
-        for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
-            assert_eq!(cipher.0.name(), Some(cipher.1));
-        }
-
-        ctx.set_compliance_policy(CompliancePolicy::NONE)
-            .expect_err("Testing expect err if set compliance policy to NONE");
+        let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+        let mut ssl = Ssl::new(&ctx).unwrap();
+        ssl.set_compliance_policy(policy).unwrap();
+        assert_compliance_configuration(
+            ssl.min_proto_version(),
+            ssl.max_proto_version(),
+            ssl.ciphers().unwrap(),
+            expected,
+        );
+        assert!(ssl.set_compliance_policy(CompliancePolicy::NONE).is_err());
     }
 }
 
@@ -1983,56 +1993,6 @@ fn test_info_callback() {
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::Relaxed));
-}
-
-#[test]
-fn test_ssl_set_compliance() {
-    let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
-    let mut ssl = Ssl::new(&ctx).unwrap();
-    ssl.set_compliance_policy(CompliancePolicy::FIPS_202205)
-        .unwrap();
-
-    assert_eq!(ssl.max_proto_version().unwrap(), SslVersion::TLS1_3);
-    assert_eq!(ssl.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-    const FIPS_CIPHERS: [&str; 4] = [
-        "ECDHE-ECDSA-AES128-GCM-SHA256",
-        "ECDHE-RSA-AES128-GCM-SHA256",
-        "ECDHE-ECDSA-AES256-GCM-SHA384",
-        "ECDHE-RSA-AES256-GCM-SHA384",
-    ];
-
-    let ciphers = ssl.ciphers().unwrap();
-    assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
-
-    for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
-        assert_eq!(cipher.0.name(), Some(cipher.1));
-    }
-
-    {
-        let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
-        let mut ssl = Ssl::new(&ctx).unwrap();
-        ssl.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
-            .unwrap();
-
-        assert_eq!(ssl.max_proto_version().unwrap(), SslVersion::TLS1_3);
-        assert_eq!(ssl.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-        const WPA3_192_CIPHERS: [&str; 2] = [
-            "ECDHE-ECDSA-AES256-GCM-SHA384",
-            "ECDHE-RSA-AES256-GCM-SHA384",
-        ];
-
-        let ciphers = ssl.ciphers().unwrap();
-        assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
-
-        for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
-            assert_eq!(cipher.0.name(), Some(cipher.1));
-        }
-
-        ssl.set_compliance_policy(CompliancePolicy::NONE)
-            .expect_err("Testing expect err if set compliance policy to NONE");
-    }
 }
 
 #[test]

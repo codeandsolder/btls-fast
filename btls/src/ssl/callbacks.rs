@@ -185,9 +185,6 @@ fn invoke_custom_verify(
     ssl: &mut SslRef,
     callback: impl FnOnce(&mut SslRef) -> Result<(), SslVerifyError>,
 ) -> Result<(), SslVerifyError> {
-    if custom_verify_active(ssl) {
-        return Err(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR));
-    }
     struct Restore<'a> {
         slot: &'a Cell<Option<NonNull<VerifyScope>>>,
         previous: Option<NonNull<VerifyScope>>,
@@ -196,6 +193,9 @@ fn invoke_custom_verify(
         fn drop(&mut self) {
             self.slot.set(self.previous);
         }
+    }
+    if custom_verify_active(ssl) {
+        return Err(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR));
     }
     VERIFY_SCOPE.with(|slot| {
         let scope = VerifyScope {
