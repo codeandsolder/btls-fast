@@ -1,15 +1,17 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use super::connector::{CLIENT_SESSION_INDEX, SESSION_PEER_INDEX};
+use super::connector::{NEW_SESSION_INDEX, NewSessionCallback, SESSION_PEER_INDEX};
 use super::{
-    AlpnError, CallbackRole, CertificateCompressor, ClientHello, ClientSession,
-    GetSessionPendingError, PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction,
-    SelectCertError, SniError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
-    SslInfoCallbackValue, SslRef, SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
+    ALPN_INDEX, CTX_CERT_VERIFY_INDEX, CTX_CUSTOM_VERIFY_INDEX, CTX_VERIFY_INDEX,
+    GET_SESSION_INDEX, INFO_INDEX, KEYLOG_INDEX, PSK_CLIENT_INDEX, PSK_SERVER_INDEX,
+    REMOVE_SESSION_INDEX, SELECT_CERT_INDEX, SSL_CUSTOM_VERIFY_INDEX, SSL_VERIFY_INDEX,
+    STATUS_INDEX, ServerNameCallback, TICKET_KEY_INDEX,
 };
 use super::{
-    CTX_CERT_VERIFY_INDEX, CTX_CUSTOM_VERIFY_INDEX, CTX_VERIFY_INDEX, SSL_CUSTOM_VERIFY_INDEX,
-    SSL_VERIFY_INDEX,
+    AlpnError, CertificateCompressor, ClientHello, ClientSession, GetSessionPendingError,
+    PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert,
+    SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef,
+    SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
 use crate::error::ErrorStack;
 use crate::ffi;
@@ -25,26 +27,52 @@ use std::ffi::CStr;
 use std::mem;
 use std::ptr;
 use std::slice;
-use std::str;
 use std::sync::Arc;
 
-/// `BoringSSL` retains the pointer to a private-key callback method table.
-/// Every monomorphized table therefore needs storage that outlives the native
-/// context or credential, not a temporary constructed by its setter.
-pub(super) struct PrivateKeyMethodDescriptor<M, const CREDENTIAL: bool>(
-    std::marker::PhantomData<M>,
-);
+// The native credential owns a reference-counted handle to the Rust method.
+// A single descriptor suffices for legacy and explicit credentials.
+static PRIVATE_KEY_METHOD: ffi::SSL_PRIVATE_KEY_METHOD = ffi::SSL_PRIVATE_KEY_METHOD {
+    sign: Some(raw_sign),
+    decrypt: Some(raw_decrypt),
+    complete: Some(raw_complete),
+};
 
-impl<M: PrivateKeyMethod, const CREDENTIAL: bool> PrivateKeyMethodDescriptor<M, CREDENTIAL> {
-    const TABLE: ffi::SSL_PRIVATE_KEY_METHOD = ffi::SSL_PRIVATE_KEY_METHOD {
-        sign: Some(raw_sign::<M, CREDENTIAL>),
-        decrypt: Some(raw_decrypt::<M, CREDENTIAL>),
-        complete: Some(raw_complete::<M, CREDENTIAL>),
-    };
+type OwnedPrivateKeyMethod = Arc<dyn PrivateKeyMethod>;
 
-    pub(super) const fn descriptor() -> &'static ffi::SSL_PRIVATE_KEY_METHOD {
-        &Self::TABLE
+pub(super) const fn private_key_method_descriptor() -> &'static ffi::SSL_PRIVATE_KEY_METHOD {
+    &PRIVATE_KEY_METHOD
+}
+
+unsafe extern "C" fn free_private_key_method(data: *mut c_void) {
+    // SAFETY: native owns this allocation after successful registration and
+    // invokes the destructor exactly once, after its last credential reference.
+    let _ = catch_native(|| unsafe { drop(Box::from_raw(data.cast::<OwnedPrivateKeyMethod>())) });
+}
+
+// The native setter transfers ownership on success only. Its data pointer
+// must remain valid in every native copy of the selected credential.
+pub(super) fn install_private_key_method(
+    method: impl PrivateKeyMethod,
+    install: impl FnOnce(
+        *const ffi::SSL_PRIVATE_KEY_METHOD,
+        *mut c_void,
+        Option<unsafe extern "C" fn(*mut c_void)>,
+    ) -> c_int,
+) -> Result<(), ErrorStack> {
+    let method: OwnedPrivateKeyMethod = Arc::new(method);
+    let data = Box::into_raw(Box::new(method));
+    let result = install(
+        private_key_method_descriptor(),
+        data.cast(),
+        Some(free_private_key_method),
+    );
+    if result != 1 {
+        let error = ErrorStack::get();
+        // SAFETY: the setter did not take ownership on failure.
+        unsafe { drop(Box::from_raw(data)) };
+        return Err(error);
     }
+    Ok(())
 }
 
 pub(super) extern "C" fn raw_verify(
@@ -182,20 +210,14 @@ fn psk_result(capacity: usize, callback: impl FnOnce() -> Result<usize, ErrorSta
     .unwrap_or(0)
 }
 
-pub(super) unsafe extern "C" fn raw_client_psk<F>(
+pub(super) unsafe extern "C" fn raw_client_psk(
     ssl_ptr: *mut ffi::SSL,
     hint: *const c_char,
     identity: *mut c_char,
     max_identity_len: c_uint,
     psk: *mut c_uchar,
     max_psk_len: c_uint,
-) -> c_uint
-where
-    F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
-        + 'static
-        + Sync
-        + Send,
-{
+) -> c_uint {
     if ssl_ptr.is_null() {
         return 0;
     }
@@ -229,7 +251,7 @@ where
         let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
             return Ok(0);
         };
-        let Some(callback) = context.callback::<F>(CallbackRole::PskClient) else {
+        let Some(callback) = context.slot_data(&PSK_CLIENT_INDEX) else {
             return Ok(0);
         };
         let len = callback(ssl, hint, identity, psk)?;
@@ -237,18 +259,12 @@ where
     })
 }
 
-pub(super) unsafe extern "C" fn raw_server_psk<F>(
+pub(super) unsafe extern "C" fn raw_server_psk(
     ssl: *mut ffi::SSL,
     identity: *const c_char,
     psk: *mut c_uchar,
     max_psk_len: c_uint,
-) -> c_uint
-where
-    F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8]) -> Result<usize, ErrorStack>
-        + 'static
-        + Sync
-        + Send,
-{
+) -> c_uint {
     if ssl.is_null() {
         return 0;
     }
@@ -272,7 +288,7 @@ where
         let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
             return Ok(0);
         };
-        let Some(callback) = context.callback::<F>(CallbackRole::PskServer) else {
+        let Some(callback) = context.slot_data(&PSK_SERVER_INDEX) else {
             return Ok(0);
         };
         callback(ssl, identity, psk)
@@ -296,14 +312,11 @@ pub(super) unsafe extern "C" fn ssl_raw_verify(
     catch_native(|| c_int::from(callback(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
-pub(super) unsafe extern "C" fn raw_sni<F>(
+pub(super) unsafe extern "C" fn raw_sni(
     ssl: *mut ffi::SSL,
     al: *mut c_int,
     arg: *mut c_void,
-) -> c_int
-where
-    F: Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + 'static + Sync + Send,
-{
+) -> c_int {
     if ssl.is_null() || al.is_null() || arg.is_null() {
         return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
     }
@@ -312,9 +325,9 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     // Hold the current context across a possible context switch in the callback.
     let _current_context = ssl.ssl_context().to_owned();
-    // SAFETY: the callback arg is the registered stable boxed F, owned by
+    // SAFETY: the callback arg is the registered stable boxed callback, owned by
     // either the retained current context or the native session context.
-    let callback = unsafe { &*arg.cast::<F>() };
+    let callback = unsafe { &*arg.cast::<ServerNameCallback>() };
     // SAFETY: BoringSSL initializes this alert to UNRECOGNIZED_NAME.
     let mut alert = SslAlert(unsafe { al.read() });
     let result = catch_native(|| callback(ssl, &mut alert));
@@ -330,25 +343,14 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_ticket_key<F>(
+pub(super) unsafe extern "C" fn raw_ticket_key(
     ssl: *mut ffi::SSL,
     key_name: *mut u8,
     iv: *mut u8,
     evp_ctx: *mut ffi::EVP_CIPHER_CTX,
     hmac_ctx: *mut ffi::HMAC_CTX,
     encrypt: c_int,
-) -> c_int
-where
-    F: Fn(
-            &SslRef,
-            TicketKeyMode<'_>,
-            &mut CipherCtxRef,
-            &mut HmacCtxRef,
-        ) -> TicketKeyCallbackResult
-        + 'static
-        + Sync
-        + Send,
-{
+) -> c_int {
     if ssl.is_null()
         || key_name.is_null()
         || iv.is_null()
@@ -397,7 +399,7 @@ where
     let result = catch_native(|| {
         let Some(callback) = ssl
             .session_context()
-            .and_then(|ctx| ctx.callback::<F>(CallbackRole::TicketKey))
+            .and_then(|ctx| ctx.slot_data(&TICKET_KEY_INDEX))
         else {
             return TicketKeyCallbackResult::Error;
         };
@@ -410,17 +412,14 @@ where
     result.into()
 }
 
-pub(super) unsafe extern "C" fn raw_alpn_select<F>(
+pub(super) unsafe extern "C" fn raw_alpn_select(
     ssl: *mut ffi::SSL,
     out: *mut *const c_uchar,
     outlen: *mut c_uchar,
     inbuf: *const c_uchar,
     inlen: c_uint,
     _arg: *mut c_void,
-) -> c_int
-where
-    F: for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + 'static + Sync + Send,
-{
+) -> c_int {
     if ssl.is_null() || out.is_null() || outlen.is_null() {
         return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
     }
@@ -436,7 +435,7 @@ where
     };
     let result = catch_native(|| {
         let context = ssl.ssl_context().to_owned();
-        let Some(callback) = context.callback::<F>(CallbackRole::Alpn) else {
+        let Some(callback) = context.slot_data(&ALPN_INDEX) else {
             return Err(AlpnError::ALERT_FATAL);
         };
         let selected = callback(ssl, protos)?;
@@ -476,19 +475,16 @@ fn offered_protocol<'a>(mut offered: &'a [u8], selected: &[u8]) -> Option<&'a [u
     matched
 }
 
-pub(super) unsafe extern "C" fn raw_select_cert<F>(
+pub(super) unsafe extern "C" fn raw_select_cert(
     client_hello: *const ffi::SSL_CLIENT_HELLO,
-) -> ffi::ssl_select_cert_result_t
-where
-    F: Fn(ClientHello<'_>) -> Result<SelectCertAction, SelectCertError> + Sync + Send + 'static,
-{
+) -> ffi::ssl_select_cert_result_t {
     // SAFETY: btls provides valid inputs.
     let client_hello = ClientHello(unsafe { &*client_hello });
     let ech_accepted = client_hello.ssl().ech_accepted();
 
     let ssl_context = client_hello.ssl().ssl_context().to_owned();
     let result = catch_native(|| {
-        let Some(callback) = ssl_context.callback::<F>(CallbackRole::SelectCert) else {
+        let Some(callback) = ssl_context.slot_data(&SELECT_CERT_INDEX) else {
             return Err(SelectCertError(
                 ffi::ssl_select_cert_result_t::ssl_select_cert_error,
             ));
@@ -507,16 +503,13 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_tlsext_status<F>(ssl: *mut ffi::SSL, _: *mut c_void) -> c_int
-where
-    F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
-{
+pub(super) unsafe extern "C" fn raw_tlsext_status(ssl: *mut ffi::SSL, _: *mut c_void) -> c_int {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context().to_owned();
     let ret = catch_native(|| {
-        let Some(callback) = ssl_context.callback::<F>(CallbackRole::Status) else {
+        let Some(callback) = ssl_context.slot_data(&STATUS_INDEX) else {
             return Err(ErrorStack::internal_error_str("missing OCSP callback"));
         };
         callback(ssl)
@@ -544,64 +537,43 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_new_session<F>(
-    ssl: *mut ffi::SSL,
-    session: *mut ffi::SSL_SESSION,
-) -> c_int
-where
-    F: Fn(&mut SslRef, SslSession) + 'static + Sync + Send,
-{
-    // SAFETY: btls provides valid inputs.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    // SAFETY: The BoringSSL new-session callback supplies an owned session reference for the Rust callback to consume.
-    let session = unsafe { SslSession::from_ptr(session) };
-
-    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
-        && let Some(callback) = context.callback::<F>(CallbackRole::NewSession)
-    {
-        catch_native(|| callback(ssl, session));
-    }
-    // The Rust owner consumes the reference, even without a callback.
-    1
-}
-
-pub(super) unsafe extern "C" fn raw_client_session(
+pub(super) unsafe extern "C" fn raw_new_session(
     ssl: *mut ffi::SSL,
     session: *mut ffi::SSL_SESSION,
 ) -> c_int {
-    // SAFETY: btls provides valid inputs.
+    // SAFETY: BoringSSL supplies exclusive SSL access and an owned session
+    // reference, transferred to Rust when the callback returns one.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    // SAFETY: The new-session callback supplies an owned session reference, even when no application callback is registered.
+    // SAFETY: the session reference is owned by this callback.
     let session = unsafe { SslSession::from_ptr(session) };
-
-    // Sessions from connections not created by `ConnectConfiguration::into_ssl` have no recorded
-    // peer and are dropped.
-    let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() else {
-        return 1;
-    };
-    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-        return 1;
-    };
-    let Some(callback) = context.slot_data(&CLIENT_SESSION_INDEX) else {
-        return 1;
-    };
-    let session = ClientSession::new(session, peer, ssl);
-    catch_native(|| (callback.callback)(ssl, session));
+    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
+        && let Some(callback) = context.slot_data(&NEW_SESSION_INDEX)
+    {
+        catch_native(|| match callback {
+            NewSessionCallback::Raw(callback) => callback(ssl, session),
+            NewSessionCallback::Checked(callback) => {
+                // Only connections configured by ConnectConfiguration report
+                // checked sessions. All other session references are dropped.
+                if let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() {
+                    let session = ClientSession::new(session, peer, ssl);
+                    (callback.callback)(ssl, session);
+                }
+            }
+        });
+    }
     1
 }
 
-pub(super) unsafe extern "C" fn raw_remove_session<F>(
+pub(super) unsafe extern "C" fn raw_remove_session(
     ctx: *mut ffi::SSL_CTX,
     session: *mut ffi::SSL_SESSION,
-) where
-    F: Fn(&SslContextRef, &SslSessionRef) + 'static + Sync + Send,
-{
+) {
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { SslContextRef::from_ptr(ctx) };
     // SAFETY: The removal callback borrows a session owned by the live native context; it must not be freed here.
     let session = unsafe { SslSessionRef::from_ptr(session) };
 
-    let Some(callback) = ctx.callback::<F>(CallbackRole::RemoveSession) else {
+    let Some(callback) = ctx.slot_data(&REMOVE_SESSION_INDEX) else {
         return;
     };
 
@@ -610,18 +582,12 @@ pub(super) unsafe extern "C" fn raw_remove_session<F>(
 
 type DataPtr = *const c_uchar;
 
-pub(super) unsafe extern "C" fn raw_get_session<F>(
+pub(super) unsafe extern "C" fn raw_get_session(
     ssl: *mut ffi::SSL,
     data: DataPtr,
     len: c_int,
     copy: *mut c_int,
-) -> *mut ffi::SSL_SESSION
-where
-    F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError>
-        + 'static
-        + Sync
-        + Send,
-{
+) -> *mut ffi::SSL_SESSION {
     let Ok(len) = usize::try_from(len) else {
         return ptr::null_mut();
     };
@@ -637,7 +603,7 @@ where
     let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
         return ptr::null_mut();
     };
-    let Some(callback) = context.callback::<F>(CallbackRole::GetSession) else {
+    let Some(callback) = context.slot_data(&GET_SESSION_INDEX) else {
         return ptr::null_mut();
     };
     match catch_native(|| callback(ssl, data)) {
@@ -652,23 +618,20 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_keylog<F>(ssl: *const ffi::SSL, line: *const c_char)
-where
-    F: Fn(&SslRef, &str) + 'static + Sync + Send,
-{
+pub(super) unsafe extern "C" fn raw_keylog(ssl: *const ffi::SSL, line: *const c_char) {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr(ssl.cast_mut()) };
     // SAFETY: BoringSSL exposes a sentinel pointer for an asynchronous pending-session lookup; it is not dereferenced.
     let line = unsafe { CStr::from_ptr(line).to_string_lossy() };
 
-    let Some(callback) = ssl.ssl_context().callback::<F>(CallbackRole::Keylog) else {
+    let Some(callback) = ssl.ssl_context().slot_data(&KEYLOG_INDEX) else {
         return;
     };
 
     catch_native(|| callback(ssl, &line));
 }
 
-pub(super) unsafe extern "C" fn raw_sign<M, const CREDENTIAL: bool>(
+pub(super) unsafe extern "C" fn raw_sign(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
@@ -676,10 +639,7 @@ pub(super) unsafe extern "C" fn raw_sign<M, const CREDENTIAL: bool>(
     signature_algorithm: u16,
     in_: *const u8,
     in_len: usize,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+) -> ffi::ssl_private_key_result_t {
     // SAFETY: the native private-key callback supplies readable input for
     // the duration of the call.
     let Some(input) = (unsafe { native_input(in_, in_len) }) else {
@@ -688,60 +648,57 @@ where
 
     let signature_algorithm = SslSignatureAlgorithm(signature_algorithm);
 
-    let callback = |method: &M, ssl: &mut _, output: &mut _| {
+    let callback = |method: &dyn PrivateKeyMethod, ssl: &mut _, output: &mut _| {
         method.sign(ssl, input, signature_algorithm, output)
     };
 
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, callback) }
+    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_decrypt<M, const CREDENTIAL: bool>(
+pub(super) unsafe extern "C" fn raw_decrypt(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
     max_out: usize,
     in_: *const u8,
     in_len: usize,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+) -> ffi::ssl_private_key_result_t {
     // SAFETY: the native private-key callback supplies readable input for
     // the duration of the call.
     let Some(input) = (unsafe { native_input(in_, in_len) }) else {
         return PrivateKeyMethodError::FAILURE.0;
     };
 
-    let callback = |method: &M, ssl: &mut _, output: &mut _| method.decrypt(ssl, input, output);
+    let callback = |method: &dyn PrivateKeyMethod, ssl: &mut _, output: &mut _| {
+        method.decrypt(ssl, input, output)
+    };
 
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, callback) }
+    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_complete<M, const CREDENTIAL: bool>(
+pub(super) unsafe extern "C" fn raw_complete(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
     max_out: usize,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+) -> ffi::ssl_private_key_result_t {
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, M::complete) }
+    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, PrivateKeyMethod::complete) }
 }
 
-unsafe fn raw_private_key_callback<M, const CREDENTIAL: bool>(
+unsafe fn raw_private_key_callback(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
     max_out: usize,
-    callback: impl FnOnce(&M, &mut SslRef, &mut [u8]) -> Result<usize, PrivateKeyMethodError>,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+    callback: impl FnOnce(
+        &dyn PrivateKeyMethod,
+        &mut SslRef,
+        &mut [u8],
+    ) -> Result<usize, PrivateKeyMethodError>,
+) -> ffi::ssl_private_key_result_t {
     if ssl.is_null()
         || out_len.is_null()
         || max_out > isize::MAX.unsigned_abs()
@@ -763,31 +720,12 @@ where
     // Hold a separate Arc while calling application code, rather than borrow
     // data through an SSL/credential whose configuration the callback can change.
     let result = catch_native(|| {
-        let method: Option<Arc<M>> = if CREDENTIAL {
-            #[cfg(feature = "credential")]
-            {
-                // SAFETY: BoringSSL exposes the currently selected credential
-                // for use during a private-key callback. Its typed ex-data
-                // slot was allocated for Arc<M> by the credential builder.
-                unsafe {
-                    let cred = ffi::SSL_get0_selected_credential(ssl.as_ptr());
-                    let index = super::SslCredential::registered_ex_index::<Arc<M>>()?;
-                    if cred.is_null() {
-                        return None;
-                    }
-                    ffi::SSL_CREDENTIAL_get_ex_data(cred, index.as_raw())
-                        .cast::<Arc<M>>()
-                        .as_ref()
-                        .cloned()
-                }
-            }
-            #[cfg(not(feature = "credential"))]
-            {
-                None
-            }
-        } else {
-            ssl.ssl_context()
-                .callback::<Arc<M>>(CallbackRole::PrivateKey)
+        // SAFETY: native supplies the selected credential's live, owned
+        // method data. Clone its Arc before application code can mutate SSL.
+        let method = unsafe {
+            ffi::SSL_get0_private_key_method_data(ssl.as_ptr())
+                .cast::<OwnedPrivateKeyMethod>()
+                .as_ref()
                 .cloned()
         };
         Some(callback(method.as_deref()?, ssl, output))
@@ -805,13 +743,7 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_info_callback<F>(
-    ssl: *const ffi::SSL,
-    mode: c_int,
-    value: c_int,
-) where
-    F: Fn(&SslRef, SslInfoCallbackMode, SslInfoCallbackValue) + Send + Sync + 'static,
-{
+pub(super) unsafe extern "C" fn raw_info_callback(ssl: *const ffi::SSL, mode: c_int, value: c_int) {
     // Due to FFI signature requirements we have to pass a *const SSL into this function, but
     // foreign-types requires a *mut SSL to get the Rust SslRef
     let mut_ref = ssl.cast_mut();
@@ -820,7 +752,7 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
     let ssl = unsafe { SslRef::from_ptr(mut_ref) };
     let ssl_context = ssl.ssl_context();
 
-    let Some(callback) = ssl_context.callback::<F>(CallbackRole::Info) else {
+    let Some(callback) = ssl_context.slot_data(&INFO_INDEX) else {
         return;
     };
 
@@ -834,44 +766,77 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
     catch_native(|| callback(ssl, SslInfoCallbackMode(mode), value));
 }
 
-// Both native certificate-compression entry points need the same guarded
-// callback lookup and borrowed input. The closure may only return a boolean:
-// neither a borrowed native SSL value nor an input slice can escape this scope.
-//
+// The native algorithm registration directly owns the compressor, including
+// its concrete type's destructor. No context or global registry lookup occurs.
+pub(super) fn install_certificate_compressor<C: CertificateCompressor>(
+    context: &mut super::SslContextBuilder,
+    compressor: C,
+) -> Result<(), ErrorStack> {
+    let data = Box::into_raw(Box::new(compressor));
+    // SAFETY: the context is exclusive. The callback and destructor agree on
+    // C, and native assumes ownership of the data only on success.
+    let result = unsafe {
+        crate::cvt(ffi::SSL_CTX_add_cert_compression_alg_with_data(
+            context.as_ptr(),
+            C::ALGORITHM.0,
+            const {
+                if C::CAN_COMPRESS {
+                    Some(raw_ssl_cert_compress::<C>)
+                } else {
+                    None
+                }
+            },
+            const {
+                if C::CAN_DECOMPRESS {
+                    Some(raw_ssl_cert_decompress::<C>)
+                } else {
+                    None
+                }
+            },
+            data.cast(),
+            Some(free_certificate_compressor::<C>),
+        ))
+    };
+    if let Err(error) = result {
+        // SAFETY: a failed registration never takes ownership.
+        unsafe { drop(Box::from_raw(data)) };
+        return Err(error);
+    }
+    Ok(())
+}
+
+unsafe extern "C" fn free_certificate_compressor<C: CertificateCompressor>(data: *mut c_void) {
+    // SAFETY: the successful registration owns the exact Box<C>; native
+    // invokes this destructor once after the last context reference is gone.
+    let _ = catch_native(|| unsafe { drop(Box::from_raw(data.cast::<C>())) });
+}
+
 /// # Safety
-/// Non-null SSL and input pointers must remain live and readable for this
-/// synchronous native callback. A null input is allowed only for zero length.
+/// The registration supplies the live matching compressor; the input is
+/// readable for this synchronous invocation (null only for empty input).
 unsafe fn with_certificate_compressor<C: CertificateCompressor>(
-    ssl: *mut ffi::SSL,
+    compressor: *mut c_void,
     input: *const u8,
     input_len: usize,
     run: impl FnOnce(&C, &[u8]) -> bool,
 ) -> bool {
-    if ssl.is_null() {
-        return false;
-    }
-    // SAFETY: BoringSSL supplies a live exclusive SSL borrow for this callback.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let context = ssl.ssl_context();
-    let Some(compressor) = context
-        .callback::<Option<C>>(CallbackRole::Compression)
-        .and_then(Option::as_ref)
-    else {
+    // SAFETY: the registration binds this exact C and the context owns its box.
+    let Some(compressor) = (unsafe { compressor.cast::<C>().as_ref() }) else {
         return false;
     };
-    // SAFETY: The native caller provides the input for this synchronous callback;
-    // native_input checks its bounds and the null/empty representation.
+    // SAFETY: native provides the input for this synchronous callback.
     let Some(data) = (unsafe { native_input(input, input_len) }) else {
         return false;
     };
     catch_native(|| run(compressor, data)).unwrap_or(false)
 }
 
-pub(super) unsafe extern "C" fn raw_ssl_cert_compress<C>(
+unsafe extern "C" fn raw_ssl_cert_compress<C>(
     ssl: *mut ffi::SSL,
     out: *mut ffi::CBB,
     input: *const u8,
     input_len: usize,
+    compressor: *mut c_void,
 ) -> ::std::os::raw::c_int
 where
     C: CertificateCompressor,
@@ -887,7 +852,7 @@ where
     // SAFETY: Native SSL and input are live for the synchronous callback;
     // the output CBB is non-null and exclusively writable during compression.
     if !unsafe {
-        with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
+        with_certificate_compressor::<C>(compressor, input, input_len, |compressor, data| {
             compressor.compress(data, &mut writer).is_ok()
         })
     } {
@@ -897,12 +862,13 @@ where
     1
 }
 
-pub(super) unsafe extern "C" fn raw_ssl_cert_decompress<C>(
+unsafe extern "C" fn raw_ssl_cert_decompress<C>(
     ssl: *mut ffi::SSL,
     out: *mut *mut ffi::CRYPTO_BUFFER,
     uncompressed_len: usize,
     input: *const u8,
     input_len: usize,
+    compressor: *mut c_void,
 ) -> ::std::os::raw::c_int
 where
     C: CertificateCompressor,
@@ -918,7 +884,7 @@ where
     // Constructing the output only after validating the callback and input avoids
     // allocating the advertised decompressed size for malformed native input.
     if !unsafe {
-        with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
+        with_certificate_compressor::<C>(compressor, input, input_len, |compressor, data| {
             let Ok(mut buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
                 return false;
             };

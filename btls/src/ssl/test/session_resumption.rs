@@ -247,6 +247,57 @@ fn issue_session(
 }
 
 #[test]
+fn raw_and_checked_session_callbacks_replace_each_other() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut server = Server::builder();
+    server.expected_connections_count(2);
+    let server = server.build();
+    let token = Arc::new(());
+    let raw_calls = Arc::new(AtomicUsize::new(0));
+    let mut connector = trusted_connector();
+    let captured = Arc::clone(&token);
+    connector
+        .set_client_session_callback(move |_, _| {
+            let _keep = &captured;
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&token), 2);
+    let calls = Arc::clone(&raw_calls);
+    connector
+        .set_new_session_callback(move |_, _| {
+            calls.fetch_add(1, Ordering::SeqCst);
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&token), 1);
+    let connector = connector.build();
+    let mut stream = connector
+        .connect("foobar.com", server.connect_tcp())
+        .unwrap();
+    stream.read_exact(&mut [0]).unwrap();
+    assert!(raw_calls.load(Ordering::SeqCst) > 0);
+    drop(stream);
+
+    let mut connector = trusted_connector();
+    let captured = Arc::clone(&token);
+    connector
+        .set_new_session_callback(move |_, _| {
+            let _keep = &captured;
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&token), 2);
+    let sessions = Arc::new(Mutex::new(Vec::new()));
+    collect_sessions(&mut connector, &sessions);
+    assert_eq!(Arc::strong_count(&token), 1);
+    let connector = connector.build();
+    let _session = issue_session(
+        connector.configure().unwrap(),
+        &server,
+        "foobar.com",
+        &sessions,
+    );
+}
+
+#[test]
 fn client_session_resumes_within_scope_and_domain() {
     let mut server = Server::builder();
     server.expected_connections_count(3);

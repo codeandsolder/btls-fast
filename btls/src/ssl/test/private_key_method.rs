@@ -95,20 +95,13 @@ impl PrivateKeyMethod for Method {
 }
 
 #[test]
-fn native_private_key_method_tables_have_static_identity() {
-    use crate::ssl::callbacks::PrivateKeyMethodDescriptor;
-
-    let context = PrivateKeyMethodDescriptor::<Method, false>::descriptor();
-    let context_again = PrivateKeyMethodDescriptor::<Method, false>::descriptor();
-    let credential = PrivateKeyMethodDescriptor::<Method, true>::descriptor();
-
-    assert!(std::ptr::eq(context, context_again));
-    assert!(context.sign.is_some());
-    assert!(context.decrypt.is_some());
-    assert!(context.complete.is_some());
-    assert!(credential.sign.is_some());
-    assert!(credential.decrypt.is_some());
-    assert!(credential.complete.is_some());
+fn native_private_key_method_table_has_static_identity() {
+    use crate::ssl::callbacks::private_key_method_descriptor;
+    let table = private_key_method_descriptor();
+    assert!(std::ptr::eq(table, private_key_method_descriptor()));
+    assert!(table.sign.is_some());
+    assert!(table.decrypt.is_some());
+    assert!(table.complete.is_some());
 }
 
 fn builder_with_private_key_method(method: Method) -> Builder {
@@ -282,6 +275,69 @@ fn test_sign_retry_complete_ok() {
     let client = server.client_with_root_ca();
 
     client.connect();
+}
+
+#[test]
+fn pending_private_key_operation_uses_selected_credential_after_context_switch() {
+    let wrong = Arc::new(AtomicUsize::new(0));
+    // Build the replacement context without starting a second server.
+    let mut replacement = crate::ssl::SslContext::builder(crate::ssl::SslMethod::tls()).unwrap();
+    replacement
+        .set_certificate_chain_file("test/cert.pem")
+        .unwrap();
+    let invoked = Arc::clone(&wrong);
+    replacement
+        .set_private_key_method(Method::new().complete(move |_, _| {
+            invoked.fetch_add(1, Ordering::SeqCst);
+            Err(PrivateKeyMethodError::FAILURE)
+        }))
+        .unwrap();
+    let replacement = replacement.build();
+    let message = Arc::new(OnceLock::new());
+    let saved = Arc::clone(&message);
+    let complete_calls = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::clone(&complete_calls);
+    let mut builder = builder_with_private_key_method(
+        Method::new()
+            .sign(move |ssl, input, _, _| {
+                saved.set(input.to_owned()).unwrap();
+                ssl.set_ssl_context(&replacement).unwrap();
+                Err(PrivateKeyMethodError::RETRY)
+            })
+            .complete(move |_, output| {
+                completed.fetch_add(1, Ordering::SeqCst);
+                Ok(sign_with_default_config(message.get().unwrap(), output))
+            }),
+    );
+    builder.should_error();
+    builder.err_cb(|error| {
+        let HandshakeError::WouldBlock(handshake) = error else {
+            panic!("expected pending private-key operation")
+        };
+        let mut stream = handshake.handshake().unwrap();
+        stream.write_all(&[0]).unwrap();
+    });
+    let server = builder.build();
+    server.client_with_root_ca().connect();
+    assert_eq!(complete_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(wrong.load(Ordering::SeqCst), 0);
+}
+
+#[test]
+fn replacing_private_key_method_releases_owned_state() {
+    use crate::ssl::{SslContext, SslMethod};
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let token = Arc::new(());
+    let captured = Arc::clone(&token);
+    ctx.set_private_key_method(Method::new().sign(move |_, _, _, _| {
+        let _keep = &captured;
+        Err(PrivateKeyMethodError::FAILURE)
+    }))
+    .unwrap();
+    assert_eq!(Arc::strong_count(&token), 2);
+    ctx.set_private_key(&PKey::private_key_from_pem(KEY).unwrap())
+        .unwrap();
+    assert_eq!(Arc::strong_count(&token), 1);
 }
 
 #[cfg(feature = "rpk")]

@@ -32,7 +32,7 @@
 //! use std::thread;
 //!
 //!
-//! let mut acceptor = SslAcceptor::mozilla_intermediate(SslMethod::tls()).unwrap();
+//! let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
 //! acceptor.set_private_key_file("key.pem", SslFiletype::PEM).unwrap();
 //! acceptor.set_certificate_chain_file("certs.pem").unwrap();
 //! acceptor.check_private_key().unwrap();
@@ -73,10 +73,10 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::slice;
 use std::str;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use crate::error::ErrorStack;
-use crate::ex_data::{Index, IndexRegistry, IndexSlot, replace_boxed};
+use crate::ex_data::{Index, IndexSlot, replace_boxed};
 use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
@@ -477,26 +477,57 @@ impl NameType {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum CallbackRole {
-    ServerName,
-    TicketKey,
-    Alpn,
-    SelectCert,
-    Compression,
-    PrivateKey,
-    Status,
-    PskClient,
-    PskServer,
-    NewSession,
-    RemoveSession,
-    GetSession,
-    Keylog,
-    Info,
-}
-
-static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
-    LazyLock::new(IndexRegistry::new);
+// Singleton context callbacks use one typed slot per native callback role.
+type ServerNameCallback =
+    Box<dyn Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + Send + Sync>;
+static SNI_INDEX: IndexSlot<SslContext, ServerNameCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type TicketKeyCallback = Box<
+    dyn Fn(
+            &SslRef,
+            TicketKeyMode<'_>,
+            &mut CipherCtxRef,
+            &mut HmacCtxRef,
+        ) -> TicketKeyCallbackResult
+        + Send
+        + Sync,
+>;
+static TICKET_KEY_INDEX: IndexSlot<SslContext, TicketKeyCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type AlpnCallback =
+    Box<dyn for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + Send + Sync>;
+static ALPN_INDEX: IndexSlot<SslContext, AlpnCallback> = IndexSlot::new(SslContext::new_ex_index);
+type SelectCertCallback =
+    Box<dyn Fn(ClientHello<'_>) -> Result<SelectCertAction, SelectCertError> + Send + Sync>;
+static SELECT_CERT_INDEX: IndexSlot<SslContext, SelectCertCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type StatusCallback = Box<dyn Fn(&mut SslRef) -> Result<bool, ErrorStack> + Send + Sync>;
+static STATUS_INDEX: IndexSlot<SslContext, StatusCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type PskClientCallback = Box<
+    dyn Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
+        + Send
+        + Sync,
+>;
+static PSK_CLIENT_INDEX: IndexSlot<SslContext, PskClientCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type PskServerCallback =
+    Box<dyn Fn(&mut SslRef, Option<&[u8]>, &mut [u8]) -> Result<usize, ErrorStack> + Send + Sync>;
+static PSK_SERVER_INDEX: IndexSlot<SslContext, PskServerCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type RemoveSessionCallback = Box<dyn Fn(&SslContextRef, &SslSessionRef) + Send + Sync>;
+static REMOVE_SESSION_INDEX: IndexSlot<SslContext, RemoveSessionCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type GetSessionCallback = Box<
+    dyn Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError> + Send + Sync,
+>;
+static GET_SESSION_INDEX: IndexSlot<SslContext, GetSessionCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type KeylogCallback = Box<dyn Fn(&SslRef, &str) + Send + Sync>;
+static KEYLOG_INDEX: IndexSlot<SslContext, KeylogCallback> =
+    IndexSlot::new(SslContext::new_ex_index);
+type InfoCallback = Box<dyn Fn(&SslRef, SslInfoCallbackMode, SslInfoCallbackValue) + Send + Sync>;
+static INFO_INDEX: IndexSlot<SslContext, InfoCallback> = IndexSlot::new(SslContext::new_ex_index);
 
 // One slot per verification callback, independent of the closure's concrete type.
 // Context callbacks are immutable after publication; connection callbacks may
@@ -1395,9 +1426,10 @@ impl SslContextBuilder {
             // context's ex data. Instead, pass the pointer directly as the servername arg. It's
             // still stored in ex data to manage the lifetime.
 
-            let callback_index = SslContext::register_callback::<F>(CallbackRole::ServerName)?;
+            let callback_index = SNI_INDEX.register()?;
 
-            self.ctx.replace_ex_data(callback_index, callback)?;
+            self.ctx
+                .replace_ex_data(callback_index, Box::new(callback))?;
             let callback = self
                 .ctx
                 .ex_data(callback_index)
@@ -1407,7 +1439,7 @@ impl SslContextBuilder {
             cvt(ffi::SSL_CTX_set_tlsext_servername_arg(self.as_ptr(), arg))?;
             cvt(ffi::SSL_CTX_set_tlsext_servername_callback(
                 self.as_ptr(),
-                Some(raw_sni::<F>),
+                Some(raw_sni),
             ))?;
         }
         Ok(())
@@ -1454,13 +1486,10 @@ impl SslContextBuilder {
 
         // SAFETY: The registered ticket callback is owned in context extra data before the native callback hooks are installed.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::TicketKey)?,
-                callback,
-            )?;
+            self.replace_ex_data(TICKET_KEY_INDEX.register()?, Box::new(callback))?;
             cvt(ffi::SSL_CTX_set_tlsext_ticket_key_cb(
                 self.as_ptr(),
-                Some(raw_ticket_key::<F>),
+                Some(raw_ticket_key),
             ))?;
         };
         Ok(())
@@ -1768,42 +1797,14 @@ impl SslContextBuilder {
         unsafe { cvt(ffi::SSL_CTX_use_PrivateKey(self.as_ptr(), key.as_ptr())) }
     }
 
-    /// Sets the list of supported ciphers for protocols before TLSv1.3, ignoring meaningless entries.
-    ///
-    /// See [`SslContextBuilder::set_strict_cipher_list()`].
-    ///
-    /// The `set_ciphersuites` method controls the cipher suites for TLSv1.3 in OpenSSL.
-    /// BoringSSL doesn't implement `set_ciphersuites`; use [`Self::set_tls13_ciphers`] instead.
-    /// See [ssl.h](https://github.com/google/boringssl/blob/master/include/openssl/ssl.h#L1542-L1544).
-    ///
-    /// See [`ciphers`] for details on the format.
-    ///
-    /// [`ciphers`]: https://www.openssl.org/docs/manmaster/apps/ciphers.html
-    #[corresponds(SSL_CTX_set_cipher_list)]
-    pub fn set_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
-        let cipher_list = CString::new(cipher_list).map_err(ErrorStack::internal_error)?;
-        // SAFETY: The validated NUL-terminated cipher rule is borrowed for a
-        // synchronous native configuration of this exclusively borrowed context.
-        unsafe {
-            cvt(ffi::SSL_CTX_set_cipher_list(
-                self.as_ptr(),
-                cipher_list.as_ptr(),
-            ))
-        }
-    }
-
-    /// Sets the list of supported ciphers for protocols before TLSv1.3 but do not
-    /// tolerate anything meaningless in the cipher list.
-    ///
-    /// The `set_ciphersuites` method controls the cipher suites for TLSv1.3 in OpenSSL.
-    /// BoringSSL doesn't implement `set_ciphersuites`; use [`Self::set_tls13_ciphers`] instead.
-    /// See <https://github.com/google/boringssl/blob/main/include/openssl/ssl.h#L1685>
-    ///
-    /// See [`ciphers`] for details on the format.
-    ///
-    /// [`ciphers`]: <https://docs.openssl.org/master/man1/openssl-ciphers/>.
+    /// Sets the TLS 1.2 and earlier cipher rule, rejecting unknown or misplaced entries.
+    /// TLS 1.3 uses [`Self::set_tls13_ciphers`] instead. On failure the previous
+    /// cipher configuration is unchanged.
+    /// # Errors
+    /// The rule is invalid, contains a TLS 1.3 cipher, selects no ciphers, or
+    /// native configuration fails.
     #[corresponds(SSL_CTX_set_strict_cipher_list)]
-    pub fn set_strict_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
+    pub fn set_cipher_list(&mut self, cipher_list: &str) -> Result<(), ErrorStack> {
         let cipher_list = CString::new(cipher_list).map_err(ErrorStack::internal_error)?;
         // SAFETY: The NUL-terminated cipher rule remains valid for the
         // synchronous setter, which updates this uniquely borrowed context.
@@ -1974,13 +1975,10 @@ impl SslContextBuilder {
         // SAFETY: The closure is stored in typed context extra-data before the
         // static callback entrypoint is registered. No temporary pointer escapes.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::Alpn)?,
-                callback,
-            )?;
+            self.replace_ex_data(ALPN_INDEX.register()?, Box::new(callback))?;
             ffi::SSL_CTX_set_alpn_select_cb(
                 self.as_ptr(),
-                Some(callbacks::raw_alpn_select::<F>),
+                Some(callbacks::raw_alpn_select),
                 ptr::null_mut(),
             );
         }
@@ -2038,14 +2036,8 @@ impl SslContextBuilder {
         // SAFETY: The callback is registered only after its typed extra-data
         // slot is populated; the native function stores the static entrypoint.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::SelectCert)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_set_select_certificate_cb(
-                self.as_ptr(),
-                Some(callbacks::raw_select_cert::<F>),
-            );
+            self.replace_ex_data(SELECT_CERT_INDEX.register()?, Box::new(callback))?;
+            ffi::SSL_CTX_set_select_certificate_cb(self.as_ptr(), Some(callbacks::raw_select_cert));
         }
         Ok(())
     }
@@ -2057,7 +2049,7 @@ impl SslContextBuilder {
     /// # Errors
     ///
     /// Returns an error if callback storage cannot be allocated or the algorithm cannot be registered.
-    #[corresponds(SSL_CTX_add_cert_compression_alg)]
+    #[corresponds(SSL_CTX_add_cert_compression_alg_with_data)]
     pub fn add_certificate_compression_algorithm<C>(
         &mut self,
         compressor: C,
@@ -2071,39 +2063,7 @@ impl SslContextBuilder {
                 "Either compression or decompression must be supported for algorithm to be registered"
             );
         };
-        let index = SslContext::register_callback::<Option<C>>(CallbackRole::Compression)?;
-        if self.ctx.ex_data(index).is_some_and(Option::is_some) {
-            return Err(ErrorStack::internal_error_str(
-                "compression algorithm already registered",
-            ));
-        }
-        self.set_ex_data(index, None)?;
-        // SAFETY: The native context is exclusively borrowed and receives
-        // static monomorphized callbacks. Callback state is held in its typed slot.
-        let success = unsafe {
-            ffi::SSL_CTX_add_cert_compression_alg(
-                self.as_ptr(),
-                C::ALGORITHM.0,
-                const {
-                    if C::CAN_COMPRESS {
-                        Some(callbacks::raw_ssl_cert_compress::<C>)
-                    } else {
-                        None
-                    }
-                },
-                const {
-                    if C::CAN_DECOMPRESS {
-                        Some(callbacks::raw_ssl_cert_decompress::<C>)
-                    } else {
-                        None
-                    }
-                },
-            ) == 1
-        };
-        if !success {
-            return Err(ErrorStack::get());
-        }
-        self.set_ex_data(index, Some(compressor))
+        callbacks::install_certificate_compressor(self, compressor)
     }
 
     /// Configures a custom private key method on the context.
@@ -2113,25 +2073,18 @@ impl SslContextBuilder {
     /// # Errors
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
-    #[corresponds(SSL_CTX_set_private_key_method)]
+    #[corresponds(SSL_CTX_set_private_key_method_with_data)]
     pub fn set_private_key_method<M>(&mut self, method: M) -> Result<(), ErrorStack>
     where
         M: PrivateKeyMethod,
     {
-        // SAFETY: The context retains a static method table associated with
-        // the callback type, while its Rust callback state lives in extra-data.
-        unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<Arc<M>>(CallbackRole::PrivateKey)?,
-                Arc::new(method),
-            )?;
-
-            ffi::SSL_CTX_set_private_key_method(
-                self.as_ptr(),
-                callbacks::PrivateKeyMethodDescriptor::<M, false>::descriptor(),
-            );
-        }
-        Ok(())
+        callbacks::install_private_key_method(method, |table, data, free_data| {
+            // SAFETY: the builder has exclusive context access; native owns
+            // the provided method data only if registration succeeds.
+            unsafe {
+                ffi::SSL_CTX_set_private_key_method_with_data(self.as_ptr(), table, data, free_data)
+            }
+        })
     }
 
     /// Checks for consistency between the private key and certificate.
@@ -2204,13 +2157,10 @@ impl SslContextBuilder {
         // SAFETY: The callback state is stored in typed context extra-data
         // before the native context retains its static function pointer.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::Status)?,
-                callback,
-            )?;
+            self.replace_ex_data(STATUS_INDEX.register()?, Box::new(callback))?;
             cvt(ffi::SSL_CTX_set_tlsext_status_cb(
                 self.as_ptr(),
-                Some(raw_tlsext_status::<F>),
+                Some(raw_tlsext_status),
             ))
         }
     }
@@ -2232,14 +2182,11 @@ impl SslContextBuilder {
             + Sync
             + Send,
     {
-        // SAFETY: The native context retains the monomorphized callback
+        // SAFETY: The native context retains the static callback
         // entrypoint, whose closure remains owned by its registered extra-data slot.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::PskClient)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_set_psk_client_callback(self.as_ptr(), Some(raw_client_psk::<F>));
+            self.replace_ex_data(PSK_CLIENT_INDEX.register()?, Box::new(callback))?;
+            ffi::SSL_CTX_set_psk_client_callback(self.as_ptr(), Some(raw_client_psk));
         }
         Ok(())
     }
@@ -2261,14 +2208,11 @@ impl SslContextBuilder {
             + Sync
             + Send,
     {
-        // SAFETY: The native context retains the monomorphized callback
+        // SAFETY: The native context retains the static callback
         // entrypoint, whose closure remains owned by its registered extra-data slot.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::PskServer)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_set_psk_server_callback(self.as_ptr(), Some(raw_server_psk::<F>));
+            self.replace_ex_data(PSK_SERVER_INDEX.register()?, Box::new(callback))?;
+            ffi::SSL_CTX_set_psk_server_callback(self.as_ptr(), Some(raw_server_psk));
         }
         Ok(())
     }
@@ -2300,10 +2244,10 @@ impl SslContextBuilder {
         // concrete state has already been installed in typed context extra-data.
         unsafe {
             self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::NewSession)?,
-                callback,
+                connector::NEW_SESSION_INDEX.register()?,
+                connector::NewSessionCallback::Raw(Box::new(callback)),
             )?;
-            ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(callbacks::raw_new_session::<F>));
+            ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(callbacks::raw_new_session));
         }
         Ok(())
     }
@@ -2323,14 +2267,8 @@ impl SslContextBuilder {
         // SAFETY: The native context retains a static callback entrypoint; its
         // concrete state has already been installed in typed context extra-data.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::RemoveSession)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_sess_set_remove_cb(
-                self.as_ptr(),
-                Some(callbacks::raw_remove_session::<F>),
-            );
+            self.replace_ex_data(REMOVE_SESSION_INDEX.register()?, Box::new(callback))?;
+            ffi::SSL_CTX_sess_set_remove_cb(self.as_ptr(), Some(callbacks::raw_remove_session));
         }
         Ok(())
     }
@@ -2357,14 +2295,11 @@ impl SslContextBuilder {
             + Sync
             + Send,
     {
-        self.replace_ex_data(
-            SslContext::register_callback::<F>(CallbackRole::GetSession)?,
-            callback,
-        )?;
+        self.replace_ex_data(GET_SESSION_INDEX.register()?, Box::new(callback))?;
         // SAFETY: The native context stores a static callback; its concrete state
         // is owned by the typed context extra-data slot populated above.
         unsafe {
-            ffi::SSL_CTX_sess_set_get_cb(self.as_ptr(), Some(callbacks::raw_get_session::<F>));
+            ffi::SSL_CTX_sess_set_get_cb(self.as_ptr(), Some(callbacks::raw_get_session));
         }
         Ok(())
     }
@@ -2383,14 +2318,11 @@ impl SslContextBuilder {
     where
         F: Fn(&SslRef, &str) + 'static + Sync + Send,
     {
-        // SAFETY: The context retains a monomorphized callback entrypoint, while
+        // SAFETY: The context retains a static callback entrypoint, while
         // typed extra-data owns the Rust closure for the context lifetime.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::Keylog)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_set_keylog_callback(self.as_ptr(), Some(callbacks::raw_keylog::<F>));
+            self.replace_ex_data(KEYLOG_INDEX.register()?, Box::new(callback))?;
+            ffi::SSL_CTX_set_keylog_callback(self.as_ptr(), Some(callbacks::raw_keylog));
         }
         Ok(())
     }
@@ -2735,13 +2667,10 @@ impl SslContextBuilder {
         F: Fn(&SslRef, SslInfoCallbackMode, SslInfoCallbackValue) + Send + Sync + 'static,
     {
         // SAFETY: The typed context extra-data holds the Rust closure before
-        // BoringSSL retains a static monomorphized function pointer.
+        // BoringSSL retains a static function pointer.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::Info)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_set_info_callback(self.as_ptr(), Some(callbacks::raw_info_callback::<F>));
+            self.replace_ex_data(INFO_INDEX.register()?, Box::new(callback))?;
+            ffi::SSL_CTX_set_info_callback(self.as_ptr(), Some(callbacks::raw_info_callback));
         }
         Ok(())
     }
@@ -2841,7 +2770,7 @@ impl fmt::Debug for SslContext {
 // Allocate a native index for the exact wrapper and payload type. The native
 // class-specific allocator installs the matching destructor.
 macro_rules! callback_indices {
-    ($native:ident, $allocate:ident $(, $registry:ident)?) => {
+    ($native:ident, $allocate:ident) => {
         /// Allocates a distinct typed extra-data index.
         ///
         /// # Errors
@@ -2856,14 +2785,6 @@ macro_rules! callback_indices {
                 Ok(Index::from_raw(idx))
             }
         }
-
-        $(
-        fn register_callback<T: 'static + Send + Sync>(
-            role: CallbackRole,
-        ) -> Result<Index<Self, T>, ErrorStack> {
-            $registry.register(role, Self::new_ex_index)
-        }
-        )?
     };
 }
 
@@ -2877,7 +2798,7 @@ impl SslContext {
         SslContextBuilder::new(method)
     }
 
-    callback_indices!(SSL_CTX_get_ex_new_index, get_new_idx, CONTEXT_CALLBACKS);
+    callback_indices!(SSL_CTX_get_ex_new_index, get_new_idx);
 
     /// Gets the list of supported ciphers for protocols before TLSv1.3.
     ///
@@ -2991,10 +2912,6 @@ impl SslContextRef {
 
     fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<SslContext, T>) -> Option<&T> {
         self.ex_data(slot.get()?)
-    }
-
-    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
-        self.ex_data(CONTEXT_CALLBACKS.get(role)?)
     }
 
     // The caller must establish exclusive context ownership, as on a builder.

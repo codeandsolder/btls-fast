@@ -9,15 +9,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use crate::error::ErrorStack;
 use crate::hash::MessageDigest;
 use crate::pkey::PKey;
 use crate::srtp::SrtpProfileId;
 use crate::ssl::test::server::Server;
 use crate::ssl::{
     self, ExtensionType, KeyShare, NameType, ShutdownResult, ShutdownState, Ssl, SslAcceptor,
-    SslAcceptorBuilder, SslConnector, SslContext, SslFiletype, SslInfoCallbackMode, SslMethod,
-    SslOptions, SslSignatureAlgorithm, SslStream, SslVerifyMode, Tls13Cipher,
+    SslConnector, SslContext, SslFiletype, SslInfoCallbackMode, SslMethod, SslOptions,
+    SslSignatureAlgorithm, SslStream, SslVerifyMode, Tls13Cipher,
 };
 use crate::ssl::{HandshakeError, SslVersion};
 use crate::x509::store::X509StoreBuilder;
@@ -25,6 +24,40 @@ use crate::x509::verify::X509CheckFlags;
 use crate::x509::{X509, X509Name};
 
 use super::CompliancePolicy;
+
+#[test]
+fn singleton_context_callbacks_release_replaced_closures() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let token = Arc::new(());
+    // Each registration uses a distinct closure type. All roles must release
+    // the old closure without waiting for context destruction.
+    macro_rules! replace_callback {
+        ($setter:ident, |$($arg:pat_param),*| $result:expr) => {{
+            let captured = Arc::clone(&token);
+            ctx.$setter(move |$($arg),*| { let _keep = &captured; $result }).unwrap();
+            assert_eq!(Arc::strong_count(&token), 2);
+            ctx.$setter(|$($arg),*| $result).unwrap();
+            assert_eq!(Arc::strong_count(&token), 1);
+        }};
+    }
+    replace_callback!(set_servername_callback, |_, _| Ok(()));
+    replace_callback!(set_alpn_select_callback, |_, protocols| Ok(&protocols[..0]));
+    replace_callback!(set_select_certificate_callback, |_| Ok(()));
+    replace_callback!(set_status_callback, |_| Ok(true));
+    replace_callback!(set_psk_client_callback, |_, _, _, _| Ok(0));
+    replace_callback!(set_psk_server_callback, |_, _, _| Ok(0));
+    replace_callback!(set_remove_session_callback, |_, _| ());
+    replace_callback!(set_keylog_callback, |_, _| ());
+    replace_callback!(set_info_callback, |_, _, _| ());
+    // SAFETY: the lookup always returns no session; ticket callback rejects
+    // without claiming to have initialized any cryptographic state.
+    unsafe {
+        replace_callback!(set_get_session_callback, |_, _| Ok(None));
+        replace_callback!(set_ticket_key_callback, |_, _, _, _| {
+            ssl::TicketKeyCallbackResult::Error
+        });
+    }
+}
 
 mod cert_compressor;
 mod cert_verify;
@@ -1238,14 +1271,15 @@ fn connector_no_hostname_can_disable_verify() {
     s.read_exact(&mut [0]).unwrap();
 }
 
-fn test_mozilla_server(new: fn(SslMethod) -> Result<SslAcceptorBuilder, ErrorStack>) {
+#[test]
+fn connector_client_server_mozilla_intermediate_v5() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
 
     let t = thread::spawn(move || {
         let key = PKey::private_key_from_pem(KEY).unwrap();
         let cert = X509::from_pem(CERT).unwrap();
-        let mut acceptor = new(SslMethod::tls()).unwrap();
+        let mut acceptor = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls()).unwrap();
         acceptor.set_private_key(&key).unwrap();
         acceptor.set_certificate(&cert).unwrap();
         let acceptor = acceptor.build();
@@ -1270,18 +1304,44 @@ fn test_mozilla_server(new: fn(SslMethod) -> Result<SslAcceptorBuilder, ErrorSta
 }
 
 #[test]
-fn connector_client_server_mozilla_intermediate() {
-    test_mozilla_server(SslAcceptor::mozilla_intermediate);
+fn default_connector_excludes_psk_and_triple_des() {
+    let connector = SslConnector::bare_builder(SslMethod::tls()).unwrap();
+    let ciphers = connector.ciphers().unwrap();
+    assert!(!ciphers.is_empty());
+    assert!(ciphers.iter().all(|cipher| {
+        cipher
+            .standard_name()
+            .is_some_and(|name| !name.contains("PSK") && !name.contains("3DES"))
+    }));
 }
 
 #[test]
-fn connector_client_server_mozilla_modern() {
-    test_mozilla_server(SslAcceptor::mozilla_modern);
-}
-
-#[test]
-fn connector_client_server_mozilla_intermediate_v5() {
-    test_mozilla_server(SslAcceptor::mozilla_intermediate_v5);
+fn cipher_rules_reject_invalid_configuration_without_replacing_current_list() {
+    let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+    context
+        .set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256")
+        .unwrap();
+    let expected = [0xc02f_u16];
+    for rule in [
+        "ECDHE-RSA-AES128-GCM-SHA256:UNKNOWN",
+        "ECDHE-RSA-AES128-GCM-SHA256:TLS_AES_128_GCM_SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256:@STRENGTH+AES256",
+        "ALL:!ALL",
+        "",
+    ] {
+        assert!(context.set_cipher_list(rule).is_err(), "{rule}");
+        let configured: Vec<_> = context
+            .ciphers()
+            .unwrap()
+            .iter()
+            .map(|cipher| cipher.protocol_id())
+            .collect();
+        assert_eq!(configured, expected, "{rule}");
+    }
+    context
+        .set_cipher_list("ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:@STRENGTH")
+        .unwrap();
+    assert_eq!(context.ciphers().unwrap().len(), 2);
 }
 
 #[test]

@@ -13,7 +13,7 @@ use crate::ex_data::IndexSlot;
 use crate::ffi;
 use crate::ssl::{
     HandshakeError, NameType, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
-    SslMode, SslOptions, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode,
+    SslMode, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode, SslVersion,
 };
 use crate::stack::StackRef;
 use crate::util::catch_native;
@@ -21,9 +21,9 @@ use crate::x509::{X509, X509Ref};
 use std::net::IpAddr;
 
 use super::MidHandshakeSslStream;
-use super::callbacks::raw_client_session;
+use super::callbacks::raw_new_session;
 
-pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallback> =
+pub(super) static NEW_SESSION_INDEX: IndexSlot<SslContext, NewSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
 pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
     IndexSlot::new(Ssl::new_ex_index);
@@ -74,9 +74,9 @@ impl SslConnector {
     /// Native context creation, cipher configuration, or X.509 verification setup fails.
     pub fn bare_builder(method: SslMethod) -> Result<SslConnectorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
-        ctx.set_cipher_list(
-            "DEFAULT:!aNULL:!eNULL:!MD5:!3DES:!DES:!RC4:!IDEA:!SEED:!aDSS:!SRP:!PSK",
-        )?;
+        // These are supported native selectors. BoringSSL has no anonymous,
+        // NULL, MD5, DES, RC4, IDEA, SEED, DSS or SRP cipher suites.
+        ctx.set_cipher_list("DEFAULT:!3DES:!aPSK")?;
         ctx.set_verify_mode(SslVerifyMode::PEER)?;
 
         Ok(SslConnectorBuilder(ctx))
@@ -174,14 +174,17 @@ impl SslConnectorBuilder {
             issuer: NEXT_ISSUER.fetch_add(1, Ordering::Relaxed),
             callback: Box::new(callback),
         };
-        self.set_ex_data(CLIENT_SESSION_INDEX.register()?, callback)?;
+        self.set_ex_data(
+            NEW_SESSION_INDEX.register()?,
+            NewSessionCallback::Checked(callback),
+        )?;
         // SAFETY: the builder owns a live native context for each session-cache
         // configuration call, and the callback is a static C-ABI function.
         unsafe {
             let mode =
                 ffi::SSL_CTX_get_session_cache_mode(self.as_ptr()) | ffi::SSL_SESS_CACHE_CLIENT;
             ffi::SSL_CTX_set_session_cache_mode(self.as_ptr(), mode);
-            ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(raw_client_session));
+            ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(raw_new_session));
         }
         Ok(())
     }
@@ -269,6 +272,24 @@ type ClientSessionFn = dyn Fn(&mut SslRef, ClientSession) + Sync + Send;
 pub(super) struct ClientSessionCallback {
     issuer: u64,
     pub(super) callback: Box<ClientSessionFn>,
+}
+
+type RawSessionFn = dyn Fn(&mut SslRef, SslSession) + Sync + Send;
+
+// The native new-session callback has exactly one registration. Raw and
+// checked notification must replace each other, not retain parallel state.
+pub(super) enum NewSessionCallback {
+    Raw(Box<RawSessionFn>),
+    Checked(ClientSessionCallback),
+}
+
+impl NewSessionCallback {
+    const fn checked(&self) -> Option<&ClientSessionCallback> {
+        match self {
+            Self::Raw(_) => None,
+            Self::Checked(callback) => Some(callback),
+        }
+    }
 }
 
 impl ClientSession {
@@ -403,7 +424,8 @@ where
 /// Returns the token of the client session callback installed on `context`.
 fn issuer(context: &SslContextRef) -> Option<u64> {
     context
-        .slot_data(&CLIENT_SESSION_INDEX)
+        .slot_data(&NEW_SESSION_INDEX)
+        .and_then(NewSessionCallback::checked)
         .map(|callback| callback.issuer)
 }
 
@@ -481,10 +503,12 @@ impl ConnectConfiguration {
             setup_verify_hostname(&mut self.ssl, domain)?;
         }
 
-        let reports_sessions = self
-            .ssl
-            .session_context()
-            .is_some_and(|context| context.slot_data(&CLIENT_SESSION_INDEX).is_some());
+        let reports_sessions = self.ssl.session_context().is_some_and(|context| {
+            context
+                .slot_data(&NEW_SESSION_INDEX)
+                .and_then(NewSessionCallback::checked)
+                .is_some()
+        });
         let session = self.session.take().filter(|session| {
             session.authentication.permits(
                 &session.session,
@@ -602,63 +626,10 @@ impl SslAcceptor {
     /// Native context creation or cipher configuration fails.
     pub fn mozilla_intermediate_v5(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
         let mut ctx = ctx(method)?;
-        ctx.set_options(SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1);
+        ctx.set_min_proto_version(Some(SslVersion::TLS1_2))?;
         ctx.set_cipher_list(
             "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:\
              ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305"
-        )?;
-        Ok(SslAcceptorBuilder(ctx))
-    }
-
-    /// Creates a new builder configured to connect to non-legacy clients. This should generally be
-    /// considered a reasonable default choice.
-    ///
-    /// This corresponds to the intermediate configuration of version 4 of Mozilla's server side TLS
-    /// recommendations, limited to supported server cipher suites. See its [documentation][docs] for more details on specifics.
-    ///
-    /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
-    // FIXME remove in next major version
-    ///
-    /// # Errors
-    ///
-    /// Native context creation or cipher configuration fails.
-    pub fn mozilla_intermediate(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
-        let mut ctx = ctx(method)?;
-        ctx.set_options(SslOptions::CIPHER_SERVER_PREFERENCE);
-        ctx.set_options(SslOptions::NO_TLSV1_3);
-        ctx.set_cipher_list(
-            "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:\
-             ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:\
-             ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:\
-             ECDHE-ECDSA-AES128-SHA:ECDHE-RSA-AES256-SHA384:ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA384:\
-             ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:ECDHE-ECDSA-DES-CBC3-SHA:ECDHE-RSA-DES-CBC3-SHA:\
-             AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:AES128-SHA:\
-             AES256-SHA:DES-CBC3-SHA:!DSS",
-        )?;
-        Ok(SslAcceptorBuilder(ctx))
-    }
-
-    /// Creates a new builder configured to connect to modern clients.
-    ///
-    /// This corresponds to the modern configuration of version 4 of Mozilla's server side TLS recommendations.
-    /// See its [documentation][docs] for more details on specifics.
-    ///
-    /// [docs]: https://wiki.mozilla.org/Security/Server_Side_TLS
-    // FIXME remove in next major version
-    ///
-    /// # Errors
-    ///
-    /// Native context creation or cipher configuration fails.
-    pub fn mozilla_modern(method: SslMethod) -> Result<SslAcceptorBuilder, ErrorStack> {
-        let mut ctx = ctx(method)?;
-        ctx.set_options(
-            SslOptions::CIPHER_SERVER_PREFERENCE | SslOptions::NO_TLSV1 | SslOptions::NO_TLSV1_1,
-        );
-        ctx.set_options(SslOptions::NO_TLSV1_3);
-        ctx.set_cipher_list(
-            "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:\
-             ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:\
-             ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256",
         )?;
         Ok(SslAcceptorBuilder(ctx))
     }
