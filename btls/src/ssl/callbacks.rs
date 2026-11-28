@@ -1,15 +1,17 @@
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-use super::connector::{CLIENT_SESSION_INDEX, SESSION_PEER_INDEX};
+use super::connector::{NEW_SESSION_INDEX, NewSessionCallback, SESSION_PEER_INDEX};
+use super::{
+    ALPN_INDEX, CTX_CERT_VERIFY_INDEX, CTX_CUSTOM_VERIFY_INDEX, CTX_VERIFY_INDEX,
+    GET_SESSION_INDEX, INFO_INDEX, KEYLOG_INDEX, PSK_CLIENT_INDEX, PSK_SERVER_INDEX,
+    REMOVE_SESSION_INDEX, SELECT_CERT_INDEX, SSL_CUSTOM_VERIFY_INDEX, SSL_VERIFY_INDEX,
+    STATUS_INDEX, ServerNameCallback, TICKET_KEY_INDEX,
+};
 use super::{
     AlpnError, CallbackRole, CertificateCompressor, ClientHello, ClientSession,
     GetSessionPendingError, PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction,
     SelectCertError, SniError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
     SslInfoCallbackValue, SslRef, SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
-};
-use super::{
-    CTX_CERT_VERIFY_INDEX, CTX_CUSTOM_VERIFY_INDEX, CTX_VERIFY_INDEX, SSL_CUSTOM_VERIFY_INDEX,
-    SSL_VERIFY_INDEX,
 };
 use crate::error::ErrorStack;
 use crate::ffi;
@@ -182,20 +184,14 @@ fn psk_result(capacity: usize, callback: impl FnOnce() -> Result<usize, ErrorSta
     .unwrap_or(0)
 }
 
-pub(super) unsafe extern "C" fn raw_client_psk<F>(
+pub(super) unsafe extern "C" fn raw_client_psk(
     ssl_ptr: *mut ffi::SSL,
     hint: *const c_char,
     identity: *mut c_char,
     max_identity_len: c_uint,
     psk: *mut c_uchar,
     max_psk_len: c_uint,
-) -> c_uint
-where
-    F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8], &mut [u8]) -> Result<usize, ErrorStack>
-        + 'static
-        + Sync
-        + Send,
-{
+) -> c_uint {
     if ssl_ptr.is_null() {
         return 0;
     }
@@ -229,7 +225,7 @@ where
         let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
             return Ok(0);
         };
-        let Some(callback) = context.callback::<F>(CallbackRole::PskClient) else {
+        let Some(callback) = context.slot_data(&PSK_CLIENT_INDEX) else {
             return Ok(0);
         };
         let len = callback(ssl, hint, identity, psk)?;
@@ -237,18 +233,12 @@ where
     })
 }
 
-pub(super) unsafe extern "C" fn raw_server_psk<F>(
+pub(super) unsafe extern "C" fn raw_server_psk(
     ssl: *mut ffi::SSL,
     identity: *const c_char,
     psk: *mut c_uchar,
     max_psk_len: c_uint,
-) -> c_uint
-where
-    F: Fn(&mut SslRef, Option<&[u8]>, &mut [u8]) -> Result<usize, ErrorStack>
-        + 'static
-        + Sync
-        + Send,
-{
+) -> c_uint {
     if ssl.is_null() {
         return 0;
     }
@@ -272,7 +262,7 @@ where
         let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
             return Ok(0);
         };
-        let Some(callback) = context.callback::<F>(CallbackRole::PskServer) else {
+        let Some(callback) = context.slot_data(&PSK_SERVER_INDEX) else {
             return Ok(0);
         };
         callback(ssl, identity, psk)
@@ -296,14 +286,11 @@ pub(super) unsafe extern "C" fn ssl_raw_verify(
     catch_native(|| c_int::from(callback(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
-pub(super) unsafe extern "C" fn raw_sni<F>(
+pub(super) unsafe extern "C" fn raw_sni(
     ssl: *mut ffi::SSL,
     al: *mut c_int,
     arg: *mut c_void,
-) -> c_int
-where
-    F: Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + 'static + Sync + Send,
-{
+) -> c_int {
     if ssl.is_null() || al.is_null() || arg.is_null() {
         return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
     }
@@ -312,9 +299,9 @@ where
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     // Hold the current context across a possible context switch in the callback.
     let _current_context = ssl.ssl_context().to_owned();
-    // SAFETY: the callback arg is the registered stable boxed F, owned by
+    // SAFETY: the callback arg is the registered stable boxed callback, owned by
     // either the retained current context or the native session context.
-    let callback = unsafe { &*arg.cast::<F>() };
+    let callback = unsafe { &*arg.cast::<ServerNameCallback>() };
     // SAFETY: BoringSSL initializes this alert to UNRECOGNIZED_NAME.
     let mut alert = SslAlert(unsafe { al.read() });
     let result = catch_native(|| callback(ssl, &mut alert));
@@ -330,25 +317,14 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_ticket_key<F>(
+pub(super) unsafe extern "C" fn raw_ticket_key(
     ssl: *mut ffi::SSL,
     key_name: *mut u8,
     iv: *mut u8,
     evp_ctx: *mut ffi::EVP_CIPHER_CTX,
     hmac_ctx: *mut ffi::HMAC_CTX,
     encrypt: c_int,
-) -> c_int
-where
-    F: Fn(
-            &SslRef,
-            TicketKeyMode<'_>,
-            &mut CipherCtxRef,
-            &mut HmacCtxRef,
-        ) -> TicketKeyCallbackResult
-        + 'static
-        + Sync
-        + Send,
-{
+) -> c_int {
     if ssl.is_null()
         || key_name.is_null()
         || iv.is_null()
@@ -397,7 +373,7 @@ where
     let result = catch_native(|| {
         let Some(callback) = ssl
             .session_context()
-            .and_then(|ctx| ctx.callback::<F>(CallbackRole::TicketKey))
+            .and_then(|ctx| ctx.slot_data(&TICKET_KEY_INDEX))
         else {
             return TicketKeyCallbackResult::Error;
         };
@@ -410,17 +386,14 @@ where
     result.into()
 }
 
-pub(super) unsafe extern "C" fn raw_alpn_select<F>(
+pub(super) unsafe extern "C" fn raw_alpn_select(
     ssl: *mut ffi::SSL,
     out: *mut *const c_uchar,
     outlen: *mut c_uchar,
     inbuf: *const c_uchar,
     inlen: c_uint,
     _arg: *mut c_void,
-) -> c_int
-where
-    F: for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + 'static + Sync + Send,
-{
+) -> c_int {
     if ssl.is_null() || out.is_null() || outlen.is_null() {
         return ffi::SSL_TLSEXT_ERR_ALERT_FATAL;
     }
@@ -436,7 +409,7 @@ where
     };
     let result = catch_native(|| {
         let context = ssl.ssl_context().to_owned();
-        let Some(callback) = context.callback::<F>(CallbackRole::Alpn) else {
+        let Some(callback) = context.slot_data(&ALPN_INDEX) else {
             return Err(AlpnError::ALERT_FATAL);
         };
         let selected = callback(ssl, protos)?;
@@ -476,19 +449,16 @@ fn offered_protocol<'a>(mut offered: &'a [u8], selected: &[u8]) -> Option<&'a [u
     matched
 }
 
-pub(super) unsafe extern "C" fn raw_select_cert<F>(
+pub(super) unsafe extern "C" fn raw_select_cert(
     client_hello: *const ffi::SSL_CLIENT_HELLO,
-) -> ffi::ssl_select_cert_result_t
-where
-    F: Fn(ClientHello<'_>) -> Result<SelectCertAction, SelectCertError> + Sync + Send + 'static,
-{
+) -> ffi::ssl_select_cert_result_t {
     // SAFETY: btls provides valid inputs.
     let client_hello = ClientHello(unsafe { &*client_hello });
     let ech_accepted = client_hello.ssl().ech_accepted();
 
     let ssl_context = client_hello.ssl().ssl_context().to_owned();
     let result = catch_native(|| {
-        let Some(callback) = ssl_context.callback::<F>(CallbackRole::SelectCert) else {
+        let Some(callback) = ssl_context.slot_data(&SELECT_CERT_INDEX) else {
             return Err(SelectCertError(
                 ffi::ssl_select_cert_result_t::ssl_select_cert_error,
             ));
@@ -507,16 +477,13 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_tlsext_status<F>(ssl: *mut ffi::SSL, _: *mut c_void) -> c_int
-where
-    F: Fn(&mut SslRef) -> Result<bool, ErrorStack> + 'static + Sync + Send,
-{
+pub(super) unsafe extern "C" fn raw_tlsext_status(ssl: *mut ffi::SSL, _: *mut c_void) -> c_int {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
 
     let ssl_context = ssl.ssl_context().to_owned();
     let ret = catch_native(|| {
-        let Some(callback) = ssl_context.callback::<F>(CallbackRole::Status) else {
+        let Some(callback) = ssl_context.slot_data(&STATUS_INDEX) else {
             return Err(ErrorStack::internal_error_str("missing OCSP callback"));
         };
         callback(ssl)
@@ -544,64 +511,43 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_new_session<F>(
-    ssl: *mut ffi::SSL,
-    session: *mut ffi::SSL_SESSION,
-) -> c_int
-where
-    F: Fn(&mut SslRef, SslSession) + 'static + Sync + Send,
-{
-    // SAFETY: btls provides valid inputs.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    // SAFETY: The BoringSSL new-session callback supplies an owned session reference for the Rust callback to consume.
-    let session = unsafe { SslSession::from_ptr(session) };
-
-    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
-        && let Some(callback) = context.callback::<F>(CallbackRole::NewSession)
-    {
-        catch_native(|| callback(ssl, session));
-    }
-    // The Rust owner consumes the reference, even without a callback.
-    1
-}
-
-pub(super) unsafe extern "C" fn raw_client_session(
+pub(super) unsafe extern "C" fn raw_new_session(
     ssl: *mut ffi::SSL,
     session: *mut ffi::SSL_SESSION,
 ) -> c_int {
-    // SAFETY: btls provides valid inputs.
+    // SAFETY: BoringSSL supplies exclusive SSL access and an owned session
+    // reference, transferred to Rust when the callback returns one.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    // SAFETY: The new-session callback supplies an owned session reference, even when no application callback is registered.
+    // SAFETY: the session reference is owned by this callback.
     let session = unsafe { SslSession::from_ptr(session) };
-
-    // Sessions from connections not created by `ConnectConfiguration::into_ssl` have no recorded
-    // peer and are dropped.
-    let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() else {
-        return 1;
-    };
-    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-        return 1;
-    };
-    let Some(callback) = context.slot_data(&CLIENT_SESSION_INDEX) else {
-        return 1;
-    };
-    let session = ClientSession::new(session, peer, ssl);
-    catch_native(|| (callback.callback)(ssl, session));
+    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
+        && let Some(callback) = context.slot_data(&NEW_SESSION_INDEX)
+    {
+        catch_native(|| match callback {
+            NewSessionCallback::Raw(callback) => callback(ssl, session),
+            NewSessionCallback::Checked(callback) => {
+                // Only connections configured by ConnectConfiguration report
+                // checked sessions. All other session references are dropped.
+                if let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() {
+                    let session = ClientSession::new(session, peer, ssl);
+                    (callback.callback)(ssl, session);
+                }
+            }
+        });
+    }
     1
 }
 
-pub(super) unsafe extern "C" fn raw_remove_session<F>(
+pub(super) unsafe extern "C" fn raw_remove_session(
     ctx: *mut ffi::SSL_CTX,
     session: *mut ffi::SSL_SESSION,
-) where
-    F: Fn(&SslContextRef, &SslSessionRef) + 'static + Sync + Send,
-{
+) {
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { SslContextRef::from_ptr(ctx) };
     // SAFETY: The removal callback borrows a session owned by the live native context; it must not be freed here.
     let session = unsafe { SslSessionRef::from_ptr(session) };
 
-    let Some(callback) = ctx.callback::<F>(CallbackRole::RemoveSession) else {
+    let Some(callback) = ctx.slot_data(&REMOVE_SESSION_INDEX) else {
         return;
     };
 
@@ -610,18 +556,12 @@ pub(super) unsafe extern "C" fn raw_remove_session<F>(
 
 type DataPtr = *const c_uchar;
 
-pub(super) unsafe extern "C" fn raw_get_session<F>(
+pub(super) unsafe extern "C" fn raw_get_session(
     ssl: *mut ffi::SSL,
     data: DataPtr,
     len: c_int,
     copy: *mut c_int,
-) -> *mut ffi::SSL_SESSION
-where
-    F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError>
-        + 'static
-        + Sync
-        + Send,
-{
+) -> *mut ffi::SSL_SESSION {
     let Ok(len) = usize::try_from(len) else {
         return ptr::null_mut();
     };
@@ -637,7 +577,7 @@ where
     let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
         return ptr::null_mut();
     };
-    let Some(callback) = context.callback::<F>(CallbackRole::GetSession) else {
+    let Some(callback) = context.slot_data(&GET_SESSION_INDEX) else {
         return ptr::null_mut();
     };
     match catch_native(|| callback(ssl, data)) {
@@ -652,16 +592,13 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_keylog<F>(ssl: *const ffi::SSL, line: *const c_char)
-where
-    F: Fn(&SslRef, &str) + 'static + Sync + Send,
-{
+pub(super) unsafe extern "C" fn raw_keylog(ssl: *const ffi::SSL, line: *const c_char) {
     // SAFETY: btls provides valid inputs.
     let ssl = unsafe { SslRef::from_ptr(ssl.cast_mut()) };
     // SAFETY: BoringSSL exposes a sentinel pointer for an asynchronous pending-session lookup; it is not dereferenced.
     let line = unsafe { CStr::from_ptr(line).to_string_lossy() };
 
-    let Some(callback) = ssl.ssl_context().callback::<F>(CallbackRole::Keylog) else {
+    let Some(callback) = ssl.ssl_context().slot_data(&KEYLOG_INDEX) else {
         return;
     };
 
@@ -805,13 +742,7 @@ where
     }
 }
 
-pub(super) unsafe extern "C" fn raw_info_callback<F>(
-    ssl: *const ffi::SSL,
-    mode: c_int,
-    value: c_int,
-) where
-    F: Fn(&SslRef, SslInfoCallbackMode, SslInfoCallbackValue) + Send + Sync + 'static,
-{
+pub(super) unsafe extern "C" fn raw_info_callback(ssl: *const ffi::SSL, mode: c_int, value: c_int) {
     // Due to FFI signature requirements we have to pass a *const SSL into this function, but
     // foreign-types requires a *mut SSL to get the Rust SslRef
     let mut_ref = ssl.cast_mut();
@@ -820,7 +751,7 @@ pub(super) unsafe extern "C" fn raw_info_callback<F>(
     let ssl = unsafe { SslRef::from_ptr(mut_ref) };
     let ssl_context = ssl.ssl_context();
 
-    let Some(callback) = ssl_context.callback::<F>(CallbackRole::Info) else {
+    let Some(callback) = ssl_context.slot_data(&INFO_INDEX) else {
         return;
     };
 

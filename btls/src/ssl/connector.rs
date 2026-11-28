@@ -21,9 +21,9 @@ use crate::x509::{X509, X509Ref};
 use std::net::IpAddr;
 
 use super::MidHandshakeSslStream;
-use super::callbacks::raw_client_session;
+use super::callbacks::raw_new_session;
 
-pub(super) static CLIENT_SESSION_INDEX: IndexSlot<SslContext, ClientSessionCallback> =
+pub(super) static NEW_SESSION_INDEX: IndexSlot<SslContext, NewSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
 pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
     IndexSlot::new(Ssl::new_ex_index);
@@ -174,14 +174,17 @@ impl SslConnectorBuilder {
             issuer: NEXT_ISSUER.fetch_add(1, Ordering::Relaxed),
             callback: Box::new(callback),
         };
-        self.set_ex_data(CLIENT_SESSION_INDEX.register()?, callback)?;
+        self.set_ex_data(
+            NEW_SESSION_INDEX.register()?,
+            NewSessionCallback::Checked(callback),
+        )?;
         // SAFETY: the builder owns a live native context for each session-cache
         // configuration call, and the callback is a static C-ABI function.
         unsafe {
             let mode =
                 ffi::SSL_CTX_get_session_cache_mode(self.as_ptr()) | ffi::SSL_SESS_CACHE_CLIENT;
             ffi::SSL_CTX_set_session_cache_mode(self.as_ptr(), mode);
-            ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(raw_client_session));
+            ffi::SSL_CTX_sess_set_new_cb(self.as_ptr(), Some(raw_new_session));
         }
         Ok(())
     }
@@ -269,6 +272,24 @@ type ClientSessionFn = dyn Fn(&mut SslRef, ClientSession) + Sync + Send;
 pub(super) struct ClientSessionCallback {
     issuer: u64,
     pub(super) callback: Box<ClientSessionFn>,
+}
+
+type RawSessionFn = dyn Fn(&mut SslRef, SslSession) + Sync + Send;
+
+// The native new-session callback has exactly one registration. Raw and
+// checked notification must replace each other, not retain parallel state.
+pub(super) enum NewSessionCallback {
+    Raw(Box<RawSessionFn>),
+    Checked(ClientSessionCallback),
+}
+
+impl NewSessionCallback {
+    fn checked(&self) -> Option<&ClientSessionCallback> {
+        match self {
+            Self::Raw(_) => None,
+            Self::Checked(callback) => Some(callback),
+        }
+    }
 }
 
 impl ClientSession {
@@ -403,7 +424,8 @@ where
 /// Returns the token of the client session callback installed on `context`.
 fn issuer(context: &SslContextRef) -> Option<u64> {
     context
-        .slot_data(&CLIENT_SESSION_INDEX)
+        .slot_data(&NEW_SESSION_INDEX)
+        .and_then(NewSessionCallback::checked)
         .map(|callback| callback.issuer)
 }
 
@@ -481,10 +503,12 @@ impl ConnectConfiguration {
             setup_verify_hostname(&mut self.ssl, domain)?;
         }
 
-        let reports_sessions = self
-            .ssl
-            .session_context()
-            .is_some_and(|context| context.slot_data(&CLIENT_SESSION_INDEX).is_some());
+        let reports_sessions = self.ssl.session_context().is_some_and(|context| {
+            context
+                .slot_data(&NEW_SESSION_INDEX)
+                .and_then(NewSessionCallback::checked)
+                .is_some()
+        });
         let session = self.session.take().filter(|session| {
             session.authentication.permits(
                 &session.session,
