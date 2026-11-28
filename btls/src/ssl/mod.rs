@@ -497,9 +497,6 @@ enum CallbackRole {
 
 static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
     LazyLock::new(IndexRegistry::new);
-#[cfg(not(feature = "fips"))]
-static SSL_CALLBACKS: LazyLock<IndexRegistry<Ssl, CallbackRole>> =
-    LazyLock::new(IndexRegistry::new);
 
 // One slot per verification callback, independent of the closure's concrete type.
 // Context callbacks are immutable after publication; connection callbacks may
@@ -2844,7 +2841,7 @@ impl fmt::Debug for SslContext {
 // Allocate a native index for the exact wrapper and payload type. The native
 // class-specific allocator installs the matching destructor.
 macro_rules! callback_indices {
-    ($native:ident, $allocate:ident, $registry:ident $(, #[$attr:meta])?) => {
+    ($native:ident, $allocate:ident $(, $registry:ident)?) => {
         /// Allocates a distinct typed extra-data index.
         ///
         /// # Errors
@@ -2860,12 +2857,13 @@ macro_rules! callback_indices {
             }
         }
 
-        $(#[$attr])?
+        $(
         fn register_callback<T: 'static + Send + Sync>(
             role: CallbackRole,
         ) -> Result<Index<Self, T>, ErrorStack> {
             $registry.register(role, Self::new_ex_index)
         }
+        )?
     };
 }
 
@@ -3685,7 +3683,7 @@ impl fmt::Debug for Ssl {
 }
 
 impl Ssl {
-    callback_indices!(SSL_get_ex_new_index, get_new_ssl_idx, SSL_CALLBACKS, #[cfg(not(feature = "fips"))]);
+    callback_indices!(SSL_get_ex_new_index, get_new_ssl_idx);
 
     /// Creates a new [`Ssl`].
     #[corresponds(SSL_new)]
@@ -4952,11 +4950,6 @@ impl SslRef {
 
     fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<Ssl, T>) -> Option<&T> {
         self.ex_data(slot.get()?)
-    }
-
-    #[cfg(not(feature = "fips"))]
-    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
-        self.ex_data(SSL_CALLBACKS.get(role)?)
     }
 
     fn session_context(&self) -> Option<&SslContextRef> {

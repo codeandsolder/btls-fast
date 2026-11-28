@@ -466,7 +466,7 @@ unsafe extern "C" fn raw_set_read_secret(
             cipher,
             secret,
             secret_len,
-            |method, ssl, level, cipher, secret| method.set_read_secret(ssl, level, cipher, secret),
+            QuicMethod::set_read_secret,
         )
     }
 }
@@ -486,9 +486,7 @@ unsafe extern "C" fn raw_set_write_secret(
             cipher,
             secret,
             secret_len,
-            |method, ssl, level, cipher, secret| {
-                method.set_write_secret(ssl, level, cipher, secret)
-            },
+            QuicMethod::set_write_secret,
         )
     }
 }
@@ -517,7 +515,7 @@ unsafe extern "C" fn raw_add_handshake_data(
 
 unsafe extern "C" fn raw_flush_flight(ssl: *mut ffi::SSL) -> c_int {
     // SAFETY: native keeps the SSL owner alive for this callback.
-    unsafe { with_method(ssl, |method, ssl| method.flush_flight(ssl)) }
+    unsafe { with_method(ssl, QuicMethod::flush_flight) }
 }
 
 unsafe extern "C" fn raw_send_alert(
