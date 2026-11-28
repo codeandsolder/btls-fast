@@ -470,13 +470,34 @@ fn ech_policy_callback_errors_fail_handshake() {
 
 #[test]
 fn ech_policy_callback_ownership() {
-    let context = SslContext::builder(SslMethod::tls()).unwrap().build();
-    let mut ssl = Ssl::new(&context).unwrap();
     let marker = Arc::new(());
+    let mut context = SslContext::builder(SslMethod::tls()).unwrap();
+    let captured = Arc::clone(&marker);
+    context
+        .set_ech_grease_callback(move |_, info| {
+            let _keep = &captured;
+            Ok(parameters(info, 239))
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&marker), 2);
+    context
+        .set_ech_grease_callback(|_, info| Ok(parameters(info, 240)))
+        .unwrap();
+    assert_eq!(Arc::strong_count(&marker), 1);
+    let captured = Arc::clone(&marker);
+    context
+        .set_ech_grease_callback(move |_, info| {
+            let _keep = &captured;
+            Ok(parameters(info, 239))
+        })
+        .unwrap();
+    context.clear_ech_grease_callback().unwrap();
+    assert_eq!(Arc::strong_count(&marker), 1);
+    let mut ssl = Ssl::new(&context.build()).unwrap();
     let install = |ssl: &mut SslRef| {
         let captured = Arc::clone(&marker);
         ssl.set_ech_grease_callback(move |_, info| {
-            let _ = &captured;
+            let _keep = &captured;
             Ok(parameters(info, 239))
         })
         .unwrap();
@@ -485,21 +506,16 @@ fn ech_policy_callback_ownership() {
     assert_eq!(Arc::strong_count(&marker), 2);
     install(&mut ssl);
     assert_eq!(Arc::strong_count(&marker), 2);
-    // A closure of another type takes over without freeing the earlier one.
     let other = Arc::new(());
     let captured = Arc::clone(&other);
     ssl.set_ech_grease_callback(move |_, info| {
-        let _ = &captured;
+        let _keep = &captured;
         Ok(parameters(info, 240))
     })
     .unwrap();
-    assert_eq!(Arc::strong_count(&marker), 2);
+    assert_eq!(Arc::strong_count(&marker), 1);
     assert_eq!(Arc::strong_count(&other), 2);
     ssl.clear_ech_grease_callback().unwrap();
-    assert_eq!(Arc::strong_count(&marker), 2);
-    assert_eq!(Arc::strong_count(&other), 2);
-    drop(ssl);
-    assert_eq!(Arc::strong_count(&marker), 1);
     assert_eq!(Arc::strong_count(&other), 1);
 }
 
@@ -522,7 +538,7 @@ fn ech_policy_clear_restores_context_or_default() {
                 .set_ech_grease_callback(policy(0, 239))
                 .unwrap();
             if clear_context {
-                client.ctx().clear_ech_grease_callback();
+                client.ctx().clear_ech_grease_callback().unwrap();
             }
             let client = client.build();
             let mut connection = client.builder();
