@@ -5068,7 +5068,7 @@ impl SslRef {
     /// the cleartext parameters of the ClientHelloOuter.
     ///
     /// Clients should use `get_ech_name_override` to verify the server certificate in case of ECH
-    /// rejection, and follow up with `get_ech_retry_configs` to retry the connection with a fresh
+    /// rejection, and follow up with `ech_retry_configs` to retry the connection with a fresh
     /// set of ECHConfigs. If the retry also fails, clients should report a connection failure.
     #[corresponds(SSL_set1_ech_config_list)]
     pub fn set_ech_config_list(&mut self, ech_config_list: &[u8]) -> Result<(), ErrorStack> {
@@ -5084,29 +5084,28 @@ impl SslRef {
         }
     }
 
-    /// This function returns a serialized `ECHConfigList` as provided by the
-    /// server, if one exists.
+    /// Returns the authenticated retry `ECHConfigList` after ECH rejection.
     ///
-    /// Clients should call this function when handling an `SSL_R_ECH_REJECTED` error code to
-    /// recover from potential key mismatches. If the result is `Some`, the client should retry the
-    /// connection using the returned `ECHConfigList`.
+    /// An empty successful result means the authenticated peer did not supply
+    /// retry configs. A nonempty result can be passed to
+    /// [`Self::set_ech_config_list`] for a new connection.
+    ///
+    /// # Errors
+    /// No authenticated ECH rejection is available.
     #[corresponds(SSL_get0_ech_retry_configs)]
-    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
-    pub fn get_ech_retry_configs(&self) -> Option<&[u8]> {
-        // SAFETY: The live SSL connection owns its optional
-        // ECH retry config and writes pointer and size to valid local slots.
+    pub fn ech_retry_configs(&self) -> Result<&[u8], ErrorStack> {
+        // SAFETY: The live SSL owns the retry config buffer. The native
+        // getter checks authentication before writing the output slots.
         unsafe {
             let mut data = ptr::null();
-            let mut len: usize = 0;
-            ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &raw mut data, &raw mut len);
-
-            if data.is_null() {
-                None
-            } else {
-                // SAFETY: the ECH retry bytes are owned by the live SSL
-                // connection and stay immutable for the borrowed lifetime.
-                native_input(data, len)
+            let mut len = 0;
+            if ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &raw mut data, &raw mut len) == 0 {
+                return Err(ErrorStack::internal_error_str(
+                    "no authenticated ECH rejection",
+                ));
             }
+            native_input(data, len)
+                .ok_or_else(|| ErrorStack::internal_error_str("invalid ECH retry config buffer"))
         }
     }
 
