@@ -109,11 +109,11 @@ fn make_delegation_certificate(now: i64) -> (PKey<Private>, X509) {
         .build()
         .unwrap();
     certificate.append_extension(&key_usage).unwrap();
-    certificate
-        .sign(&certificate_key, MessageDigest::sha256())
+    let certificate = certificate
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &certificate_key).unwrap())
         .unwrap();
 
-    (certificate_key, certificate.build())
+    (certificate_key, certificate)
 }
 
 fn make_delegated_credential(

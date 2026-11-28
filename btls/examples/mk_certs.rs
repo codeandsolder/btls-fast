@@ -6,6 +6,7 @@ use btls::bn::{BigNum, MsbOption};
 use btls::hash::MessageDigest;
 use btls::pkey::{PKey, PKeyRef, Private};
 use btls::rsa::Rsa;
+use btls::sign::Signer;
 use btls::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, KeyUsage, SubjectAlternativeName,
     SubjectKeyIdentifier,
@@ -54,8 +55,7 @@ fn mk_ca_cert() -> Result<(X509, PKey<Private>), Box<dyn std::error::Error>> {
         SubjectKeyIdentifier::new().build(&cert_builder.x509v3_context(None, None))?;
     cert_builder.append_extension(&subject_key_identifier)?;
 
-    cert_builder.sign(&privkey, MessageDigest::sha256())?;
-    let cert = cert_builder.build();
+    let cert = cert_builder.sign(Signer::new_oneshot(MessageDigest::sha256(), &privkey)?)?;
 
     Ok((cert, privkey))
 }
@@ -73,8 +73,7 @@ fn mk_request(privkey: &PKey<Private>) -> Result<X509Req, Box<dyn std::error::Er
     let x509_name = x509_name.build()?;
     req_builder.set_subject_name(&x509_name)?;
 
-    req_builder.sign(privkey, MessageDigest::sha256())?;
-    let req = req_builder.build();
+    let req = req_builder.sign(Signer::new_oneshot(MessageDigest::sha256(), privkey)?)?;
     Ok(req)
 }
 
@@ -135,8 +134,7 @@ fn mk_ca_signed_cert(
         .build(&cert_builder.x509v3_context(Some(ca_cert), None))?;
     cert_builder.append_extension(&subject_alt_name)?;
 
-    cert_builder.sign(ca_privkey, MessageDigest::sha256())?;
-    let cert = cert_builder.build();
+    let cert = cert_builder.sign(Signer::new_oneshot(MessageDigest::sha256(), ca_privkey)?)?;
 
     Ok((cert, privkey))
 }

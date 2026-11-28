@@ -228,6 +228,7 @@ impl Nid {
     pub const RSAESOAEP: Self = Self(ffi::NID_rsaesOaep);
     pub const MGF1: Self = Self(ffi::NID_mgf1);
     pub const RSASSAPSS: Self = Self(ffi::NID_rsassaPss);
+    pub const ED25519: Self = Self(ffi::NID_ED25519);
     pub const SHA256WITHRSAENCRYPTION: Self = Self(ffi::NID_sha256WithRSAEncryption);
     pub const SHA384WITHRSAENCRYPTION: Self = Self(ffi::NID_sha384WithRSAEncryption);
     pub const SHA512WITHRSAENCRYPTION: Self = Self(ffi::NID_sha512WithRSAEncryption);
