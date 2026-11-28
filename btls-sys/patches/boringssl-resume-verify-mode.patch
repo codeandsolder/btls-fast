@@ -1,0 +1,19 @@
+diff --git a/ssl/handshake.cc b/ssl/handshake.cc
+index 3005c4ea5..9b853d7bb 100644
+--- a/ssl/handshake.cc
++++ b/ssl/handshake.cc
+@@ -352,10 +352,12 @@ enum ssl_verify_result_t ssl_reverify_peer_cert(SSL_HANDSHAKE *hs,
+                                                 bool send_alert) {
+   SSLImpl *const ssl = hs->ssl;
+   assert(ssl->s3->established_session == nullptr);
+-  assert(hs->config->verify_mode != SSL_VERIFY_NONE);
+ 
+   uint8_t alert = SSL_AD_CERTIFICATE_UNKNOWN;
+   enum ssl_verify_result_t ret = ssl_verify_invalid;
+-  if (hs->config->custom_verify_callback != nullptr) {
++  // This is application configuration, not an internal invariant. Reject
++  // it consistently in debug and release builds without calling the verifier.
++  if (hs->config->verify_mode != SSL_VERIFY_NONE &&
++      hs->config->custom_verify_callback != nullptr) {
+     ret = hs->config->custom_verify_callback(ssl, &alert);
+   }
