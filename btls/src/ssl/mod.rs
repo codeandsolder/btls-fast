@@ -123,8 +123,6 @@ pub use self::ech_grease::{
 pub use self::error::{Error, ErrorCode, HandshakeError};
 pub use self::quic::{QuicEncryptionLevel, QuicMethod, QuicMethodError};
 
-use self::connector::earliest_not_after;
-
 mod async_callbacks;
 mod bio;
 pub use self::bio::{BioReadBuf, ReadUninit};
@@ -3444,25 +3442,37 @@ impl SslSessionRef {
         }
     }
 
-    /// Returns the earliest expiry in the peer certificate chain, as seconds since the Unix epoch.
+    /// Returns the earliest expiry in the peer-supplied certificate chain,
+    /// as seconds since the Unix epoch, or `None` if no certificates were sent.
     ///
-    /// Returns `None` when the session holds no peer certificates.
+    /// This is informational; the effective verification policy may use a
+    /// different time or build a different trust chain.
+    ///
+    /// # Errors
+    /// A certificate or its expiration time cannot be decoded.
     #[corresponds(SSL_SESSION_get0_peer_certificates)]
-    #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
-    pub fn peer_chain_not_after(&self) -> Option<i64> {
-        // SAFETY: the session owns the stack and its buffers for the duration of this call, and
-        // each parsed certificate holds its own reference to its buffer.
+    pub fn peer_chain_not_after(&self) -> Result<Option<i64>, ErrorStack> {
+        // SAFETY: the live session owns the immutable native stack and its buffers;
+        // every parsed certificate acquires a new Rust-owned native reference.
         unsafe {
             let certs =
                 ffi::SSL_SESSION_get0_peer_certificates(self.as_ptr()).cast::<ffi::OPENSSL_STACK>();
             if certs.is_null() {
-                return None;
+                return Ok(None);
             }
-            earliest_not_after((0..ffi::OPENSSL_sk_num(certs)).filter_map(|index| {
-                let buffer = ffi::OPENSSL_sk_value(certs, index).cast::<ffi::CRYPTO_BUFFER>();
-                let cert = ffi::X509_parse_from_buffer(buffer);
-                (!cert.is_null()).then(|| X509::from_ptr(cert))
-            }))
+            let mut earliest: Option<i64> = None;
+            for index in 0..ffi::OPENSSL_sk_num(certs) {
+                let buffer =
+                    cvt_p(ffi::OPENSSL_sk_value(certs, index).cast::<ffi::CRYPTO_BUFFER>())?;
+                let cert = X509::from_ptr(cvt_p(ffi::X509_parse_from_buffer(buffer))?);
+                let mut not_after = 0;
+                cvt(ffi::ASN1_TIME_to_posix(
+                    cert.not_after().as_ptr(),
+                    &raw mut not_after,
+                ))?;
+                earliest = Some(earliest.map_or(not_after, |current| current.min(not_after)));
+            }
+            Ok(earliest)
         }
     }
 

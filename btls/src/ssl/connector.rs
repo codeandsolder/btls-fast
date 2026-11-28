@@ -1,7 +1,6 @@
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreign_types::ForeignTypeRef;
 use openssl_macros::corresponds;
@@ -14,9 +13,7 @@ use crate::ssl::{
     HandshakeError, NameType, Ssl, SslContext, SslContextBuilder, SslContextRef, SslMethod,
     SslMode, SslRef, SslSession, SslSessionRef, SslStream, SslVerifyMode, SslVersion,
 };
-use crate::stack::StackRef;
 use crate::util::catch_native;
-use crate::x509::{X509, X509Ref};
 use std::net::IpAddr;
 
 use super::MidHandshakeSslStream;
@@ -238,7 +235,6 @@ pub struct ClientSession {
 struct SessionAuthentication {
     peer: SessionPeer,
     verify_peer: bool,
-    not_after: Option<i64>,
     issuer: Arc<()>,
 }
 
@@ -305,7 +301,6 @@ impl ClientSessionCallback {
             authentication: SessionAuthentication {
                 peer,
                 verify_peer,
-                not_after: chain_not_after(ssl),
                 issuer: Arc::clone(&self.issuer),
             },
         }
@@ -321,7 +316,9 @@ impl ClientSession {
 }
 
 impl SessionAuthentication {
-    /// Reject mismatched scope and obviously stale sessions before native validation.
+    /// Reject incompatible identities and policies before native chain validation.
+    /// Certificate time, trust and other verification parameters are evaluated
+    /// exclusively by the final native verifier.
     fn permits(
         &self,
         session: &SslSessionRef,
@@ -343,16 +340,6 @@ impl SessionAuthentication {
             && self.peer.sni == sni
             && (self.peer.verify_hostname || !verify_hostname)
             && (self.verify_peer || !verify_peer)
-            && !(verify_peer && self.chain_expired())
-    }
-
-    /// Returns whether a certificate in the peer chain has expired by now.
-    fn chain_expired(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|now| i64::try_from(now.as_secs()).ok());
-        matches!((self.not_after, now), (Some(not_after), Some(now)) if now >= not_after)
     }
 }
 
@@ -390,42 +377,6 @@ unsafe extern "C" fn validate_client_session(
         unsafe { ffi::SSL_check_client_session_x509(ssl.as_ptr(), session.as_ptr()) }
     })
     .unwrap_or(0)
-}
-
-/// Returns the earliest expiry in the peer certificate chain, as POSIX time.
-fn chain_not_after(ssl: &SslRef) -> Option<i64> {
-    if !ssl.ssl_context().has_x509_support() {
-        return None;
-    }
-
-    // SAFETY: the context uses the X.509 method, and the chain lives as long as the session
-    // borrowed through `ssl`.
-    let chain = unsafe { ffi::SSL_get_peer_full_cert_chain(ssl.as_ptr()) };
-    if chain.is_null() {
-        return None;
-    }
-    // SAFETY: a non-null chain is borrowed from the live native SSL session;
-    // the reference is used only while `ssl` keeps its owner alive.
-    let chain = unsafe { StackRef::<X509>::from_ptr(chain) };
-    earliest_not_after(chain)
-}
-
-/// Returns the earliest expiry among `certs`, as POSIX time.
-pub(super) fn earliest_not_after<I>(certs: I) -> Option<i64>
-where
-    I: IntoIterator,
-    I::Item: Deref<Target = X509Ref>,
-{
-    certs
-        .into_iter()
-        .filter_map(|cert| {
-            let mut not_after = 0;
-            // SAFETY: `cert` is valid, and `not_after` is a valid output.
-            let ok =
-                unsafe { ffi::ASN1_TIME_to_posix(cert.not_after().as_ptr(), &raw mut not_after) };
-            (ok == 1).then_some(not_after)
-        })
-        .min()
 }
 
 /// Returns the registration identity of a checked session notification callback.
