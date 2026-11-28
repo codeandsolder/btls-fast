@@ -37,15 +37,18 @@ fn assert_vectors(digest: MessageDigest, vectors: &[TestVector]) {
         let expected_okm = decode(vector.okm);
 
         let prk = suite.extract(&salt, &ikm).unwrap();
-        assert_eq!(prk.as_ref(), expected_prk.as_slice());
-        assert_eq!(prk.len(), suite.prk_size());
+        assert_eq!(prk.as_prk().as_bytes(), expected_prk.as_slice());
+        assert_eq!(prk.as_prk().as_bytes().len(), suite.prk_size());
 
         let mut prk_into = [0; 64];
-        let len = suite.extract_into(&salt, &ikm, &mut prk_into).unwrap();
-        assert_eq!(&prk_into[..len], expected_prk.as_slice());
+        let borrowed = suite.extract_into(&salt, &ikm, &mut prk_into).unwrap();
+        assert_eq!(borrowed.as_bytes(), expected_prk.as_slice());
+        let mut borrowed_okm = vec![0; expected_okm.len()];
+        borrowed.expand(&info, &mut borrowed_okm).unwrap();
+        assert_eq!(borrowed_okm, expected_okm);
 
         let mut okm = vec![0u8; expected_okm.len()];
-        suite.expand(prk.as_ref(), &info, &mut okm).unwrap();
+        prk.expand(&info, &mut okm).unwrap();
         assert_eq!(okm, expected_okm);
     }
 }
@@ -154,7 +157,11 @@ fn expand_matches_rfc5869_case_2_at_block_boundaries() {
 
     for length in [1, 31, 32, 33, 63, 64, 65] {
         let mut okm = vec![0; length];
-        suite.expand(&prk, &info, &mut okm).unwrap();
+        suite
+            .import_prk(&prk)
+            .unwrap()
+            .expand(&info, &mut okm)
+            .unwrap();
         assert_eq!(okm, expected[..length]);
     }
 }
@@ -164,12 +171,12 @@ fn empty_inputs_and_zero_output() {
     let suite = HkdfSuite::new(MessageDigest::sha256());
     let prk = suite.extract(&[], &[]).unwrap();
     assert_eq!(
-        prk.as_ref(),
+        prk.as_prk().as_bytes(),
         decode("b613679a0814d9ec772f95d778c35fc5ff1697c493715653c6c712144292c5ad").as_slice()
     );
 
     let mut okm = [];
-    suite.expand(prk.as_ref(), &[], &mut okm).unwrap();
+    prk.expand(&[], &mut okm).unwrap();
 }
 
 #[test]
@@ -184,11 +191,13 @@ fn extract_only_writes_the_digest_width() {
     let suite = HkdfSuite::new(MessageDigest::sha256());
     let mut out = [0xa5; 47];
     let prk = suite.extract(b"salt", b"ikm").unwrap();
-    let len = suite.extract_into(b"salt", b"ikm", &mut out).unwrap();
-    assert_eq!(len, 32);
-    assert_eq!(&out[..len], prk.as_ref());
-    assert_eq!(&out[len..], &[0xa5; 15]);
-    assert_eq!(format!("{prk:?}"), "HkdfPrk { len: 32, .. }");
+    let borrowed = suite.extract_into(b"salt", b"ikm", &mut out).unwrap();
+    assert_eq!(borrowed.as_bytes().len(), 32);
+    assert_eq!(borrowed.as_bytes(), prk.as_prk().as_bytes());
+    assert_eq!(&out[32..], &[0xa5; 15]);
+    let debug = format!("{prk:?}");
+    assert!(debug.contains("len: 32"));
+    assert!(!debug.contains("buf"));
 }
 
 #[test]
@@ -196,7 +205,7 @@ fn extract_accepts_empty_ikm_with_a_nonempty_salt() {
     let suite = HkdfSuite::new(MessageDigest::sha256());
     let prk = suite.extract(b"salt", &[]).unwrap();
     assert_eq!(
-        prk.as_ref(),
+        prk.as_prk().as_bytes(),
         decode("379d7f7966f400cb6e3c0b2cca4bf8a2db03b8c81fef8020015b5a3103c30460").as_slice()
     );
 }
@@ -249,10 +258,10 @@ fn output_limit_is_enforced_for_each_digest() {
         assert_eq!(suite.prk_size(), case.prk_size);
 
         let prk = suite.extract(&[], &[]).unwrap();
-        assert_eq!(prk.as_ref(), decode(case.prk).as_slice());
+        assert_eq!(prk.as_prk().as_bytes(), decode(case.prk).as_slice());
 
         let mut max = vec![0xa5; 255 * case.prk_size];
-        suite.expand(prk.as_ref(), &[], &mut max).unwrap();
+        prk.expand(&[], &mut max).unwrap();
         let digest = hash(case.digest, &max).unwrap();
         assert_eq!(digest.as_ref(), decode(case.output_hash).as_slice());
         assert_eq!(
@@ -261,7 +270,7 @@ fn output_limit_is_enforced_for_each_digest() {
         );
 
         let mut too_long = vec![0xa5; max.len() + 1];
-        let error = suite.expand(prk.as_ref(), &[], &mut too_long).unwrap_err();
+        let error = prk.expand(&[], &mut too_long).unwrap_err();
         assert!(!error.errors().is_empty());
         assert_eq!(error.errors()[0].reason(), Some("OUTPUT_TOO_LARGE"));
         assert!(too_long.iter().all(|&byte| byte == 0xa5));
@@ -301,7 +310,11 @@ fn expand_accepts_a_prk_longer_than_hash_len() {
         let prk: Vec<_> = (0..=suite.prk_size() as u8).collect();
         let info = b"longer than HashLen PRK";
         let mut okm = vec![0; decode(case.expected).len()];
-        suite.expand(&prk, info, &mut okm).unwrap();
+        suite
+            .import_prk(&prk)
+            .unwrap()
+            .expand(info, &mut okm)
+            .unwrap();
         assert_eq!(okm, decode(case.expected));
     }
 }
@@ -317,10 +330,29 @@ fn expand_rejects_a_prk_shorter_than_hash_len() {
         let suite = HkdfSuite::new(digest);
         for prk_len in [0, suite.prk_size() - 1] {
             let prk = vec![0; prk_len];
-            let mut okm = [0xa5];
-            let error = suite.expand(&prk, b"info", &mut okm).unwrap_err();
+            let error = suite.import_prk(&prk).unwrap_err();
             assert!(!error.errors().is_empty());
-            assert_eq!(okm, [0xa5]);
         }
     }
+}
+
+#[test]
+fn equal_width_digests_remain_bound_to_the_extracted_key() {
+    let sha256 = HkdfSuite::new(MessageDigest::sha256());
+    let sha512_256 = HkdfSuite::new(MessageDigest::sha512_256());
+    let key = sha256.extract(b"salt", b"key").unwrap();
+    assert!(key.as_prk().digest() == MessageDigest::sha256());
+    let imported = sha512_256.import_prk(key.as_prk().as_bytes()).unwrap();
+    assert!(imported.digest() == MessageDigest::sha512_256());
+    let mut bound_output = [0; 32];
+    let mut other_output = [0; 32];
+    key.expand(b"info", &mut bound_output).unwrap();
+    imported.expand(b"info", &mut other_output).unwrap();
+    assert_ne!(bound_output, other_output);
+    let mut backing = [0xa5; 64];
+    let borrowed = sha256.extract_into(b"salt", b"key", &mut backing).unwrap();
+    let mut borrowed_output = [0; 32];
+    borrowed.expand(b"info", &mut borrowed_output).unwrap();
+    assert_eq!(borrowed_output, bound_output);
+    assert_eq!(&backing[32..], &[0xa5; 32]);
 }
