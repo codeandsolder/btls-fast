@@ -46,7 +46,7 @@ fn singleton_context_callbacks_release_replaced_closures() {
     replace_callback!(set_status_callback, |_| Ok(true));
     replace_callback!(set_psk_client_callback, |_, _, _, _| Ok(0));
     replace_callback!(set_psk_server_callback, |_, _, _| Ok(0));
-    replace_callback!(set_remove_session_callback, |_, _| ());
+    replace_callback!(set_remove_session_callback, |_| ());
     replace_callback!(set_keylog_callback, |_, _| ());
     replace_callback!(set_info_callback, |_, _, _| ());
     // SAFETY: the lookup always returns no session.
@@ -70,6 +70,7 @@ mod reverify;
 mod server;
 mod server_padding;
 mod session;
+mod session_cache;
 mod session_resumption;
 mod trust_anchors;
 mod verify;

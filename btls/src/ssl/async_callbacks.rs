@@ -293,7 +293,8 @@ impl SslContextBuilder {
     ///
     /// # Safety
     ///
-    /// The returned [`SslSession`] must not be associated with a different [`SslContextBuilder`].
+    /// Return only authenticated server sessions for the same authentication
+    /// scope, as required by [`SslContextBuilder::set_get_session_callback`].
     ///
     /// # Errors
     ///

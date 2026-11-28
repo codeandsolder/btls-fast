@@ -547,16 +547,17 @@ pub(super) unsafe extern "C" fn raw_remove_session(
     ctx: *mut ffi::SSL_CTX,
     session: *mut ffi::SSL_SESSION,
 ) {
-    // SAFETY: btls provides valid inputs.
+    // SAFETY: native invokes removal notifications before destroying
+    // context extra-data. Never expose this potentially dying context to
+    // application code, which could otherwise try to acquire a reference.
     let ctx = unsafe { SslContextRef::from_ptr(ctx) };
-    // SAFETY: The removal callback borrows a session owned by the live native context; it must not be freed here.
-    let session = unsafe { SslSessionRef::from_ptr(session) };
-
     let Some(callback) = ctx.slot_data(&REMOVE_SESSION_INDEX) else {
         return;
     };
-
-    catch_native(|| callback(ctx, session));
+    // SAFETY: the detached cache entry owns a session reference throughout
+    // the callback, including during destruction of the context.
+    let session = unsafe { SslSessionRef::from_ptr(session) };
+    catch_native(|| callback(session));
 }
 
 type DataPtr = *const c_uchar;
