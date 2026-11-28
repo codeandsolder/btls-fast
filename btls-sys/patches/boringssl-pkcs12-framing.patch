@@ -1,0 +1,94 @@
+diff --git a/crypto/pkcs8/pkcs8_x509.cc b/crypto/pkcs8/pkcs8_x509.cc
+index 2c0f3b62d..d7a189a03 100644
+--- a/crypto/pkcs8/pkcs8_x509.cc
++++ b/crypto/pkcs8/pkcs8_x509.cc
+@@ -50,5 +50,5 @@ int bssl::pkcs12_iterations_acceptable(uint64_t iterations) {
+   //
+   // [1] https://bugzilla.mozilla.org/show_bug.cgi?id=1436873#c14
+-  static const uint64_t kIterationsLimit = 100 * 1000000;
++  static const uint64_t kIterationsLimit = PKCS12_MAX_ITER;
+ #endif
+ 
+@@ -221,5 +221,6 @@ static int PKCS12_handle_sequence(
+ 
+   CBS child;
+-  if (!CBS_get_asn1(&in, &child, CBS_ASN1_SEQUENCE) || CBS_len(&in) != 0) {
++  if (CBS_len(sequence) != 0 ||
++      !CBS_get_asn1(&in, &child, CBS_ASN1_SEQUENCE) || CBS_len(&in) != 0) {
+     OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+     goto err;
+@@ -378,5 +379,7 @@ static int PKCS12_handle_safe_bag(CBS *safe_bag, struct pkcs12_context *ctx) {
+         !CBS_get_asn1(&cert_bag, &wrapped_cert,
+                       CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0) ||
+-        !CBS_get_asn1(&wrapped_cert, &cert, CBS_ASN1_OCTETSTRING)) {
++        !CBS_get_asn1(&wrapped_cert, &cert, CBS_ASN1_OCTETSTRING) ||
++        CBS_len(&wrapped_value) != 0 || CBS_len(&cert_bag) != 0 ||
++        CBS_len(&wrapped_cert) != 0) {
+       OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+       return 0;
+@@ -498,5 +501,5 @@ static int PKCS12_handle_content_info(CBS *content_info,
+ 
+     if (!CBS_get_asn1(&wrapped_contents, &octet_string_contents,
+-                      CBS_ASN1_OCTETSTRING)) {
++                      CBS_ASN1_OCTETSTRING) || CBS_len(&wrapped_contents) != 0) {
+       OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+       goto err;
+@@ -587,5 +590,5 @@ int PKCS12_get_key_and_certs(EVP_PKEY **out_key, STACK_OF(X509) *out_certs,
+   }
+ 
+-  if (!CBS_get_asn1(&pfx, &mac_data, CBS_ASN1_SEQUENCE)) {
++  if (!CBS_get_asn1(&pfx, &mac_data, CBS_ASN1_SEQUENCE) || CBS_len(&pfx) != 0) {
+     OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+     goto err;
+@@ -596,5 +599,6 @@ int PKCS12_get_key_and_certs(EVP_PKEY **out_key, STACK_OF(X509) *out_certs,
+   if (!CBS_get_asn1(&authsafe, &content_type, CBS_ASN1_OBJECT) ||
+       !CBS_get_asn1(&authsafe, &wrapped_authsafes,
+-                    CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0)) {
++                    CBS_ASN1_CONTEXT_SPECIFIC | CBS_ASN1_CONSTRUCTED | 0) ||
++      CBS_len(&authsafe) != 0) {
+     OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+     goto err;
+@@ -608,5 +612,6 @@ int PKCS12_get_key_and_certs(EVP_PKEY **out_key, STACK_OF(X509) *out_certs,
+   }
+ 
+-  if (!CBS_get_asn1(&wrapped_authsafes, &authsafes, CBS_ASN1_OCTETSTRING)) {
++  if (!CBS_get_asn1(&wrapped_authsafes, &authsafes, CBS_ASN1_OCTETSTRING) ||
++      CBS_len(&wrapped_authsafes) != 0) {
+     OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+     goto err;
+@@ -632,5 +637,6 @@ int PKCS12_get_key_and_certs(EVP_PKEY **out_key, STACK_OF(X509) *out_certs,
+ 
+     if (!CBS_get_asn1(&mac, &expected_mac, CBS_ASN1_OCTETSTRING) ||
+-        !CBS_get_asn1(&mac_data, &salt, CBS_ASN1_OCTETSTRING)) {
++        !CBS_get_asn1(&mac_data, &salt, CBS_ASN1_OCTETSTRING) ||
++        CBS_len(&mac) != 0) {
+       OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+       goto err;
+@@ -642,5 +648,6 @@ int PKCS12_get_key_and_certs(EVP_PKEY **out_key, STACK_OF(X509) *out_certs,
+       uint64_t iterations_u64;
+       if (!CBS_get_asn1_uint64(&mac_data, &iterations_u64) ||
+-          !pkcs12_iterations_acceptable(iterations_u64)) {
++          !pkcs12_iterations_acceptable(iterations_u64) ||
++          CBS_len(&mac_data) != 0) {
+         OPENSSL_PUT_ERROR(PKCS8, PKCS8_R_BAD_PKCS12_DATA);
+         goto err;
+@@ -1093,5 +1100,6 @@ PKCS12 *PKCS12_create(const char *password, const char *name,
+       // currently support. Omitting it is also invalid for a password-based
+       // PKCS#12 file.
+-      mac_iterations < 0 ||
++      !pkcs12_iterations_acceptable(iterations) ||
++      !pkcs12_iterations_acceptable(mac_iterations) ||
+       // Don't encode empty objects.
+       (pkey == nullptr && cert == nullptr && sk_X509_num(chain) == 0)) {
+diff --git a/include/openssl/pkcs8.h b/include/openssl/pkcs8.h
+index 3abc0c7d3..3d0d01411 100644
+--- a/include/openssl/pkcs8.h
++++ b/include/openssl/pkcs8.h
+@@ -169,4 +169,7 @@ OPENSSL_EXPORT int PKCS12_verify_mac(const PKCS12 *p12, const char *password,
+ #define PKCS12_DEFAULT_ITER 2048
+ 
++// The production limit on PKCS#12 encryption and MAC iteration counts.
++#define PKCS12_MAX_ITER 100000000
++
+ // PKCS12_create returns a newly-allocated `PKCS12` object containing `pkey`,
+ // `cert`, and `chain`, encrypted with the specified password. `name`, if not

@@ -1,0 +1,123 @@
+diff --git a/crypto/evp/pbkdf.cc b/crypto/evp/pbkdf.cc
+index 8dddbd083..b927ba4d7 100644
+--- a/crypto/evp/pbkdf.cc
++++ b/crypto/evp/pbkdf.cc
+@@ -19,4 +19,5 @@
+ #include <openssl/err.h>
+ #include <openssl/hmac.h>
++#include <openssl/mem.h>
+ 
+ #include "../internal.h"
+@@ -28,5 +29,9 @@ int PKCS5_PBKDF2_HMAC(const char *password, size_t password_len,
+                       const uint8_t *salt, size_t salt_len, uint32_t iterations,
+                       const EVP_MD *digest, size_t key_len, uint8_t *out_key) {
+-  // See RFC 8018, section 5.2.
++  // See RFC 8018, section 5.2. The iteration count must be positive.
++  if (iterations == 0) {
++    OPENSSL_PUT_ERROR(EVP, EVP_R_INVALID_PARAMETERS);
++    return 0;
++  }
+   ScopedHMAC_CTX hctx;
+   if (!HMAC_Init_ex(hctx.get(), password, password_len, digest, nullptr)) {
+@@ -40,4 +45,7 @@ int PKCS5_PBKDF2_HMAC(const char *password, size_t password_len,
+     return 0;
+   }
++  uint8_t digest_tmp[EVP_MAX_MD_SIZE];
++  uint8_t *const start = out_key;
++  size_t written = 0;
+   while (key_len > 0) {
+     size_t todo = md_len;
+@@ -53,13 +61,13 @@ int PKCS5_PBKDF2_HMAC(const char *password, size_t password_len,
+ 
+     // Compute U_1.
+-    uint8_t digest_tmp[EVP_MAX_MD_SIZE];
+     if (!HMAC_Init_ex(hctx.get(), nullptr, 0, nullptr, nullptr) ||
+         !HMAC_Update(hctx.get(), salt, salt_len) ||
+         !HMAC_Update(hctx.get(), i_buf, 4) ||
+         !HMAC_Final(hctx.get(), digest_tmp, nullptr)) {
+-      return 0;
++      goto err;
+     }
+ 
+     OPENSSL_memcpy(out_key, digest_tmp, todo);
++    written += todo;
+     for (uint32_t j = 1; j < iterations; j++) {
+       // Compute the remaining U_* values and XOR.
+@@ -67,5 +75,5 @@ int PKCS5_PBKDF2_HMAC(const char *password, size_t password_len,
+           !HMAC_Update(hctx.get(), digest_tmp, md_len) ||
+           !HMAC_Final(hctx.get(), digest_tmp, nullptr)) {
+-        return 0;
++        goto err;
+       }
+       for (size_t k = 0; k < todo; k++) {
+@@ -79,20 +87,13 @@ int PKCS5_PBKDF2_HMAC(const char *password, size_t password_len,
+   }
+ 
+-  // RFC 8018 describes iterations (c) as being a "positive integer", so a
+-  // value of 0 is an error.
+-  //
+-  // Unfortunately not all consumers of PKCS5_PBKDF2_HMAC() check their return
+-  // value, expecting it to succeed and unconditionally using `out_key`.  As a
+-  // precaution for such callsites in external code, the old behavior of
+-  // iterations < 1 being treated as iterations == 1 is preserved, but
+-  // additionally an error result is returned.
+-  //
+-  // TODO(eroman): Figure out how to remove this compatibility hack, or change
+-  // the default to something more sensible like 2048.
+-  if (iterations == 0) {
+-    return 0;
+-  }
+-
++  OPENSSL_cleanse(digest_tmp, sizeof(digest_tmp));
+   return 1;
++
++err:
++  OPENSSL_cleanse(digest_tmp, sizeof(digest_tmp));
++  if (written != 0) {
++    OPENSSL_cleanse(start, written);
++  }
++  return 0;
+ }
+ 
+diff --git a/crypto/evp/pbkdf_test.cc b/crypto/evp/pbkdf_test.cc
+index 5daffa7d9..024129910 100644
+--- a/crypto/evp/pbkdf_test.cc
++++ b/crypto/evp/pbkdf_test.cc
+@@ -138,15 +138,15 @@ TEST(PBKDFTest, ZeroIterations) {
+                                 1 /* iterations */, digest, key_len, key));
+ 
+-  // Flip the first key byte (so can later test if it got set).
+-  const uint8_t expected_first_byte = key[0];
+-  key[0] = ~key[0];
+-
+-  // However calling it with iterations=0 fails.
++  // Zero iterations is invalid and must not write a one-iteration key.
++  uint8_t unchanged[sizeof(key)];
++  memset(unchanged, 0xa5, sizeof(unchanged));
++  memcpy(key, unchanged, sizeof(key));
+   ASSERT_FALSE(PKCS5_PBKDF2_HMAC(kPassword, password_len, kSalt, salt_len,
+                                  0 /* iterations */, digest, key_len, key));
+-
+-  // For backwards compatibility, the iterations == 0 case still fills in
+-  // the out key.
+-  EXPECT_EQ(expected_first_byte, key[0]);
++  EXPECT_EQ(Bytes(unchanged), Bytes(key));
++  EXPECT_TRUE(ErrorEquals(ERR_get_error(), ERR_LIB_EVP, EVP_R_INVALID_PARAMETERS));
++  ASSERT_FALSE(PKCS5_PBKDF2_HMAC(kPassword, password_len, kSalt, salt_len,
++                                 0 /* iterations */, digest, 0, nullptr));
++  EXPECT_TRUE(ErrorEquals(ERR_get_error(), ERR_LIB_EVP, EVP_R_INVALID_PARAMETERS));
+ }
+ 
+diff --git a/include/openssl/evp.h b/include/openssl/evp.h
+index 8a767ca79..e5f5e40bb 100644
+--- a/include/openssl/evp.h
++++ b/include/openssl/evp.h
+@@ -686,5 +686,7 @@ OPENSSL_EXPORT int EVP_PKEY_print_params(BIO *out, const EVP_PKEY *pkey,
+ // PKCS5_PBKDF2_HMAC computes `iterations` iterations of PBKDF2 of `password`
+ // and `salt`, using `digest`, and outputs `key_len` bytes to `out_key`. It
+-// returns one on success and zero on allocation failure or if iterations is 0.
++// returns one on success and zero on error. Zero iterations is rejected before
++// writing output. If a native failure interrupts derivation, the bytes already
++// written are cleansed.
+ OPENSSL_EXPORT int PKCS5_PBKDF2_HMAC(const char *password, size_t password_len,
+                                      const uint8_t *salt, size_t salt_len,
