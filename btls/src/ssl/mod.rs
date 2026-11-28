@@ -1129,7 +1129,7 @@ macro_rules! checked_x509_setter {
             self.configure_x509(|native| {
                 // SAFETY: The checked, exclusively borrowed owner and the
                 // borrowed X.509 input both stay live throughout the call.
-                unsafe { ffi::$native(native, $arg.as_ptr()) }
+                unsafe { ffi::$native(native.as_ptr(), $arg.as_ptr()) }
             })
         }
     };
@@ -1602,10 +1602,10 @@ impl SslContextBuilder {
 
     fn configure_x509(
         &mut self,
-        configure: impl FnOnce(*mut ffi::SSL_CTX) -> c_int,
+        configure: impl FnOnce(&mut SslContextRef) -> c_int,
     ) -> Result<(), ErrorStack> {
         self.ctx.check_x509()?;
-        cvt(configure(self.as_ptr()))
+        cvt(configure(&mut self.ctx))
     }
 
     checked_x509_setter! {
@@ -1670,7 +1670,9 @@ impl SslContextBuilder {
         let file = path_to_cstring(file.as_ref())?;
         self.configure_x509(|ctx| {
             // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
-            unsafe { ffi::SSL_CTX_use_certificate_file(ctx, file.as_ptr(), file_type.as_raw()) }
+            unsafe {
+                ffi::SSL_CTX_use_certificate_file(ctx.as_ptr(), file.as_ptr(), file_type.as_raw())
+            }
         })
     }
 
@@ -1687,7 +1689,7 @@ impl SslContextBuilder {
         let file = path_to_cstring(file.as_ref())?;
         self.configure_x509(|ctx| {
             // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
-            unsafe { ffi::SSL_CTX_use_certificate_chain_file(ctx, file.as_ptr()) }
+            unsafe { ffi::SSL_CTX_use_certificate_chain_file(ctx.as_ptr(), file.as_ptr()) }
         })
     }
 
@@ -3655,11 +3657,11 @@ impl fmt::Debug for SslRef {
 impl SslRef {
     fn configure_x509(
         &mut self,
-        configure: impl FnOnce(*mut ffi::SSL) -> c_int,
+        configure: impl FnOnce(&mut Self) -> c_int,
     ) -> Result<(), ErrorStack> {
         self.require_handshake_config()?;
         self.ssl_context().check_x509()?;
-        cvt(configure(self.as_ptr()))
+        cvt(configure(self))
     }
 
     fn get_raw_rbio(&self) -> *mut ffi::BIO {
