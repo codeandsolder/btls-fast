@@ -1,0 +1,68 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index c81312548..8ee51bcb5 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -2492,3 +2492,4 @@ OPENSSL_EXPORT int SSL_CTX_get_session_cache_mode(const SSL_CTX *ctx);
+ //
+-// It is an error to call this function after the handshake has begun.
++// Returns zero without changing the existing session if the handshake has
++// begun or the session uses an incompatible certificate method.
+ OPENSSL_EXPORT int SSL_set_session(SSL *ssl, SSL_SESSION *session);
+@@ -2498,4 +2499,4 @@ OPENSSL_EXPORT int SSL_set_session(SSL *ssl, SSL_SESSION *session);
+ // session is dropped and a full handshake is attempted instead. The callback
+-// must not mutate ssl or session. Unlike SSL_set_session, invalid call state
+-// returns zero rather than aborting.
++// must not mutate ssl or session. Like SSL_set_session, invalid call state
++// or an incompatible certificate method returns zero without mutation.
+ OPENSSL_EXPORT int SSL_set_session_with_validator(
+diff --git a/ssl/ssl_session.cc b/ssl/ssl_session.cc
+index bc3fe15c5..56926ea2a 100644
+--- a/ssl/ssl_session.cc
++++ b/ssl/ssl_session.cc
+@@ -1146,15 +1146,22 @@ int SSL_CTX_remove_session(SSL_CTX *ctx, SSL_SESSION *session) {
+ 
+-int SSL_set_session(SSL *ssl, SSL_SESSION *session) {
+-  auto *ssl_impl = FromOpaque(ssl);
+-  // SSL_set_session may only be called before the handshake has started.
+-  if (ssl_impl->s3->initial_handshake_complete ||  //
+-      ssl_impl->s3->hs == nullptr ||               //
+-      ssl_impl->s3->hs->state != 0) {
+-    abort();
++static bool can_set_session(SSLImpl *ssl, const SSLSession *session) {
++  if (!ssl->config || !ssl->s3->hs || ssl->s3->initial_handshake_complete ||
++      ssl->s3->hs->state != 0) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return false;
+   }
++  if (session != nullptr && session->x509_method != ssl->ctx->x509_method) {
++    OPENSSL_PUT_ERROR(SSL, SSL_R_ATTEMPT_TO_REUSE_SESSION_IN_DIFFERENT_CONTEXT);
++    return false;
++  }
++  return true;
++}
+ 
+-  ssl_set_session(ssl_impl, FromOpaque(session));
+-  if (ssl_impl->config) {
+-    ssl_impl->config->client_session_validator = nullptr;
++int SSL_set_session(SSL *ssl, SSL_SESSION *session) {
++  auto *impl = FromOpaque(ssl);
++  if (!can_set_session(impl, FromOpaque(session))) {
++    return 0;
+   }
++  ssl_set_session(impl, FromOpaque(session));
++  impl->config->client_session_validator = nullptr;
+   return 1;
+@@ -1164,7 +1171,9 @@ int SSL_set_session_with_validator(
+     SSL *ssl, SSL_SESSION *session,
+-    int (*validator)(const SSL *, const SSL_SESSION *)) {
++    int (*validator)(const SSL *ssl, const SSL_SESSION *session)) {
+   auto *impl = FromOpaque(ssl);
+-  if (!impl->config || !impl->s3->hs || impl->s3->initial_handshake_complete ||
+-      impl->s3->hs->state != 0 || !session || !validator) {
+-    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++  if (!session || !validator) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_PASSED_NULL_PARAMETER);
++    return 0;
++  }
++  if (!can_set_session(impl, FromOpaque(session))) {
+     return 0;

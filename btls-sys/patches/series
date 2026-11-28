@@ -38,3 +38,5 @@ always boringssl-atomic-cert-chain-tests.patch
 always boringssl-handshake-config-query.patch
 always boringssl-checked-early-data-reset.patch
 always boringssl-checked-ech-retry.patch
+always boringssl-checked-session-install.patch
+always boringssl-stable-session-view.patch

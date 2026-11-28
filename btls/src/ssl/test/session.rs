@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ssl::test::server::Server;
 use crate::ssl::{
-    ErrorCode, GetSessionPendingError, HandshakeError, Ssl, SslContext, SslContextBuilder,
-    SslMethod, SslOptions, SslSession, SslSessionCacheMode, SslVersion,
+    ErrorCode, GetSessionPendingError, HandshakeError, SessionEncoding, Ssl, SslContext,
+    SslContextBuilder, SslMethod, SslOptions, SslSession, SslSessionCacheMode, SslVersion,
 };
 
 #[test]
@@ -22,20 +22,68 @@ fn active_session() {
     let s = server.client().connect();
 
     let session = s.ssl().session().unwrap();
-    let len = session.master_key_len();
-    let mut buf = vec![0; len - 1];
-    let copied = session.master_key(&mut buf);
-    assert_eq!(copied, buf.len());
-    let mut buf = vec![0; len + 1];
-    let copied = session.master_key(&mut buf);
-    assert_eq!(copied, len);
+    let len = session.secret_len();
+    assert!(len > 0);
+    let mut short = vec![0x5a; len - 1];
+    assert!(session.copy_secret(&mut short).is_err());
+    assert!(short.iter().all(|&byte| byte == 0x5a));
+    let mut full = vec![0x5a; len + 1];
+    assert_eq!(session.copy_secret(&mut full).unwrap().len(), len);
+    assert_eq!(full[len], 0x5a);
+    let mut exact = vec![0; len];
+    assert_eq!(session.copy_secret(&mut exact).unwrap(), &full[..len]);
+    crate::util::cleanse(&mut full);
+    crate::util::cleanse(&mut exact);
+}
+
+#[test]
+fn initial_handshake_does_not_expose_a_mutable_session() {
+    use crate::ssl::{SslVerifyError, SslVerifyMode};
+    use std::sync::Arc;
+    let server = Server::builder().build();
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&called);
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            assert!(ssl.session().is_none());
+            assert!(ssl.peer_certificate().is_some());
+            observed.store(true, Ordering::SeqCst);
+            Ok::<(), SslVerifyError>(())
+        })
+        .unwrap();
+    let stream = client.connect();
+    assert!(called.load(Ordering::SeqCst));
+    assert!(stream.ssl().session().is_some());
+}
+
+#[test]
+fn unresumable_session_cannot_be_encoded() {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    // SAFETY: the exclusively owned context is configured before publication.
+    unsafe {
+        assert_eq!(
+            crate::ffi::SSL_CTX_set_num_tickets(server.ctx().as_ptr(), 0),
+            1
+        );
+    }
+    let server = server.build();
+    let stream = server.client().connect();
+    let session = stream.ssl().session().unwrap();
+    assert!(!session.is_resumable());
+    assert!(session.to_bytes().is_err());
 }
 
 #[test]
 fn new_get_session_callback() {
     static FOUND_SESSION: AtomicBool = AtomicBool::new(false);
-    static SERVER_SESSION_DER: OnceLock<Vec<u8>> = OnceLock::new();
-    static CLIENT_SESSION_DER: OnceLock<Vec<u8>> = OnceLock::new();
+    static SERVER_SESSION_DER: OnceLock<SessionEncoding> = OnceLock::new();
+    static CLIENT_SESSION_DER: OnceLock<SessionEncoding> = OnceLock::new();
 
     let mut server = Server::builder();
 
@@ -51,18 +99,18 @@ fn new_get_session_callback() {
     server
         .ctx()
         .set_new_session_callback(|_, session| {
-            SERVER_SESSION_DER.set(session.to_der().unwrap()).unwrap();
+            SERVER_SESSION_DER.set(session.to_bytes().unwrap()).unwrap();
         })
         .unwrap();
     unsafe {
         server
             .ctx()
-            .set_get_session_callback(|_, id| {
+            .set_get_session_callback(|ssl, id| {
                 let Some(der) = SERVER_SESSION_DER.get() else {
                     return Ok(None);
                 };
 
-                let session = SslSession::from_der(der).unwrap();
+                let session = SslSession::from_bytes(ssl.ssl_context(), der).unwrap();
 
                 FOUND_SESSION.store(true, Ordering::SeqCst);
 
@@ -84,7 +132,7 @@ fn new_get_session_callback() {
     client
         .ctx()
         .set_new_session_callback(|_, session| {
-            CLIENT_SESSION_DER.set(session.to_der().unwrap()).unwrap();
+            CLIENT_SESSION_DER.set(session.to_bytes().unwrap()).unwrap();
         })
         .unwrap();
 
@@ -97,15 +145,47 @@ fn new_get_session_callback() {
     assert!(!FOUND_SESSION.load(Ordering::SeqCst));
 
     let mut ssl_builder = client.builder();
+    let encoded = CLIENT_SESSION_DER.get().unwrap();
+    let decoded = SslSession::from_bytes(ssl_builder.ssl().ssl_context(), encoded).unwrap();
+    assert_eq!(decoded.to_bytes().unwrap().as_bytes(), encoded.as_bytes());
+    assert!(format!("{encoded:?}").contains("[redacted]"));
 
+    let mut trailing = encoded.to_vec();
+    trailing.push(0);
+    assert!(SslSession::from_bytes(ssl_builder.ssl().ssl_context(), &trailing).is_err());
+    crate::util::cleanse(&mut trailing);
+    assert!(SslSession::from_bytes(ssl_builder.ssl().ssl_context(), b"NOT RESUMABLE").is_err());
+
+    // SAFETY: this buffer-only context is used only for session parsing,
+    // not to authenticate a connection.
+    let buffer_method = unsafe { SslMethod::tls_with_buffer() };
+    let buffer_ctx = SslContext::builder(buffer_method).unwrap().build();
+    let buffered = SslSession::from_bytes(&buffer_ctx, encoded).unwrap();
+    assert_eq!(buffered.to_bytes().unwrap().as_bytes(), encoded.as_bytes());
+    // SAFETY: both native sessions are live; the X.509 getter returns null
+    // when the destination certificate method does not parse certificates.
     unsafe {
-        ssl_builder
-            .ssl()
-            .set_session(&SslSession::from_der(CLIENT_SESSION_DER.get().unwrap()).unwrap())
-            .unwrap();
+        use foreign_types::ForeignTypeRef;
+        assert!(!crate::ffi::SSL_SESSION_get0_peer(decoded.as_ptr()).is_null());
+        assert!(crate::ffi::SSL_SESSION_get0_peer(buffered.as_ptr()).is_null());
+        assert!(ssl_builder.ssl().set_session(&buffered).is_err());
+        assert!(ssl_builder.ssl().session().is_none());
+        ssl_builder.ssl().set_session(&decoded).unwrap();
+        assert!(ssl_builder.ssl().set_session(&buffered).is_err());
+        assert_eq!(
+            ssl_builder.ssl().session().unwrap().as_ptr(),
+            decoded.as_ptr()
+        );
     }
 
-    ssl_builder.connect();
+    let mut resumed = ssl_builder.connect();
+    assert!(resumed.ssl().session_reused());
+    // SAFETY: decoded is authenticated for this connection. The native
+    // state check rejects installation after the completed handshake.
+    unsafe {
+        assert!(resumed.ssl_mut().set_session(&decoded).is_err());
+    }
+    assert!(resumed.ssl().session_reused());
 
     assert!(FOUND_SESSION.load(Ordering::SeqCst));
 }

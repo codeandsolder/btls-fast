@@ -26,6 +26,16 @@ use crate::x509::{X509, X509Name};
 use super::CompliancePolicy;
 
 #[test]
+fn connection_ownership_can_move_between_threads() {
+    fn requires_send<T: Send>() {}
+    requires_send::<Ssl>();
+    requires_send::<ssl::SslRef>();
+    requires_send::<SslStream<TcpStream>>();
+    requires_send::<crate::x509::X509StoreContext>();
+    requires_send::<crate::x509::X509StoreContextRef>();
+}
+
+#[test]
 fn singleton_context_callbacks_release_replaced_closures() {
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
     let token = Arc::new(());

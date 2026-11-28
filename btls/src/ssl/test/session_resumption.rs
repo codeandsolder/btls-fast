@@ -129,8 +129,8 @@ fn client_session_cache_apis() {
     assert!(session.should_be_single_use());
     let session_without_early_data = session.copy_without_early_data().unwrap();
     assert_eq!(
-        session.to_der().unwrap(),
-        session_without_early_data.to_der().unwrap()
+        session.to_bytes().unwrap().as_bytes(),
+        session_without_early_data.to_bytes().unwrap().as_bytes()
     );
 
     let mut resumed = client.builder();

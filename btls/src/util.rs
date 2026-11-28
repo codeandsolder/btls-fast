@@ -228,6 +228,11 @@ impl NativeBuffer {
         &raw mut self.0
     }
 
+    /// Transfers ownership of the native allocation to the caller.
+    pub(crate) fn into_ptr(mut self) -> *mut u8 {
+        std::mem::take(&mut self.0)
+    }
+
     /// Copy a fully initialized native output.
     ///
     /// # Safety
