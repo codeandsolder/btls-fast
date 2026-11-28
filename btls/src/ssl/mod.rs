@@ -478,12 +478,11 @@ type PskServerCallback =
     Box<dyn Fn(&mut SslRef, Option<&[u8]>, &mut [u8]) -> Result<usize, ErrorStack> + Send + Sync>;
 static PSK_SERVER_INDEX: IndexSlot<SslContext, PskServerCallback> =
     IndexSlot::new(SslContext::new_ex_index);
-type RemoveSessionCallback = Box<dyn Fn(&SslContextRef, &SslSessionRef) + Send + Sync>;
+type RemoveSessionCallback = Box<dyn Fn(&SslSessionRef) + Send + Sync>;
 static REMOVE_SESSION_INDEX: IndexSlot<SslContext, RemoveSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
-type GetSessionCallback = Box<
-    dyn Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError> + Send + Sync,
->;
+type GetSessionCallback =
+    Box<dyn Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, SessionLookupError> + Send + Sync>;
 static GET_SESSION_INDEX: IndexSlot<SslContext, GetSessionCallback> =
     IndexSlot::new(SslContext::new_ex_index);
 type KeylogCallback = Box<dyn Fn(&SslRef, &str) + Send + Sync>;
@@ -2085,7 +2084,10 @@ impl SslContextBuilder {
 
     /// Sets the callback which is called when sessions are removed from the context.
     ///
-    /// Sessions can be removed because they have timed out or because they are considered faulty.
+    /// Notifications run outside the cache lock, including during context
+    /// destruction. The callback receives only the removed session; a
+    /// context being destroyed cannot safely be retained by the callback.
+    /// Eviction does not invalidate other references to the session.
     ///
     /// # Errors
     ///
@@ -2093,7 +2095,7 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_sess_set_remove_cb)]
     pub fn set_remove_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
-        F: Fn(&SslContextRef, &SslSessionRef) + 'static + Sync + Send,
+        F: Fn(&SslSessionRef) + 'static + Sync + Send,
     {
         // SAFETY: The native context retains a static callback entrypoint; its
         // concrete state has already been installed in typed context extra-data.
@@ -2109,11 +2111,15 @@ impl SslContextBuilder {
     ///
     /// The callback is passed a reference to the session ID provided by the client. It should
     /// return the session corresponding to that ID if available. This is only used for servers, not
-    /// clients.
+    /// clients. Return `Ok(None)` for a cache miss, [`SessionLookupError::Pending`] to
+    /// retry later, or [`SessionLookupError::Failed`] to abort the handshake.
     ///
     /// # Safety
     ///
-    /// The returned [`SslSession`] must not be associated with a different [`SslContext`].
+    /// Return only authenticated server sessions issued for the same
+    /// authentication scope. Native code checks the requested ID, certificate
+    /// method, and negotiated resumption parameters, but cannot establish
+    /// the provenance of externally supplied session secrets.
     ///
     /// # Errors
     ///
@@ -2121,7 +2127,7 @@ impl SslContextBuilder {
     #[corresponds(SSL_CTX_sess_set_get_cb)]
     pub unsafe fn set_get_session_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
     where
-        F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, GetSessionPendingError>
+        F: Fn(&mut SslRef, &[u8]) -> Result<Option<SslSession>, SessionLookupError>
             + 'static
             + Sync
             + Send,
@@ -2767,8 +2773,9 @@ impl SslContextRef {
     ///
     /// # Safety
     ///
-    /// The caller of this method is responsible for ensuring that the session has never been used with another
-    /// `SslContext` than this one.
+    /// The caller must ensure that the session was authenticated for this
+    /// server's resumption scope. Sharing a session across contexts is
+    /// supported when their authentication policies are compatible.
     #[corresponds(SSL_CTX_add_session)]
     #[must_use = "Check whether the session was actually accepted into the native cache."]
     pub unsafe fn add_session(&self, session: &SslSessionRef) -> bool {
@@ -2777,20 +2784,33 @@ impl SslContextRef {
         unsafe { ffi::SSL_CTX_add_session(self.as_ptr(), session.as_ptr()) != 0 }
     }
 
-    /// Removes a session from the context's cache and marks it as non-resumable.
+    /// Removes exactly this session from the context's cache.
     ///
-    /// Returns `true` if the session was successfully found and removed, and `false` otherwise.
-    ///
-    /// # Safety
-    ///
-    /// The caller of this method is responsible for ensuring that the session has never been used with another
-    /// `SslContext` than this one.
+    /// Does not invalidate other references or its membership in other caches.
+    /// Returns false if the cache does not contain this session.
     #[corresponds(SSL_CTX_remove_session)]
     #[must_use = "Check whether the session was actually removed from the native cache."]
-    pub unsafe fn remove_session(&self, session: &SslSessionRef) -> bool {
-        // SAFETY: The caller guarantees the session is associated with
-        // this context, which remains live during native cache removal.
+    pub fn remove_session(&self, session: &SslSessionRef) -> bool {
+        // SAFETY: native owns cache membership and matches the exact session
+        // under the context lock. Both borrowed objects remain live.
         unsafe { ffi::SSL_CTX_remove_session(self.as_ptr(), session.as_ptr()) != 0 }
+    }
+
+    /// Returns the number of sessions currently in the internal cache.
+    #[corresponds(SSL_CTX_sess_number)]
+    #[must_use = "Use the returned count when monitoring cache occupancy."]
+    pub fn session_count(&self) -> usize {
+        // SAFETY: the live context protects cache queries with its read lock.
+        unsafe { ffi::SSL_CTX_sess_number(self.as_ptr()) }
+    }
+
+    /// Removes expired sessions as of the given Unix time in seconds.
+    /// Passing zero removes every cached session.
+    #[corresponds(SSL_CTX_flush_sessions)]
+    pub fn flush_sessions(&self, time: u64) {
+        // SAFETY: the live context locks cache mutation internally and
+        // invokes removal notifications outside that lock.
+        unsafe { ffi::SSL_CTX_flush_sessions(self.as_ptr(), time) }
     }
 
     /// Returns the context's session cache size limit.
@@ -2880,12 +2900,22 @@ impl SslContextRef {
     }
 }
 
-/// Error returned by the callback to get a session when operation
-/// could not complete and should be retried later.
+/// Non-successful result of an external server session lookup.
 ///
-/// See [`SslContextBuilder::set_get_session_callback`].
+/// A cache miss is `Ok(None)`, distinct from a failed lookup.
 #[derive(Debug)]
-pub struct GetSessionPendingError;
+pub enum SessionLookupError {
+    /// The lookup must be retried when asynchronous progress is available.
+    Pending,
+    /// The lookup failed; the connection must not silently proceed.
+    Failed(ErrorStack),
+}
+
+impl From<ErrorStack> for SessionLookupError {
+    fn from(error: ErrorStack) -> Self {
+        Self::Failed(error)
+    }
+}
 
 /// Information about the state of a cipher.
 pub struct CipherBits {

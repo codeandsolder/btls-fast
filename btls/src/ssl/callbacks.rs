@@ -8,8 +8,8 @@ use super::{
     STATUS_INDEX, ServerNameCallback,
 };
 use super::{
-    AlpnError, CertificateCompressor, ClientHello, GetSessionPendingError, PrivateKeyMethod,
-    PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert, SslContextRef,
+    AlpnError, CertificateCompressor, ClientHello, PrivateKeyMethod, PrivateKeyMethodError,
+    SelectCertAction, SelectCertError, SessionLookupError, SslAlert, SslContextRef,
     SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef, SslSession,
     SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
@@ -547,51 +547,59 @@ pub(super) unsafe extern "C" fn raw_remove_session(
     ctx: *mut ffi::SSL_CTX,
     session: *mut ffi::SSL_SESSION,
 ) {
-    // SAFETY: btls provides valid inputs.
+    // SAFETY: native invokes removal notifications before destroying
+    // context extra-data. Never expose this potentially dying context to
+    // application code, which could otherwise try to acquire a reference.
     let ctx = unsafe { SslContextRef::from_ptr(ctx) };
-    // SAFETY: The removal callback borrows a session owned by the live native context; it must not be freed here.
-    let session = unsafe { SslSessionRef::from_ptr(session) };
-
     let Some(callback) = ctx.slot_data(&REMOVE_SESSION_INDEX) else {
         return;
     };
-
-    catch_native(|| callback(ctx, session));
+    // SAFETY: the detached cache entry owns a session reference throughout
+    // the callback, including during destruction of the context.
+    let session = unsafe { SslSessionRef::from_ptr(session) };
+    catch_native(|| callback(session));
 }
-
-type DataPtr = *const c_uchar;
 
 pub(super) unsafe extern "C" fn raw_get_session(
     ssl: *mut ffi::SSL,
-    data: DataPtr,
-    len: c_int,
-    copy: *mut c_int,
-) -> *mut ffi::SSL_SESSION {
-    let Ok(len) = usize::try_from(len) else {
-        return ptr::null_mut();
-    };
-    if ssl.is_null() || copy.is_null() {
-        return ptr::null_mut();
+    data: *const c_uchar,
+    len: usize,
+    out: *mut *mut ffi::SSL_SESSION,
+) -> ffi::ssl_session_lookup_result_t {
+    use ffi::ssl_session_lookup_result_t as Lookup;
+    if ssl.is_null() || out.is_null() {
+        ErrorStack::internal_error_str("invalid native session lookup arguments").put();
+        return Lookup::ssl_session_lookup_error;
     }
-    // SAFETY: native supplies the session ID and exclusively borrowed SSL.
+    // SAFETY: native supplies a live ID buffer for the callback.
     let Some(data) = (unsafe { native_input(data, len) }) else {
-        return ptr::null_mut();
+        ErrorStack::internal_error_str("invalid native session ID").put();
+        return Lookup::ssl_session_lookup_error;
     };
-    // SAFETY: The native session identifier is readable for the declared checked length and lifetime of the callback.
+    // SAFETY: native exclusively borrows this connection for the callback.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     let context = ssl.session_context().to_owned();
     let Some(callback) = context.slot_data(&GET_SESSION_INDEX) else {
-        return ptr::null_mut();
+        ErrorStack::internal_error_str("missing session lookup callback").put();
+        return Lookup::ssl_session_lookup_error;
     };
     match catch_native(|| callback(ssl, data)) {
         Some(Ok(Some(session))) => {
-            // SAFETY: native supplies writable storage; transfer the owned reference.
-            unsafe { copy.write(0) };
-            session.into_ptr()
+            // SAFETY: native supplies a writable, initially null output
+            // slot; this transfers one owned session reference.
+            unsafe { out.write(session.into_ptr()) };
+            Lookup::ssl_session_lookup_found
         }
-        // SAFETY: Native session lookup exclusively borrows the live SSL pointer during the synchronous callback.
-        Some(Err(GetSessionPendingError)) => unsafe { ffi::SSL_magic_pending_session_ptr() },
-        _ => ptr::null_mut(),
+        Some(Ok(None)) => Lookup::ssl_session_lookup_miss,
+        Some(Err(SessionLookupError::Pending)) => Lookup::ssl_session_lookup_pending,
+        Some(Err(SessionLookupError::Failed(error))) => {
+            error.put();
+            Lookup::ssl_session_lookup_error
+        }
+        None => {
+            ErrorStack::internal_error_str("session lookup callback panicked").put();
+            Lookup::ssl_session_lookup_error
+        }
     }
 }
 

@@ -4,8 +4,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::ssl::test::server::Server;
 use crate::ssl::{
-    ErrorCode, GetSessionPendingError, HandshakeError, Ssl, SslContext, SslContextBuilder,
-    SslMethod, SslOptions, SslSession, SslSessionCacheMode, SslVersion,
+    ErrorCode, HandshakeError, SessionLookupError, Ssl, SslContext, SslContextBuilder, SslMethod,
+    SslOptions, SslSession, SslSessionCacheMode, SslVersion,
 };
 
 #[test]
@@ -129,7 +129,7 @@ fn new_get_session_callback_pending() {
             .ctx()
             .set_get_session_callback(|_, _| {
                 if !CALLED_SERVER_CALLBACK.swap(true, Ordering::SeqCst) {
-                    return Err(GetSessionPendingError);
+                    return Err(SessionLookupError::Pending);
                 }
 
                 Ok(None)
