@@ -9,11 +9,11 @@
 
 use super::{ErrorCode, Ssl, SslAlert, SslCipherRef, SslContext, SslContextBuilder, SslRef};
 use crate::error::ErrorStack;
+use crate::ex_data::IndexSlot;
 use crate::{cvt, ffi};
 use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
 use std::ffi::c_int;
-use std::marker::PhantomData;
 use std::{ptr, slice};
 
 /// A QUIC encryption level ([RFC 9001 §4.1.4](https://www.rfc-editor.org/rfc/rfc9001#section-4.1.4)).
@@ -108,42 +108,41 @@ pub trait QuicMethod: Send + Sync + 'static {
     ) -> Result<(), QuicMethodError>;
 }
 
-/// The `SSL_QUIC_METHOD` of `M`, which `BoringSSL` keeps a pointer to.
-struct QuicMethodTable<M>(PhantomData<M>);
-
-impl<M: QuicMethod> QuicMethodTable<M> {
-    const METHOD: ffi::SSL_QUIC_METHOD = ffi::SSL_QUIC_METHOD {
-        set_read_secret: Some(raw_set_read_secret::<M>),
-        set_write_secret: Some(raw_set_write_secret::<M>),
-        add_handshake_data: Some(raw_add_handshake_data::<M>),
-        flush_flight: Some(raw_flush_flight::<M>),
-        send_alert: Some(raw_send_alert::<M>),
-    };
-}
+// The native method table belongs to the connection's original context, not
+// the context selected by a later SNI callback. One fixed slot owns the method.
+static QUIC_METHOD_INDEX: IndexSlot<SslContext, Option<Box<dyn QuicMethod>>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static QUIC_METHOD: ffi::SSL_QUIC_METHOD = ffi::SSL_QUIC_METHOD {
+    set_read_secret: Some(raw_set_read_secret),
+    set_write_secret: Some(raw_set_write_secret),
+    add_handshake_data: Some(raw_add_handshake_data),
+    flush_flight: Some(raw_flush_flight),
+    send_alert: Some(raw_send_alert),
+};
 
 impl SslContextBuilder {
-    /// Configures the context for QUIC, with `method` receiving the secrets and handshake data
-    /// of its connections.
+    /// Configures the QUIC transport method for connections created by this context.
     ///
-    /// A connection keeps the method table of the context it was created with, but the
-    /// callbacks look `method` up in its current context. A context switched in during the
-    /// handshake, such as by [`SslRef::set_ssl_context`], must therefore hold a method of the
-    /// same type, or the handshake fails.
-    ///
+    /// The transport remains bound to the original context even if certificate
+    /// selection or SNI changes the current context. A replacement releases the
+    /// previous method; a failed registration leaves it unchanged.
     /// # Errors
-    ///
-    /// Returns an error if callback storage cannot be allocated or the native QUIC method cannot be installed.
+    /// Callback storage cannot be allocated or the native method cannot be installed.
     #[corresponds(SSL_CTX_set_quic_method)]
     pub fn set_quic_method<M: QuicMethod>(&mut self, method: M) -> Result<(), ErrorStack> {
-        self.set_ex_data(
-            SslContext::register_callback::<M>(super::CallbackRole::Quic)?,
-            method,
-        )?;
-        // A promoted constant, so the table lives for the whole program.
-        let table: &'static ffi::SSL_QUIC_METHOD = &QuicMethodTable::<M>::METHOD;
-        // SAFETY: the native context is uniquely borrowed; it retains only
-        // the static function table, and the callback state lives in ex-data.
-        unsafe { cvt(ffi::SSL_CTX_set_quic_method(self.as_ptr(), table)) }
+        let index = QUIC_METHOD_INDEX.register()?;
+        if self.ctx.ex_data(index).is_none() {
+            self.set_ex_data(index, None)?;
+        }
+        // SAFETY: the exclusively borrowed context retains the static native
+        // table; its initialized callback slot can be updated without allocation.
+        unsafe {
+            cvt(ffi::SSL_CTX_set_quic_method(
+                self.as_ptr(),
+                &raw const QUIC_METHOD,
+            ))?;
+        }
+        self.set_ex_data(index, Some(Box::new(method)))
     }
 }
 
@@ -366,21 +365,26 @@ impl SslRef {
     }
 }
 
-/// Finds the [`QuicMethod`] of the context `ssl` belongs to and runs `f` with it. A missing
+/// Finds the [`QuicMethod`] of the original connection context and runs `f` with it. A missing
 /// method fails like `f`.
 ///
 /// # Safety
 ///
 /// The pointer must refer to the live native SSL connection invoking the
 /// QUIC callback; it remains uniquely accessible throughout the callback.
-unsafe fn with_method<M: QuicMethod>(
+unsafe fn with_method(
     ssl: *mut ffi::SSL,
-    f: impl FnOnce(&M, &mut SslRef) -> Result<(), QuicMethodError>,
+    f: impl FnOnce(&dyn QuicMethod, &mut SslRef) -> Result<(), QuicMethodError>,
 ) -> c_int {
     // SAFETY: BoringSSL passes the callbacks the `SSL` they run for.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let ssl_context = ssl.ssl_context().to_owned();
-    let Some(method) = ssl_context.callback::<M>(super::CallbackRole::Quic) else {
+    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
+        return 0;
+    };
+    let Some(method) = context
+        .slot_data(&QUIC_METHOD_INDEX)
+        .and_then(Option::as_deref)
+    else {
         return 0;
     };
     crate::util::catch_native(|| f(method, ssl).is_ok())
@@ -406,8 +410,13 @@ fn secret_result(ret: c_int) -> c_int {
     ret
 }
 
-type SecretApplication<M> =
-    fn(&M, &mut SslRef, QuicEncryptionLevel, &SslCipherRef, &[u8]) -> Result<(), QuicMethodError>;
+type SecretApplication = fn(
+    &dyn QuicMethod,
+    &mut SslRef,
+    QuicEncryptionLevel,
+    &SslCipherRef,
+    &[u8],
+) -> Result<(), QuicMethodError>;
 
 /// Dispatches a native secret callback with one shared validated byte view.
 ///
@@ -415,13 +424,13 @@ type SecretApplication<M> =
 ///
 /// The native caller supplies a live SSL connection, and non-null cipher and
 /// secret storage for every nonempty secret during the synchronous callback.
-unsafe fn dispatch_secret<M: QuicMethod>(
+unsafe fn dispatch_secret(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
     cipher: *const ffi::SSL_CIPHER,
     secret: *const u8,
     secret_len: usize,
-    apply: SecretApplication<M>,
+    apply: SecretApplication,
 ) -> c_int {
     if cipher.is_null() || (secret_len != 0 && secret.is_null()) {
         return secret_result(0);
@@ -436,13 +445,13 @@ unsafe fn dispatch_secret<M: QuicMethod>(
     };
     // SAFETY: ssl remains live and uniquely accessible for the native callback.
     secret_result(unsafe {
-        with_method::<M>(ssl, |method, ssl| {
+        with_method(ssl, |method, ssl| {
             apply(method, ssl, QuicEncryptionLevel(level), cipher, secret)
         })
     })
 }
 
-unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
+unsafe extern "C" fn raw_set_read_secret(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
     cipher: *const ffi::SSL_CIPHER,
@@ -450,10 +459,19 @@ unsafe extern "C" fn raw_set_read_secret<M: QuicMethod>(
     secret_len: usize,
 ) -> c_int {
     // SAFETY: the native QUIC callback passes a live SSL, cipher, and secret.
-    unsafe { dispatch_secret::<M>(ssl, level, cipher, secret, secret_len, M::set_read_secret) }
+    unsafe {
+        dispatch_secret(
+            ssl,
+            level,
+            cipher,
+            secret,
+            secret_len,
+            |method, ssl, level, cipher, secret| method.set_read_secret(ssl, level, cipher, secret),
+        )
+    }
 }
 
-unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
+unsafe extern "C" fn raw_set_write_secret(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
     cipher: *const ffi::SSL_CIPHER,
@@ -461,10 +479,21 @@ unsafe extern "C" fn raw_set_write_secret<M: QuicMethod>(
     secret_len: usize,
 ) -> c_int {
     // SAFETY: the native QUIC callback passes a live SSL, cipher, and secret.
-    unsafe { dispatch_secret::<M>(ssl, level, cipher, secret, secret_len, M::set_write_secret) }
+    unsafe {
+        dispatch_secret(
+            ssl,
+            level,
+            cipher,
+            secret,
+            secret_len,
+            |method, ssl, level, cipher, secret| {
+                method.set_write_secret(ssl, level, cipher, secret)
+            },
+        )
+    }
 }
 
-unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
+unsafe extern "C" fn raw_add_handshake_data(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
     data: *const u8,
@@ -480,25 +509,25 @@ unsafe extern "C" fn raw_add_handshake_data<M: QuicMethod>(
     };
     // SAFETY: native keeps the SSL owner alive for this callback.
     unsafe {
-        with_method::<M>(ssl, |method, ssl| {
+        with_method(ssl, |method, ssl| {
             method.add_handshake_data(ssl, QuicEncryptionLevel(level), data)
         })
     }
 }
 
-unsafe extern "C" fn raw_flush_flight<M: QuicMethod>(ssl: *mut ffi::SSL) -> c_int {
+unsafe extern "C" fn raw_flush_flight(ssl: *mut ffi::SSL) -> c_int {
     // SAFETY: native keeps the SSL owner alive for this callback.
-    unsafe { with_method::<M>(ssl, M::flush_flight) }
+    unsafe { with_method(ssl, |method, ssl| method.flush_flight(ssl)) }
 }
 
-unsafe extern "C" fn raw_send_alert<M: QuicMethod>(
+unsafe extern "C" fn raw_send_alert(
     ssl: *mut ffi::SSL,
     level: ffi::ssl_encryption_level_t,
     alert: u8,
 ) -> c_int {
     // SAFETY: native keeps the SSL owner alive for this callback.
     unsafe {
-        with_method::<M>(ssl, |method, ssl| {
+        with_method(ssl, |method, ssl| {
             method.send_alert(ssl, QuicEncryptionLevel(level), SslAlert(alert.into()))
         })
     }

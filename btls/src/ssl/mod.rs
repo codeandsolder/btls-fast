@@ -493,9 +493,6 @@ enum CallbackRole {
     GetSession,
     Keylog,
     Info,
-    Quic,
-    #[cfg(not(feature = "fips"))]
-    EchGrease,
 }
 
 static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =

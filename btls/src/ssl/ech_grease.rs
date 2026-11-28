@@ -7,6 +7,7 @@ use openssl_macros::corresponds;
 
 use super::{ExtensionType, Ssl, SslContext, SslContextBuilder, SslRef};
 use crate::error::ErrorStack;
+use crate::ex_data::IndexSlot;
 use crate::rand::rand_bytes;
 use crate::{cvt_0i, ffi};
 
@@ -348,19 +349,18 @@ impl<'a> EchGreaseSizeInfo<'a> {
     }
 }
 
-struct Callback<F>(F);
+type Callback = Box<
+    dyn Fn(&SslRef, EchGreaseSizeInfo<'_>) -> Result<EchGreaseParameters, ErrorStack> + Send + Sync,
+>;
+static CTX_ECH_GREASE_INDEX: IndexSlot<SslContext, Option<Callback>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static SSL_ECH_GREASE_INDEX: IndexSlot<Ssl, Option<Callback>> = IndexSlot::new(Ssl::new_ex_index);
 
-unsafe extern "C" fn parameter_callback<F, const CONTEXT: bool>(
+unsafe extern "C" fn parameter_callback<const CONTEXT: bool>(
     info: *const ffi::SSL_ECH_GREASE_SIZE_INFO,
     out: *mut ffi::SSL_ECH_GREASE_PARAMETERS,
     _: *mut c_void,
-) -> libc::c_int
-where
-    F: Fn(&SslRef, EchGreaseSizeInfo<'_>) -> Result<EchGreaseParameters, ErrorStack>
-        + Send
-        + Sync
-        + 'static,
-{
+) -> libc::c_int {
     // SAFETY: BoringSSL passes a live non-null size-info object for the
     // synchronous callback. It remains valid until this callback returns.
     let info = unsafe { &*info };
@@ -368,15 +368,14 @@ where
     // so the borrowed reference cannot outlive this native invocation.
     let ssl = unsafe { SslRef::from_ptr(info.ssl.cast_mut()) };
     let callback = if CONTEXT {
-        ssl.ssl_context()
-            .callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)
+        ssl.ssl_context().slot_data(&CTX_ECH_GREASE_INDEX)
     } else {
-        ssl.callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)
+        ssl.slot_data(&SSL_ECH_GREASE_INDEX)
     };
     let Some(Some(callback)) = callback else {
         return 0;
     };
-    match crate::util::catch_native(|| (callback.0)(ssl, EchGreaseSizeInfo(info))) {
+    match crate::util::catch_native(|| callback(ssl, EchGreaseSizeInfo(info))) {
         Some(Ok(parameters)) => {
             // SAFETY: the callback's native contract supplies non-null,
             // exclusively writable output for a complete parameter struct.
@@ -411,8 +410,7 @@ impl SslContextBuilder {
     /// [`EchGreaseSizeInfo::boringssl_parameters`] reproduces BoringSSL's draw and
     /// [`EchGreaseSizeInfo::nss_parameters`] provides NSS-shaped parameters.
     /// Unlike NSS, this also applies to DTLS when ECH GREASE is enabled.
-    /// Callbacks of other closure types may remain stored until this context
-    /// is freed, even after replacement.
+    /// Replacing the policy releases the previous closure.
     ///
     /// [RFC 9849]: https://www.rfc-editor.org/rfc/rfc9849.html#section-6.2.1
     ///
@@ -427,16 +425,13 @@ impl SslContextBuilder {
             + Sync
             + 'static,
     {
-        self.set_ex_data(
-            SslContext::register_callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)?,
-            Some(Callback(callback)),
-        )?;
+        self.set_ex_data(CTX_ECH_GREASE_INDEX.register()?, Some(Box::new(callback)))?;
         // SAFETY: the exclusively borrowed SSL context owns the installed
         // ex-data slot; native stores only the static callback function pointer.
         unsafe {
             ffi::SSL_CTX_set_ech_grease_callback(
                 self.as_ptr(),
-                Some(parameter_callback::<F, true>),
+                Some(parameter_callback::<true>),
                 ptr::null_mut(),
             );
         }
@@ -445,14 +440,22 @@ impl SslContextBuilder {
 
     /// Removes the context policy, restoring `BoringSSL`'s default parameters.
     /// Per-connection overrides and the GREASE enable flag are unchanged.
-    /// Stored closures remain owned by the context until replaced or freed.
+    /// Releases the previous policy, if any.
+    /// # Errors
+    /// Native callback storage cannot be updated.
     #[corresponds(SSL_CTX_set_ech_grease_callback)]
-    pub fn clear_ech_grease_callback(&mut self) {
+    pub fn clear_ech_grease_callback(&mut self) -> Result<(), ErrorStack> {
         // SAFETY: the builder exclusively owns its native context; clearing
         // the callback does not retain the argument or any temporary data.
         unsafe {
             ffi::SSL_CTX_set_ech_grease_callback(self.as_ptr(), None, ptr::null_mut());
         }
+        if let Some(index) = CTX_ECH_GREASE_INDEX.get()
+            && self.ctx.ex_data(index).is_some()
+        {
+            self.set_ex_data(index, None)?;
+        }
+        Ok(())
     }
 }
 
@@ -461,8 +464,7 @@ impl SslRef {
     /// Requires retained handshake configuration and a handshake that has not
     /// started CH1. Rejection leaves the active callback unchanged.
     /// The same sizing, error and panic rules apply.
-    /// Callbacks of other closure types may remain stored until this connection
-    /// is freed, even after replacement.
+    /// Successful replacement releases the previous closure.
     ///
     /// # Errors
     ///
@@ -476,7 +478,7 @@ impl SslRef {
             + 'static,
     {
         let ssl = self.as_ptr();
-        let index = Ssl::register_callback::<Option<Callback<F>>>(super::CallbackRole::EchGrease)?;
+        let index = SSL_ECH_GREASE_INDEX.register()?;
         if self.ex_data(index).is_none() {
             self.set_ex_data(index, None)?;
         }
@@ -488,11 +490,11 @@ impl SslRef {
         unsafe {
             cvt_0i(ffi::SSL_set_ech_grease_callback(
                 ssl,
-                Some(parameter_callback::<F, false>),
+                Some(parameter_callback::<false>),
                 ptr::null_mut(),
             ))?;
         }
-        drop(slot.replace(Callback(callback)));
+        drop(slot.replace(Box::new(callback)));
         Ok(())
     }
 
@@ -500,7 +502,7 @@ impl SslRef {
     /// policy or `BoringSSL`'s default parameters. Does not disable GREASE.
     /// Fails without changing the policy if CH1 has started, the handshake has
     /// finished, or the handshake configuration has been discarded.
-    /// Stored closures remain owned by the connection until replaced or freed.
+    /// Successful removal releases the previous closure.
     #[corresponds(SSL_set_ech_grease_callback)]
     pub fn clear_ech_grease_callback(&mut self) -> Result<(), ErrorStack> {
         // SAFETY: this connection is exclusively borrowed, and native
@@ -511,6 +513,11 @@ impl SslRef {
                 None,
                 ptr::null_mut(),
             ))?;
+        }
+        if let Some(index) = SSL_ECH_GREASE_INDEX.get()
+            && let Some(slot) = self.ex_data_mut(index)
+        {
+            *slot = None;
         }
         Ok(())
     }

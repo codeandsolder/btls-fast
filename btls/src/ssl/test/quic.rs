@@ -211,6 +211,34 @@ fn has_reason(errors: &ErrorStack, reason: c_int) -> bool {
 }
 
 #[test]
+fn quic_transport_remains_bound_to_origin_after_context_switch() {
+    let client_ctx = client_context(Arc::new(Mutex::new(Vec::new())));
+    let server_ctx = server_context();
+    // The certificate-selection context intentionally has no QUIC method.
+    let mut replacement = SslContext::builder(SslMethod::tls()).unwrap();
+    replacement
+        .set_certificate_chain_file("test/cert.pem")
+        .unwrap();
+    replacement
+        .set_private_key_file("test/key.pem", SslFiletype::PEM)
+        .unwrap();
+    replacement
+        .set_alpn_select_callback(|_, _| Ok(b"h3"))
+        .unwrap();
+    let replacement = replacement.build();
+    let mut c = client(&client_ctx, None);
+    let mut s = server(&server_ctx, b"context");
+    s.set_ssl_context(&replacement).unwrap();
+    handshake(&mut c, &mut s);
+    let server_write = secret(&mut s, false, QuicEncryptionLevel::APPLICATION);
+    assert!(server_write.is_some());
+    assert_eq!(
+        server_write,
+        secret(&mut c, true, QuicEncryptionLevel::APPLICATION)
+    );
+}
+
+#[test]
 fn quic_handshake_and_early_data() {
     let sessions = Arc::new(Mutex::new(Vec::new()));
     let client_ctx = client_context(sessions.clone());
