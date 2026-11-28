@@ -31,3 +31,4 @@ always boringssl-cert-compression-data.patch
 always boringssl-hkdf-cleanse.patch
 always boringssl-pkcs12-framing.patch
 always boringssl-pbkdf2-reject-zero.patch
+always boringssl-context-identity.patch

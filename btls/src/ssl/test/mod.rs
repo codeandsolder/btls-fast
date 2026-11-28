@@ -98,6 +98,36 @@ fn context_extra_chain_handles_empty_and_populated_chains() {
 }
 
 #[test]
+fn raw_native_contexts_and_connections_have_authoritative_capabilities() {
+    crate::ffi::init();
+    // SAFETY: each native allocation is checked before transferring its unique
+    // ownership to the Rust wrapper. No Rust marker or extra-data setup is used.
+    let mut context = unsafe {
+        let ptr = crate::cvt_p(crate::ffi::SSL_CTX_new(crate::ffi::TLS_method())).unwrap();
+        ssl::SslContextBuilder::from_ptr(ptr)
+    };
+    assert!(context.ctx.has_x509_support());
+    context.set_verify_mode(SslVerifyMode::PEER).unwrap();
+    let context = context.build();
+    let mut ssl = unsafe {
+        let ptr = crate::cvt_p(crate::ffi::SSL_new(context.as_ptr())).unwrap();
+        Ssl::from_ptr(ptr)
+    };
+    assert_eq!(ssl.session_context().as_ptr(), context.as_ptr());
+    let replacement = SslContext::builder(SslMethod::tls()).unwrap().build();
+    ssl.set_ssl_context(&replacement).unwrap();
+    assert_eq!(ssl.ssl_context().as_ptr(), replacement.as_ptr());
+    assert_eq!(ssl.session_context().as_ptr(), context.as_ptr());
+    // SAFETY: the native method is a static valid descriptor and no handshake
+    // is driven with this buffer-only context.
+    let method = unsafe { SslMethod::from_ptr(crate::ffi::TLS_with_buffers_method()) };
+    let buffer = SslContext::builder(method).unwrap().build();
+    assert!(!buffer.has_x509_support());
+    assert!(ssl.set_ssl_context(&buffer).is_err());
+    assert_eq!(ssl.ssl_context().as_ptr(), replacement.as_ptr());
+}
+
+#[test]
 fn non_x509_context_rejects_certificate_operations_without_panicking() {
     // SAFETY: No handshake is driven, and the X.509 wrapper operations
     // below reject unsupported contexts before invoking native X.509 APIs.

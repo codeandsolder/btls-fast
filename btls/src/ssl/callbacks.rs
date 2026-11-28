@@ -85,7 +85,7 @@ pub(super) extern "C" fn raw_verify(
 
     let Some(ssl_context) = ctx
         .ssl()
-        .and_then(SslRef::session_context)
+        .map(SslRef::session_context)
         .map(ToOwned::to_owned)
     else {
         return 0;
@@ -104,10 +104,7 @@ pub(super) unsafe extern "C" fn raw_custom_verify(
     out_alert: *mut u8,
 ) -> ffi::ssl_verify_result_t {
     let callback = |ssl: &mut SslRef| {
-        let context = ssl
-            .session_context()
-            .map(ToOwned::to_owned)
-            .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
+        let context = ssl.session_context().to_owned();
         let callback = context
             .slot_data(&CTX_CUSTOM_VERIFY_INDEX)
             .and_then(Option::as_ref)
@@ -307,9 +304,7 @@ pub(super) unsafe extern "C" fn raw_client_psk(
         return 0;
     }
     psk_result(psk_capacity, || {
-        let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-            return Ok(0);
-        };
+        let context = ssl.session_context().to_owned();
         let Some(callback) = context.slot_data(&PSK_CLIENT_INDEX) else {
             return Ok(0);
         };
@@ -344,9 +339,7 @@ pub(super) unsafe extern "C" fn raw_server_psk(
         return 0;
     };
     psk_result(capacity, || {
-        let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-            return Ok(0);
-        };
+        let context = ssl.session_context().to_owned();
         let Some(callback) = context.slot_data(&PSK_SERVER_INDEX) else {
             return Ok(0);
         };
@@ -456,10 +449,7 @@ pub(super) unsafe extern "C" fn raw_ticket_key(
     // BoringSSL always invokes the callback of the original session context,
     // even if SNI has switched the connection's current context.
     let result = catch_native(|| {
-        let Some(callback) = ssl
-            .session_context()
-            .and_then(|ctx| ctx.slot_data(&TICKET_KEY_INDEX))
-        else {
+        let Some(callback) = ssl.session_context().slot_data(&TICKET_KEY_INDEX) else {
             return TicketKeyCallbackResult::Error;
         };
         callback(ssl, mode, evp_ctx, hmac_ctx)
@@ -605,9 +595,8 @@ pub(super) unsafe extern "C" fn raw_new_session(
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     // SAFETY: the session reference is owned by this callback.
     let session = unsafe { SslSession::from_ptr(session) };
-    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
-        && let Some(callback) = context.slot_data(&NEW_SESSION_INDEX)
-    {
+    let context = ssl.session_context().to_owned();
+    if let Some(callback) = context.slot_data(&NEW_SESSION_INDEX) {
         catch_native(|| match callback {
             NewSessionCallback::Raw(callback) => callback(ssl, session),
             NewSessionCallback::Checked(callback) => {
@@ -659,9 +648,7 @@ pub(super) unsafe extern "C" fn raw_get_session(
     };
     // SAFETY: The native session identifier is readable for the declared checked length and lifetime of the callback.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-        return ptr::null_mut();
-    };
+    let context = ssl.session_context().to_owned();
     let Some(callback) = context.slot_data(&GET_SESSION_INDEX) else {
         return ptr::null_mut();
     };

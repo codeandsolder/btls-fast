@@ -241,7 +241,6 @@ bitflags! {
 #[derive(Copy, Clone)]
 pub struct SslMethod {
     ptr: *const ffi::SSL_METHOD,
-    is_x509_method: bool,
 }
 
 impl SslMethod {
@@ -253,7 +252,6 @@ impl SslMethod {
         unsafe {
             Self {
                 ptr: ffi::TLS_method(),
-                is_x509_method: true,
             }
         }
     }
@@ -274,7 +272,6 @@ impl SslMethod {
         unsafe {
             Self {
                 ptr: ffi::TLS_with_buffers_method(),
-                is_x509_method: false,
             }
         }
     }
@@ -287,37 +284,17 @@ impl SslMethod {
         unsafe {
             Self {
                 ptr: ffi::DTLS_method(),
-                is_x509_method: true,
             }
         }
     }
 
-    /// Constructs an `SslMethod` from a pointer to the underlying OpenSSL value.
-    ///
-    /// This method assumes that the `SslMethod` is not configured for X.509
-    /// certificates. The user can call `SslMethod::assume_x509_method`
-    /// to change that.
+    /// Constructs an `SslMethod` from a native method descriptor.
     ///
     /// # Safety
-    ///
-    /// The caller must ensure the pointer is valid.
-    #[corresponds(TLS_server_method)]
-    #[must_use = "The returned builder assumes ownership of the supplied native context."]
+    /// The pointer must be a valid, process-lifetime native method descriptor.
+    #[must_use = "Use the selected native protocol method to construct the TLS context."]
     pub const unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> Self {
-        Self {
-            ptr,
-            is_x509_method: false,
-        }
-    }
-
-    /// Assumes that this `SslMethod` is configured for X.509 certificates.
-    ///
-    /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
-    pub const unsafe fn assume_x509(&mut self) {
-        self.is_x509_method = true;
+        Self { ptr }
     }
 
     /// Returns a pointer to the underlying OpenSSL value.
@@ -544,9 +521,6 @@ static CTX_CUSTOM_VERIFY_INDEX: IndexSlot<SslContext, Option<CustomVerifyCallbac
 static SSL_VERIFY_INDEX: IndexSlot<Ssl, Option<VerifyCallback>> = IndexSlot::new(Ssl::new_ex_index);
 static SSL_CUSTOM_VERIFY_INDEX: IndexSlot<Ssl, Option<CustomVerifyCallback>> =
     IndexSlot::new(Ssl::new_ex_index);
-
-static SESSION_CTX_INDEX: IndexSlot<Ssl, SslContext> = IndexSlot::new(Ssl::new_ex_index);
-static X509_FLAG_INDEX: IndexSlot<SslContext, bool> = IndexSlot::new(SslContext::new_ex_index);
 
 /// An error returned from the SNI callback.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1153,22 +1127,13 @@ impl SslContextBuilder {
         unsafe {
             init();
             let ctx = cvt_p(ffi::SSL_CTX_new(method.as_ptr()))?;
-            let mut builder = Self::from_ptr(ctx);
-
-            if method.is_x509_method {
-                builder.ctx.assume_x509()?;
-            }
-
-            Ok(builder)
+            Ok(Self::from_ptr(ctx))
         }
     }
 
     /// Creates an `SslContextBuilder` from a pointer to a raw OpenSSL value.
     ///
-    /// This method can find out whether `ctx` is configured for X.509 certificates
-    /// if `ctx` was itself a context created by this crate. If it was created by
-    /// other means and it supports X.509 certificates, the use can call
-    /// `SslContextBuilder::assume_x509`.
+    /// The native context determines whether X.509 operations are available.
     ///
     /// # Safety
     ///
@@ -1180,21 +1145,6 @@ impl SslContextBuilder {
             ctx: unsafe { SslContext::from_ptr(ctx) },
             has_shared_cert_store: false,
         }
-    }
-
-    /// Assumes that this `SslContextBuilder` is configured for X.509 certificates.
-    ///
-    /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
-    ///
-    /// # Errors
-    ///
-    /// Registration or replacement of the native X.509 marker fails.
-    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
-        // SAFETY: The caller established that this uniquely owned context really uses the X509 method.
-        unsafe { self.ctx.assume_x509() }
     }
 
     /// Returns a pointer to the raw OpenSSL value.
@@ -2793,7 +2743,7 @@ impl SslContext {
     ///
     /// # Errors
     ///
-    /// Native context allocation or the X.509 marker registration fails.
+    /// Native context allocation fails.
     pub fn builder(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
         SslContextBuilder::new(method)
     }
@@ -2990,30 +2940,12 @@ impl SslContextRef {
         Ok(SslVerifyMode::from_bits_retain(mode))
     }
 
-    /// Assumes that this `SslContext` is configured for X.509 certificates.
-    ///
-    /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
-    ///
-    /// # Errors
-    ///
-    /// Registration or replacement of the native X.509 marker fails.
-    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
-        // SAFETY: the caller guarantees this native SSL context really uses
-        // X.509 and owns its native extra-data slots exclusively. The newly
-        // registered typed index therefore matches the stored marker.
-        unsafe { self.replace_ex_data(X509_FLAG_INDEX.register()?, true)? };
-        Ok(())
-    }
-
-    /// Returns `true` if context is configured for X.509 certificates.
+    /// Returns `true` if the native context uses the X.509 certificate method.
+    #[corresponds(SSL_CTX_has_x509_support)]
     #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn has_x509_support(&self) -> bool {
-        self.slot_data(&X509_FLAG_INDEX)
-            .copied()
-            .unwrap_or_default()
+        // SAFETY: the live context has an immutable native certificate method.
+        unsafe { ffi::SSL_CTX_has_x509_support(self.as_ptr()) != 0 }
     }
 
     fn check_x509(&self) -> Result<(), ErrorStack> {
@@ -3609,10 +3541,7 @@ impl Ssl {
         // native SSL handle is checked for null before Rust takes ownership.
         unsafe {
             let ptr = cvt_p(ffi::SSL_new(ctx.as_ptr()))?;
-            let mut ssl = Self::from_ptr(ptr);
-            ssl.set_ex_data(SESSION_CTX_INDEX.register()?, ctx.to_owned())?;
-
-            Ok(ssl)
+            Ok(Self::from_ptr(ptr))
         }
     }
 
@@ -4880,8 +4809,11 @@ impl SslRef {
         self.ex_data(slot.get()?)
     }
 
-    fn session_context(&self) -> Option<&SslContextRef> {
-        self.slot_data(&SESSION_CTX_INDEX).map(|owner| &**owner)
+    #[corresponds(SSL_get0_session_context)]
+    fn session_context(&self) -> &SslContextRef {
+        // SAFETY: every live native SSL retains its original session context
+        // for its entire lifetime, even after SSL_set_SSL_CTX.
+        unsafe { SslContextRef::from_ptr(ffi::SSL_get0_session_context(self.as_ptr())) }
     }
 
     /// Copies the contents of the last Finished message sent to the peer into the provided buffer.

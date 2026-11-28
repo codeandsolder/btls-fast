@@ -337,9 +337,7 @@ impl SessionAuthentication {
         let verify_peer = verifies_peer(ssl);
         ssl.session_id_context() == Some(scope)
             && (!scope.is_empty()
-                || ssl
-                    .session_context()
-                    .and_then(issuer)
+                || issuer(ssl.session_context())
                     .is_some_and(|issuer| Arc::ptr_eq(&self.issuer, issuer)))
             && self.peer.domain.eq_ignore_ascii_case(domain)
             && self.peer.sni == sni
@@ -512,12 +510,7 @@ impl ConnectConfiguration {
             setup_verify_hostname(&mut self.ssl, domain)?;
         }
 
-        let reports_sessions = self.ssl.session_context().is_some_and(|context| {
-            context
-                .slot_data(&NEW_SESSION_INDEX)
-                .and_then(NewSessionCallback::checked)
-                .is_some()
-        });
+        let reports_sessions = issuer(self.ssl.session_context()).is_some();
         let session = self.session.take().filter(|session| {
             session.authentication.permits(
                 &session.session,

@@ -378,9 +378,7 @@ unsafe fn with_method(
 ) -> c_int {
     // SAFETY: BoringSSL passes the callbacks the `SSL` they run for.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-        return 0;
-    };
+    let context = ssl.session_context().to_owned();
     let Some(method) = context
         .slot_data(&QUIC_METHOD_INDEX)
         .and_then(Option::as_deref)
