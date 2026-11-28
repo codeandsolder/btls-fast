@@ -45,10 +45,12 @@ fn bootstrap_ech(config: &[u8], key: &[u8], list: Option<&[u8]>) -> (Server, Cli
 
 #[test]
 fn ech() {
-    let (_server, client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, Some(ECH_CONFIG_LIST));
+    let (_server, mut client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, Some(ECH_CONFIG_LIST));
+    assert!(client.ssl().ech_retry_configs().is_err());
 
     let ssl_stream = client.connect();
     assert!(ssl_stream.ssl().ech_accepted());
+    assert!(ssl_stream.ssl().ech_retry_configs().is_err());
 }
 
 #[test]
@@ -95,7 +97,13 @@ fn ech_disable_from_select_certificate_callback() {
     };
 
     assert!(!failed_ssl_stream.ssl().ech_accepted());
-    assert!(failed_ssl_stream.ssl().get_ech_retry_configs().is_none());
+    assert!(
+        failed_ssl_stream
+            .ssl()
+            .ech_retry_configs()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(
         *observations.lock().unwrap(),
@@ -181,7 +189,13 @@ fn ech_disable_from_async_select_certificate_callback() {
     };
 
     assert!(!failed_ssl_stream.ssl().ech_accepted());
-    assert!(failed_ssl_stream.ssl().get_ech_retry_configs().is_none());
+    assert!(
+        failed_ssl_stream
+            .ssl()
+            .ech_retry_configs()
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 2);
 }
 
@@ -198,7 +212,13 @@ fn ech_rejection() {
         failed_ssl_stream.ssl().get_ech_name_override(),
         Some(b"ech.com".to_vec().as_ref())
     );
-    assert!(failed_ssl_stream.ssl().get_ech_retry_configs().is_some());
+    assert!(
+        !failed_ssl_stream
+            .ssl()
+            .ech_retry_configs()
+            .unwrap()
+            .is_empty()
+    );
     assert!(!failed_ssl_stream.ssl().ech_accepted());
 }
 
@@ -208,7 +228,7 @@ fn ech_grease() {
 
     let mut client = server.client_with_root_ca().build().builder();
     // Verified with a pcap locally that the ECH extension gets sent due to GREASE
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
 
     let ssl_stream = client.connect();
     assert!(!ssl_stream.ssl().ech_accepted());
@@ -223,7 +243,7 @@ fn ech_grease_policy_accepts_retry_configs() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, None);
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&calls);
     client
@@ -246,7 +266,7 @@ fn ech_grease_policy_accepts_retry_configs() {
 #[test]
 fn ech_real_configuration_bypasses_custom_grease_policy() {
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG, ECH_KEY, Some(ECH_CONFIG_LIST));
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     client
         .ssl()
         .set_ech_grease_callback(|_, _| panic!("real ECH used GREASE policy"))
@@ -258,7 +278,7 @@ fn ech_real_configuration_bypasses_custom_grease_policy() {
 #[test]
 fn ech_rejection_does_not_invoke_custom_grease_policy() {
     let (_server, mut client) = bootstrap_ech(ECH_CONFIG_2, ECH_KEY_2, Some(ECH_CONFIG_LIST));
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     client
         .ssl()
         .set_ech_grease_callback(|_, _| panic!("rejected real ECH used GREASE policy"))
@@ -266,6 +286,6 @@ fn ech_rejection_does_not_invoke_custom_grease_policy() {
     let HandshakeError::Failure(failed) = client.connect_err() else {
         panic!("expected ECH rejection");
     };
-    assert!(failed.ssl().get_ech_retry_configs().is_some());
+    assert!(!failed.ssl().ech_retry_configs().unwrap().is_empty());
     assert!(!failed.ssl().ech_accepted());
 }

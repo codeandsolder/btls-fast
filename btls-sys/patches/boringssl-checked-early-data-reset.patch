@@ -1,0 +1,33 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 44bf37621..b0c421203 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -4912,5 +4912,6 @@ OPENSSL_EXPORT int SSL_early_data_accepted(const SSL *ssl);
+ //
+-// It is an error to call this function on an `SSL` object that is not signaling
+-// `SSL_ERROR_EARLY_DATA_REJECTED`.
+-OPENSSL_EXPORT void SSL_reset_early_data_reject(SSL *ssl);
++// It returns one on success. If the connection is not signaling
++// `SSL_ERROR_EARLY_DATA_REJECTED`, it returns zero with an error on the
++// error queue, without changing the connection.
++OPENSSL_EXPORT int SSL_reset_early_data_reject(SSL *ssl);
+ 
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 32212862e..173911739 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -1180,3 +1180,3 @@ int SSL_early_data_accepted(const SSL *ssl) {
+ 
+-void SSL_reset_early_data_reject(SSL *ssl) {
++int SSL_reset_early_data_reject(SSL *ssl) {
+   auto *ssl_impl = FromOpaque(ssl);
+@@ -1185,3 +1185,4 @@ void SSL_reset_early_data_reject(SSL *ssl) {
+       hs->wait != ssl_hs_early_data_rejected) {
+-    abort();
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
+   }
+@@ -1197,2 +1198,3 @@ void SSL_reset_early_data_reject(SSL *ssl) {
+   ssl_impl->s3->unreported_bytes_written = 0;
++  return 1;
+ }

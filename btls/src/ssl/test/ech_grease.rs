@@ -107,7 +107,7 @@ fn handshake_with_toggle(
         .set_min_proto_version(Some(SslVersion::TLS1_3))
         .unwrap();
     client.ssl().set_curves_list("X25519:P-384").unwrap();
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     configure(client.ssl());
     let messages = connect_and_capture(client, enable_after_first);
     assert_eq!(messages.len(), if hrr { 2 } else { 1 });
@@ -154,7 +154,7 @@ fn ech_callback_does_not_add_grease_after_hrr() {
         let count = Arc::clone(&calls);
         let messages = handshake_with_toggle(
             |ssl| {
-                ssl.set_enable_ech_grease(initially_enabled);
+                ssl.set_enable_ech_grease(initially_enabled).unwrap();
                 ssl.set_ech_grease_callback(move |_, info| {
                     count.fetch_add(1, Ordering::SeqCst);
                     Ok(parameters(info, 239))
@@ -412,7 +412,7 @@ fn ech_policy_disabled_and_tls12_do_not_call_callback() {
     for tls12 in [false, true] {
         let server = Server::builder().build();
         let mut client = server.client_with_root_ca().build().builder();
-        client.ssl().set_enable_ech_grease(tls12);
+        client.ssl().set_enable_ech_grease(tls12).unwrap();
         if tls12 {
             client
                 .ssl()
@@ -435,7 +435,7 @@ fn ech_policy_callback_errors_fail_handshake() {
         server.should_error();
         let server = server.build();
         let mut client = server.client_with_root_ca().build().builder();
-        client.ssl().set_enable_ech_grease(true);
+        client.ssl().set_enable_ech_grease(true).unwrap();
         client
             .ssl()
             .set_ech_grease_callback(move |_, info| match failure {
@@ -542,7 +542,7 @@ fn ech_policy_clear_restores_context_or_default() {
             }
             let client = client.build();
             let mut connection = client.builder();
-            connection.ssl().set_enable_ech_grease(true);
+            connection.ssl().set_enable_ech_grease(true).unwrap();
             connection
                 .ssl()
                 .set_ech_grease_callback(policy(1, 400))
@@ -628,7 +628,7 @@ fn ech_metadata_includes_grease_in_wire_order() {
         })
         .unwrap();
     let mut client = client.build().builder();
-    client.ssl().set_enable_ech_grease(true);
+    client.ssl().set_enable_ech_grease(true).unwrap();
     let messages = connect_and_capture(client, None);
     let wire: Vec<_> = extensions(&messages[0])
         .into_iter()
@@ -678,7 +678,7 @@ fn ech_policy_accounts_for_record_size_limit() {
             })
             .unwrap();
         let mut client = client.build().builder();
-        client.ssl().set_enable_ech_grease(true);
+        client.ssl().set_enable_ech_grease(true).unwrap();
         let messages = connect_and_capture(client, None);
         assert_eq!(messages.len(), 1);
         let wire = extensions(&messages[0]);
@@ -787,7 +787,7 @@ fn ech_connector_policy_uses_per_connection_host_length() {
         let connector = builder.build();
         for host in ["foobar.com", "127.0.0.1"] {
             let mut connection = connector.configure().unwrap();
-            connection.set_enable_ech_grease(true);
+            connection.set_enable_ech_grease(true).unwrap();
             connection.set_ex_data(host_length, host.len()).unwrap();
             let ssl = connection.into_ssl(host).unwrap();
             let mut stream = ssl.connect(server.connect_tcp()).unwrap();
@@ -1049,7 +1049,7 @@ fn ech_firefox_policy_matches_live_client_hello() {
                     .ssl()
                     .set_curves_list(if hrr { "X25519:P-384" } else { "P-384:X25519" })
                     .unwrap();
-                connection.ssl().set_enable_ech_grease(true);
+                connection.ssl().set_enable_ech_grease(true).unwrap();
                 connection
                     .ssl()
                     .set_ech_grease_callback(move |_, info| {
@@ -1226,7 +1226,7 @@ fn ech_context_policy_and_connection_override() {
     for selected in [0, 0, 1, 2] {
         let mut connection = base.builder();
         let ssl = connection.ssl();
-        ssl.set_enable_ech_grease(true);
+        ssl.set_enable_ech_grease(true).unwrap();
         ssl.set_hostname("localhost").unwrap();
         ssl.set_ex_data(index, selected).unwrap();
         if selected != 0 {
@@ -1286,14 +1286,14 @@ fn ech_policy_resumption_preserves_psk_binder() {
     let client = client.build();
     let mut first = client.builder();
     first.ssl().set_hostname("localhost").unwrap();
-    first.ssl().set_enable_ech_grease(true);
+    first.ssl().set_enable_ech_grease(true).unwrap();
     assert!(!first.connect().ssl().session_reused());
     assert_eq!(called.load(Ordering::SeqCst), 1);
     let session = sessions.lock().unwrap().pop().unwrap();
     let mut second = client.builder();
     // The session came from the same context, before this handshake starts.
     unsafe { second.ssl().set_session(&session).unwrap() };
-    second.ssl().set_enable_ech_grease(true);
+    second.ssl().set_enable_ech_grease(true).unwrap();
     second.ssl().set_hostname("localhost").unwrap();
     let mut capture = Capture::default();
     unsafe {

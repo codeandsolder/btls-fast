@@ -248,6 +248,8 @@ fn quic_handshake_and_early_data() {
     // A full handshake: the secrets of each level pair up, and the transport parameters cross.
     let mut c = client(&client_ctx, None);
     let mut s = server(&server_ctx, b"context");
+    assert!(c.reset_early_data_reject().is_err());
+    assert!(s.reset_early_data_reject().is_err());
     assert!(c.quic_max_handshake_flight_len(QuicEncryptionLevel::HANDSHAKE) > 0);
     handshake(&mut c, &mut s);
     for level in [
@@ -274,6 +276,8 @@ fn quic_handshake_and_early_data() {
     let mut s = server(&server_ctx, b"context");
     step(&mut c, &mut s).unwrap();
     assert!(c.in_early_data());
+    assert!(c.reset_early_data_reject().is_err());
+    assert!(c.in_early_data());
     let early_secret = secret(&mut c, false, QuicEncryptionLevel::EARLY_DATA);
     assert!(early_secret.is_some());
     handshake(&mut c, &mut s);
@@ -283,6 +287,8 @@ fn quic_handshake_and_early_data() {
     );
     assert!(c.early_data_accepted() && s.early_data_accepted());
     assert_eq!(c.early_data_reason(), EarlyDataReason::ACCEPTED);
+    assert!(c.reset_early_data_reject().is_err());
+    assert!(c.early_data_accepted());
 
     // A client can turn 0-RTT off for one connection and still resume.
     let mut c = client(&client_ctx, Some(&latest_session()));
@@ -307,9 +313,11 @@ fn quic_handshake_and_early_data() {
         EarlyDataReason::QUIC_PARAMETER_MISMATCH
     );
     assert_eq!(s.early_data_reason().to_string(), "quic_parameter_mismatch");
-    c.reset_early_data_reject();
+    c.reset_early_data_reject().unwrap();
+    assert!(c.reset_early_data_reject().is_err());
     handshake(&mut c, &mut s);
     assert!(!c.early_data_accepted() && !s.early_data_accepted());
+    assert!(c.reset_early_data_reject().is_err());
 
     // A server without an early data context issues sessions that do not allow 0-RTT.
     let mut c = client(&client_ctx, None);

@@ -1,7 +1,8 @@
 //! TLS 1.3 early data (0-RTT, [RFC 8446 §2.3](https://www.rfc-editor.org/rfc/rfc8446#section-2.3)).
 
 use super::{SslContextBuilder, SslRef, SslSessionRef};
-use crate::ffi;
+use crate::error::ErrorStack;
+use crate::{cvt, ffi};
 use foreign_types::ForeignTypeRef;
 use openssl_macros::corresponds;
 use std::ffi::CStr;
@@ -124,16 +125,14 @@ impl SslRef {
     /// protocol and other properties, so values queried before the reset must be discarded and
     /// queried again.
     ///
-    /// # Aborts
-    ///
-    /// BoringSSL aborts the process unless this is the first call since the handshake returned
-    /// [`ErrorCode::EARLY_DATA_REJECTED`](super::ErrorCode::EARLY_DATA_REJECTED). Calling it
-    /// without a reject, after the handshake completed, or twice aborts.
+    /// # Errors
+    /// The connection is not currently waiting for an early data rejection
+    /// reset. Failure leaves the connection state unchanged.
     #[corresponds(SSL_reset_early_data_reject)]
-    pub fn reset_early_data_reject(&mut self) {
-        // SAFETY: the exclusive SSL pointer is valid; the caller must observe
-        // the documented BoringSSL state precondition to avoid a native abort.
-        unsafe { ffi::SSL_reset_early_data_reject(self.as_ptr()) }
+    pub fn reset_early_data_reject(&mut self) -> Result<(), ErrorStack> {
+        // SAFETY: the exclusively borrowed SSL is live and the native operation
+        // checks its handshake state before changing it.
+        unsafe { cvt(ffi::SSL_reset_early_data_reject(self.as_ptr())) }
     }
 
     /// Returns why the connection did or did not use early data.

@@ -8,10 +8,10 @@ use super::{
     STATUS_INDEX, ServerNameCallback, TICKET_KEY_INDEX,
 };
 use super::{
-    AlpnError, CertificateCompressor, ClientHello, ClientSession, GetSessionPendingError,
-    PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert,
-    SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef,
-    SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
+    AlpnError, CertificateCompressor, ClientHello, GetSessionPendingError, PrivateKeyMethod,
+    PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert, SslContextRef,
+    SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef, SslSession,
+    SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
 use crate::error::ErrorStack;
 use crate::ffi;
@@ -23,9 +23,10 @@ use crate::x509::X509StoreContextRef;
 use foreign_types::ForeignType;
 use foreign_types::ForeignTypeRef;
 use libc::{c_char, c_int, c_uchar, c_uint, c_void};
+use std::cell::Cell;
 use std::ffi::CStr;
 use std::mem;
-use std::ptr;
+use std::ptr::{self, NonNull};
 use std::slice;
 use std::sync::Arc;
 
@@ -84,7 +85,7 @@ pub(super) extern "C" fn raw_verify(
 
     let Some(ssl_context) = ctx
         .ssl()
-        .and_then(SslRef::session_context)
+        .map(SslRef::session_context)
         .map(ToOwned::to_owned)
     else {
         return 0;
@@ -103,10 +104,7 @@ pub(super) unsafe extern "C" fn raw_custom_verify(
     out_alert: *mut u8,
 ) -> ffi::ssl_verify_result_t {
     let callback = |ssl: &mut SslRef| {
-        let context = ssl
-            .session_context()
-            .map(ToOwned::to_owned)
-            .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
+        let context = ssl.session_context().to_owned();
         let callback = context
             .slot_data(&CTX_CUSTOM_VERIFY_INDEX)
             .and_then(Option::as_ref)
@@ -155,6 +153,64 @@ pub(super) unsafe extern "C" fn ssl_raw_custom_verify(
     unsafe { raw_custom_verify_callback(ssl, out_alert, callback) }
 }
 
+// A verifier can call application code which drives a different connection.
+// Track the entire stack of active invocations rather than just the innermost
+// one. Scopes are stack allocated and need no connection ex-data or heap slot.
+struct VerifyScope {
+    ssl: *mut ffi::SSL,
+    previous: Option<NonNull<Self>>,
+}
+
+thread_local! {
+    static VERIFY_SCOPE: Cell<Option<NonNull<VerifyScope>>> = const { Cell::new(None) };
+}
+
+pub(super) fn custom_verify_active(ssl: &SslRef) -> bool {
+    VERIFY_SCOPE.with(|slot| {
+        let mut current = slot.get();
+        while let Some(scope) = current {
+            // SAFETY: every linked scope lives on the current thread's stack;
+            // its guard restores the previous link before it is destroyed.
+            let scope = unsafe { scope.as_ref() };
+            if scope.ssl == ssl.as_ptr() {
+                return true;
+            }
+            current = scope.previous;
+        }
+        false
+    })
+}
+
+fn invoke_custom_verify(
+    ssl: &mut SslRef,
+    callback: impl FnOnce(&mut SslRef) -> Result<(), SslVerifyError>,
+) -> Result<(), SslVerifyError> {
+    struct Restore<'a> {
+        slot: &'a Cell<Option<NonNull<VerifyScope>>>,
+        previous: Option<NonNull<VerifyScope>>,
+    }
+    impl Drop for Restore<'_> {
+        fn drop(&mut self) {
+            self.slot.set(self.previous);
+        }
+    }
+    if custom_verify_active(ssl) {
+        return Err(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR));
+    }
+    VERIFY_SCOPE.with(|slot| {
+        let scope = VerifyScope {
+            ssl: ssl.as_ptr(),
+            previous: slot.get(),
+        };
+        slot.set(Some(NonNull::from(&scope)));
+        let _restore = Restore {
+            slot,
+            previous: scope.previous,
+        };
+        callback(ssl)
+    })
+}
+
 unsafe fn raw_custom_verify_callback(
     ssl: *mut ffi::SSL,
     out_alert: *mut u8,
@@ -165,7 +221,7 @@ unsafe fn raw_custom_verify_callback(
     }
     // SAFETY: native verification owns exclusive access to the live SSL.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    match catch_native(|| callback(ssl)) {
+    match catch_native(|| invoke_custom_verify(ssl, callback)) {
         Some(Ok(())) => ffi::ssl_verify_result_t::ssl_verify_ok,
         Some(Err(SslVerifyError::Retry)) => ffi::ssl_verify_result_t::ssl_verify_retry,
         failure => {
@@ -248,9 +304,7 @@ pub(super) unsafe extern "C" fn raw_client_psk(
         return 0;
     }
     psk_result(psk_capacity, || {
-        let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-            return Ok(0);
-        };
+        let context = ssl.session_context().to_owned();
         let Some(callback) = context.slot_data(&PSK_CLIENT_INDEX) else {
             return Ok(0);
         };
@@ -285,9 +339,7 @@ pub(super) unsafe extern "C" fn raw_server_psk(
         return 0;
     };
     psk_result(capacity, || {
-        let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-            return Ok(0);
-        };
+        let context = ssl.session_context().to_owned();
         let Some(callback) = context.slot_data(&PSK_SERVER_INDEX) else {
             return Ok(0);
         };
@@ -397,10 +449,7 @@ pub(super) unsafe extern "C" fn raw_ticket_key(
     // BoringSSL always invokes the callback of the original session context,
     // even if SNI has switched the connection's current context.
     let result = catch_native(|| {
-        let Some(callback) = ssl
-            .session_context()
-            .and_then(|ctx| ctx.slot_data(&TICKET_KEY_INDEX))
-        else {
+        let Some(callback) = ssl.session_context().slot_data(&TICKET_KEY_INDEX) else {
             return TicketKeyCallbackResult::Error;
         };
         callback(ssl, mode, evp_ctx, hmac_ctx)
@@ -546,16 +595,15 @@ pub(super) unsafe extern "C" fn raw_new_session(
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
     // SAFETY: the session reference is owned by this callback.
     let session = unsafe { SslSession::from_ptr(session) };
-    if let Some(context) = ssl.session_context().map(ToOwned::to_owned)
-        && let Some(callback) = context.slot_data(&NEW_SESSION_INDEX)
-    {
+    let context = ssl.session_context().to_owned();
+    if let Some(callback) = context.slot_data(&NEW_SESSION_INDEX) {
         catch_native(|| match callback {
             NewSessionCallback::Raw(callback) => callback(ssl, session),
             NewSessionCallback::Checked(callback) => {
                 // Only connections configured by ConnectConfiguration report
                 // checked sessions. All other session references are dropped.
                 if let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() {
-                    let session = ClientSession::new(session, peer, ssl);
+                    let session = callback.issue(session, peer, ssl);
                     (callback.callback)(ssl, session);
                 }
             }
@@ -600,9 +648,7 @@ pub(super) unsafe extern "C" fn raw_get_session(
     };
     // SAFETY: The native session identifier is readable for the declared checked length and lifetime of the callback.
     let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let Some(context) = ssl.session_context().map(ToOwned::to_owned) else {
-        return ptr::null_mut();
-    };
+    let context = ssl.session_context().to_owned();
     let Some(callback) = context.slot_data(&GET_SESSION_INDEX) else {
         return ptr::null_mut();
     };
@@ -1008,6 +1054,36 @@ impl Drop for CryptoBufferBuilder {
 mod boundary_tests {
     use super::*;
     use std::mem::MaybeUninit;
+
+    #[test]
+    fn custom_verifier_scope_tracks_nested_connections_and_unwinds() {
+        use crate::ssl::{Ssl, SslContext, SslMethod, SslVerifyMode};
+        let context = SslContext::builder(SslMethod::tls()).unwrap().build();
+        let mut first = Ssl::new(&context).unwrap();
+        let mut second = Ssl::new(&context).unwrap();
+        let result = catch_native(|| {
+            invoke_custom_verify(&mut first, |first| {
+                assert!(custom_verify_active(first));
+                assert!(!custom_verify_active(&second));
+                invoke_custom_verify(&mut second, |second| {
+                    assert!(custom_verify_active(first));
+                    assert!(custom_verify_active(second));
+                    assert!(first.set_verify_mode(SslVerifyMode::NONE).is_err());
+                    assert!(invoke_custom_verify(second, |_| Ok(())).is_err());
+                    Ok(())
+                })
+                .unwrap();
+                assert!(custom_verify_active(first));
+                assert!(!custom_verify_active(&second));
+                panic!("test unwind");
+            })
+        });
+        assert!(result.is_none());
+        assert!(!custom_verify_active(&first));
+        assert!(!custom_verify_active(&second));
+        first.set_verify_mode(SslVerifyMode::PEER).unwrap();
+        second.set_verify_mode(SslVerifyMode::PEER).unwrap();
+    }
 
     #[test]
     fn decompression_requires_complete_initialized_buffer() {

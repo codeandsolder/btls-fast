@@ -66,7 +66,7 @@ use std::fmt;
 use std::io::prelude::*;
 use std::io::{self, IoSlice};
 use std::marker::PhantomData;
-use std::mem::{self, ManuallyDrop, MaybeUninit};
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::ops::Deref;
 use std::panic::resume_unwind;
 use std::path::Path;
@@ -90,7 +90,7 @@ use crate::ssl::callbacks::{
 };
 use crate::ssl::ech::SslEchKeys;
 use crate::ssl::error::InnerError;
-use crate::stack::{Stack, StackRef, Stackable};
+use crate::stack::{StackRef, Stackable};
 use crate::symm::CipherCtxRef;
 use crate::try_int;
 use crate::util::native_input;
@@ -241,7 +241,6 @@ bitflags! {
 #[derive(Copy, Clone)]
 pub struct SslMethod {
     ptr: *const ffi::SSL_METHOD,
-    is_x509_method: bool,
 }
 
 impl SslMethod {
@@ -253,7 +252,6 @@ impl SslMethod {
         unsafe {
             Self {
                 ptr: ffi::TLS_method(),
-                is_x509_method: true,
             }
         }
     }
@@ -274,7 +272,6 @@ impl SslMethod {
         unsafe {
             Self {
                 ptr: ffi::TLS_with_buffers_method(),
-                is_x509_method: false,
             }
         }
     }
@@ -287,37 +284,17 @@ impl SslMethod {
         unsafe {
             Self {
                 ptr: ffi::DTLS_method(),
-                is_x509_method: true,
             }
         }
     }
 
-    /// Constructs an `SslMethod` from a pointer to the underlying OpenSSL value.
-    ///
-    /// This method assumes that the `SslMethod` is not configured for X.509
-    /// certificates. The user can call `SslMethod::assume_x509_method`
-    /// to change that.
+    /// Constructs an `SslMethod` from a native method descriptor.
     ///
     /// # Safety
-    ///
-    /// The caller must ensure the pointer is valid.
-    #[corresponds(TLS_server_method)]
-    #[must_use = "The returned builder assumes ownership of the supplied native context."]
+    /// The pointer must be a valid, process-lifetime native method descriptor.
+    #[must_use = "Use the selected native protocol method to construct the TLS context."]
     pub const unsafe fn from_ptr(ptr: *const ffi::SSL_METHOD) -> Self {
-        Self {
-            ptr,
-            is_x509_method: false,
-        }
-    }
-
-    /// Assumes that this `SslMethod` is configured for X.509 certificates.
-    ///
-    /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
-    pub const unsafe fn assume_x509(&mut self) {
-        self.is_x509_method = true;
+        Self { ptr }
     }
 
     /// Returns a pointer to the underlying OpenSSL value.
@@ -544,9 +521,6 @@ static CTX_CUSTOM_VERIFY_INDEX: IndexSlot<SslContext, Option<CustomVerifyCallbac
 static SSL_VERIFY_INDEX: IndexSlot<Ssl, Option<VerifyCallback>> = IndexSlot::new(Ssl::new_ex_index);
 static SSL_CUSTOM_VERIFY_INDEX: IndexSlot<Ssl, Option<CustomVerifyCallback>> =
     IndexSlot::new(Ssl::new_ex_index);
-
-static SESSION_CTX_INDEX: IndexSlot<Ssl, SslContext> = IndexSlot::new(Ssl::new_ex_index);
-static X509_FLAG_INDEX: IndexSlot<SslContext, bool> = IndexSlot::new(SslContext::new_ex_index);
 
 /// An error returned from the SNI callback.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1145,6 +1119,22 @@ pub struct SslContextBuilder {
     has_shared_cert_store: bool,
 }
 
+// These setters borrow native X.509 inputs and share the capability and
+// return-code checks. The native functions never consume their arguments.
+macro_rules! checked_x509_setter {
+    ($(#[$meta:meta])* $name:ident($arg:ident: $ty:ty) => $native:ident) => {
+        $(#[$meta])*
+        #[corresponds($native)]
+        pub fn $name(&mut self, $arg: &$ty) -> Result<(), ErrorStack> {
+            self.configure_x509(|native| {
+                // SAFETY: The checked, exclusively borrowed owner and the
+                // borrowed X.509 input both stay live throughout the call.
+                unsafe { ffi::$native(native.as_ptr(), $arg.as_ptr()) }
+            })
+        }
+    };
+}
+
 impl SslContextBuilder {
     /// Creates a new `SslContextBuilder`.
     #[corresponds(SSL_CTX_new)]
@@ -1153,22 +1143,13 @@ impl SslContextBuilder {
         unsafe {
             init();
             let ctx = cvt_p(ffi::SSL_CTX_new(method.as_ptr()))?;
-            let mut builder = Self::from_ptr(ctx);
-
-            if method.is_x509_method {
-                builder.ctx.assume_x509()?;
-            }
-
-            Ok(builder)
+            Ok(Self::from_ptr(ctx))
         }
     }
 
     /// Creates an `SslContextBuilder` from a pointer to a raw OpenSSL value.
     ///
-    /// This method can find out whether `ctx` is configured for X.509 certificates
-    /// if `ctx` was itself a context created by this crate. If it was created by
-    /// other means and it supports X.509 certificates, the use can call
-    /// `SslContextBuilder::assume_x509`.
+    /// The native context determines whether X.509 operations are available.
     ///
     /// # Safety
     ///
@@ -1180,21 +1161,6 @@ impl SslContextBuilder {
             ctx: unsafe { SslContext::from_ptr(ctx) },
             has_shared_cert_store: false,
         }
-    }
-
-    /// Assumes that this `SslContextBuilder` is configured for X.509 certificates.
-    ///
-    /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
-    ///
-    /// # Errors
-    ///
-    /// Registration or replacement of the native X.509 marker fails.
-    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
-        // SAFETY: The caller established that this uniquely owned context really uses the X509 method.
-        unsafe { self.ctx.assume_x509() }
     }
 
     /// Returns a pointer to the raw OpenSSL value.
@@ -1634,36 +1600,32 @@ impl SslContextBuilder {
         }
     }
 
-    /// Sets the list of CA names sent to the client.
-    ///
-    /// The CA certificates must still be added to the trust root - they are not automatically set
-    /// as trusted by this method.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates.
-    #[corresponds(SSL_CTX_set_client_CA_list)]
-    pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) -> Result<(), ErrorStack> {
+    fn configure_x509(
+        &mut self,
+        configure: impl FnOnce(&mut SslContextRef) -> c_int,
+    ) -> Result<(), ErrorStack> {
         self.ctx.check_x509()?;
-
-        // SAFETY: The native context takes ownership of the client CA stack; `mem::forget` prevents double-free.
-        unsafe {
-            ffi::SSL_CTX_set_client_CA_list(self.as_ptr(), list.as_ptr());
-            mem::forget(list);
-        };
-        Ok(())
+        cvt(configure(&mut self.ctx))
     }
 
-    /// Add the provided CA certificate to the list sent by the server to the client when
-    /// requesting client-side TLS authentication.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates. Native insertion of the CA name fails.
-    #[corresponds(SSL_CTX_add_client_CA)]
-    pub fn add_client_ca(&mut self, cacert: &X509Ref) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
+    checked_x509_setter! {
+        /// Sets the list of CA names sent to the client.
+        ///
+        /// The CA certificates must still be added to the trust root - they are not automatically set
+        /// as trusted by this method.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates.
+        set_client_ca_list(list: StackRef<X509Name>) => SSL_CTX_set1_client_CA_list
+    }
 
-        // SAFETY: The CA certificate is borrowed while the live context adds its own retained reference.
-        unsafe { cvt(ffi::SSL_CTX_add_client_CA(self.as_ptr(), cacert.as_ptr())) }
+    checked_x509_setter! {
+        /// Add the provided CA certificate to the list sent by the server to the client when
+        /// requesting client-side TLS authentication.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates. Native insertion of the CA name fails.
+        add_client_ca(cacert: X509Ref) => SSL_CTX_add_client_CA
     }
 
     /// Sets the application-defined context identifier for sessions.
@@ -1693,7 +1655,7 @@ impl SslContextBuilder {
 
     /// Loads a leaf certificate from a file.
     ///
-    /// Only a single certificate will be loaded - use `add_extra_chain_cert` to add the remainder
+    /// Only a single certificate will be loaded - use `add_chain_cert` to add the remainder
     /// of the certificate chain, or `set_certificate_chain_file` to load the entire chain from a
     /// single file.
     ///
@@ -1705,66 +1667,60 @@ impl SslContextBuilder {
         file: P,
         file_type: SslFiletype,
     ) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
-
         let file = path_to_cstring(file.as_ref())?;
-        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
-        unsafe {
-            cvt(ffi::SSL_CTX_use_certificate_file(
-                self.as_ptr(),
-                file.as_ptr(),
-                file_type.as_raw(),
-            ))
-        }
+        self.configure_x509(|ctx| {
+            // SAFETY: The checked NUL-terminated file path remains live while the native context loads the certificate.
+            unsafe {
+                ffi::SSL_CTX_use_certificate_file(ctx.as_ptr(), file.as_ptr(), file_type.as_raw())
+            }
+        })
     }
 
     /// Loads a certificate chain from a file.
     ///
     /// The file should contain a sequence of PEM-formatted certificates, the first being the leaf
     /// certificate, and the remainder forming the chain of certificates up to and including the
-    /// trusted root certificate.
+    /// trusted root certificate. A failed load leaves the current chain and key unchanged.
     #[corresponds(SSL_CTX_use_certificate_chain_file)]
     pub fn set_certificate_chain_file<P: AsRef<Path>>(
         &mut self,
         file: P,
     ) -> Result<(), ErrorStack> {
         let file = path_to_cstring(file.as_ref())?;
-        // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
-        unsafe {
-            cvt(ffi::SSL_CTX_use_certificate_chain_file(
-                self.as_ptr(),
-                file.as_ptr(),
-            ))
-        }
+        self.configure_x509(|ctx| {
+            // SAFETY: The checked NUL-terminated file path remains live while the native context loads the chain.
+            unsafe { ffi::SSL_CTX_use_certificate_chain_file(ctx.as_ptr(), file.as_ptr()) }
+        })
     }
 
-    /// Sets the leaf certificate.
-    ///
-    /// Use `add_extra_chain_cert` to add the remainder of the certificate chain.
-    #[corresponds(SSL_CTX_use_certificate)]
-    pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        // SAFETY: The borrowed certificate remains live while the context installs its own reference.
-        unsafe { cvt(ffi::SSL_CTX_use_certificate(self.as_ptr(), cert.as_ptr())) }
+    checked_x509_setter! {
+        /// Replaces the complete certificate chain, starting with the leaf.
+        ///
+        /// The caller retains ownership of every certificate. A failure leaves
+        /// the previous chain and key unchanged. On success, a private key that
+        /// does not match the new leaf is discarded.
+        ///
+        /// # Errors
+        /// The context does not support X.509, the chain is empty, or installation fails.
+        set_certificate_chain(chain: StackRef<X509>) => SSL_CTX_use_certificate_chain
     }
 
-    /// Appends a certificate to the certificate chain.
-    ///
-    /// This chain should contain all certificates necessary to go from the certificate specified by
-    /// `set_certificate` to a trusted root.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates. Native insertion of the certificate fails.
-    #[corresponds(SSL_CTX_add_extra_chain_cert)]
-    pub fn add_extra_chain_cert(&mut self, cert: X509) -> Result<(), ErrorStack> {
-        self.ctx.check_x509()?;
+    checked_x509_setter! {
+        /// Sets the leaf certificate.
+        ///
+        /// Use `add_chain_cert` to add the remainder of the certificate chain.
+        set_certificate(cert: X509Ref) => SSL_CTX_use_certificate
+    }
 
-        // SAFETY: The owned certificate pointer is consumed by the native context, with no second Rust owner.
-        unsafe {
-            cvt(ffi::SSL_CTX_add_extra_chain_cert(
-                self.as_ptr(),
-                cert.into_ptr(),
-            ))
-        }
+    checked_x509_setter! {
+        /// Appends a certificate to the certificate chain.
+        ///
+        /// This chain should contain all certificates necessary to go from the certificate specified by
+        /// `set_certificate` to a trusted root.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates. Native insertion of the certificate fails.
+        add_chain_cert(cert: X509Ref) => SSL_CTX_add1_chain_cert
     }
 
     /// Loads the private key from a file.
@@ -2793,7 +2749,7 @@ impl SslContext {
     ///
     /// # Errors
     ///
-    /// Native context allocation or the X.509 marker registration fails.
+    /// Native context allocation fails.
     pub fn builder(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
         SslContextBuilder::new(method)
     }
@@ -2990,30 +2946,12 @@ impl SslContextRef {
         Ok(SslVerifyMode::from_bits_retain(mode))
     }
 
-    /// Assumes that this `SslContext` is configured for X.509 certificates.
-    ///
-    /// # Safety
-    ///
-    /// The native context must use the X.509 certificate method and be exclusively owned.
-    /// No other reference may access its extra-data slots during this operation.
-    ///
-    /// # Errors
-    ///
-    /// Registration or replacement of the native X.509 marker fails.
-    pub unsafe fn assume_x509(&mut self) -> Result<(), ErrorStack> {
-        // SAFETY: the caller guarantees this native SSL context really uses
-        // X.509 and owns its native extra-data slots exclusively. The newly
-        // registered typed index therefore matches the stored marker.
-        unsafe { self.replace_ex_data(X509_FLAG_INDEX.register()?, true)? };
-        Ok(())
-    }
-
-    /// Returns `true` if context is configured for X.509 certificates.
+    /// Returns `true` if the native context uses the X.509 certificate method.
+    #[corresponds(SSL_CTX_has_x509_support)]
     #[must_use = "Use this predicate to decide how to handle the current value or connection."]
     pub fn has_x509_support(&self) -> bool {
-        self.slot_data(&X509_FLAG_INDEX)
-            .copied()
-            .unwrap_or_default()
+        // SAFETY: the live context has an immutable native certificate method.
+        unsafe { ffi::SSL_CTX_has_x509_support(self.as_ptr()) != 0 }
     }
 
     fn check_x509(&self) -> Result<(), ErrorStack> {
@@ -3609,10 +3547,7 @@ impl Ssl {
         // native SSL handle is checked for null before Rust takes ownership.
         unsafe {
             let ptr = cvt_p(ffi::SSL_new(ctx.as_ptr()))?;
-            let mut ssl = Self::from_ptr(ptr);
-            ssl.set_ex_data(SESSION_CTX_INDEX.register()?, ctx.to_owned())?;
-
-            Ok(ssl)
+            Ok(Self::from_ptr(ptr))
         }
     }
 
@@ -3720,6 +3655,15 @@ impl fmt::Debug for SslRef {
 }
 
 impl SslRef {
+    fn configure_x509(
+        &mut self,
+        configure: impl FnOnce(&mut Self) -> c_int,
+    ) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
+        self.ssl_context().check_x509()?;
+        cvt(configure(self))
+    }
+
     fn get_raw_rbio(&self) -> *mut ffi::BIO {
         // SAFETY: This live connection holds its owned BIO, and the getter only
         // returns its borrowed pointer for internal use.
@@ -3842,26 +3786,45 @@ impl SslRef {
 
     /// Changes only the verification mode, preserving all callbacks.
     /// # Errors
-    /// X.509 is unsupported or the connection configuration is unavailable.
+    /// X.509 is unsupported, configuration is unavailable, or a custom verifier is executing.
     #[corresponds(SSL_set_verify)]
     pub fn set_verify_mode(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509()?;
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         // SAFETY: a live X.509 connection with configuration; native preserves
         // the existing per-certificate callback when supplied null.
         unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
         Ok(())
     }
 
-    fn require_verification_config(&self) -> Result<(), ErrorStack> {
-        // SAFETY: the getter works with any certificate method and returns -1
-        // when the configuration has been discarded.
-        if unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) } < 0 {
+    fn require_verification_idle(&self) -> Result<(), ErrorStack> {
+        if callbacks::custom_verify_active(self) {
             return Err(ErrorStack::internal_error_str(
-                "TLS verification configuration unavailable",
+                "cannot change verification mode or callbacks during custom verification",
             ));
         }
-        Ok(())
+        self.require_handshake_config()
+    }
+
+    /// Returns whether native handshake configuration remains available.
+    ///
+    /// BoringSSL may discard configuration after a completed handshake.
+    /// Negotiated connection properties remain available.
+    #[corresponds(SSL_has_handshake_config)]
+    #[must_use = "Use this predicate to decide whether configuration can be inspected or changed."]
+    pub fn has_handshake_config(&self) -> bool {
+        // SAFETY: The live SSL is borrowed for a read-only native query.
+        unsafe { ffi::SSL_has_handshake_config(self.as_ptr()) != 0 }
+    }
+
+    fn require_handshake_config(&self) -> Result<(), ErrorStack> {
+        if self.has_handshake_config() {
+            Ok(())
+        } else {
+            Err(ErrorStack::internal_error_str(
+                "TLS handshake configuration unavailable",
+            ))
+        }
     }
 
     /// Sets the certificate verification depth.
@@ -3874,7 +3837,7 @@ impl SslRef {
     pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
         let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ssl_context().check_x509()?;
-        self.require_verification_config()?;
+        self.require_handshake_config()?;
 
         // SAFETY: the live SSL connection is exclusively borrowed and depth
         // has been checked against the native signed integer range.
@@ -3916,10 +3879,8 @@ impl SslRef {
     /// other operations more straightforwardly.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates.
-    ///
-    ///
-    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    /// The context does not support X.509 certificates, configuration is unavailable,
+    /// a custom verifier is executing, or callback storage cannot be allocated.
     #[corresponds(SSL_set_verify)]
     pub fn set_verify_callback<F>(
         &mut self,
@@ -3931,7 +3892,7 @@ impl SslRef {
     {
         self.ssl_context().check_x509()?;
 
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         self.set_ex_data(SSL_VERIFY_INDEX.register()?, Some(Arc::new(callback)))?;
         // SAFETY: the live X.509 connection owns its callback state and config.
         unsafe {
@@ -3947,10 +3908,11 @@ impl SslRef {
     /// Removes the inherited or connection-specific per-certificate verifier.
     /// The whole-chain X.509 and custom TLS callbacks remain unchanged.
     /// # Errors
-    /// X.509 is unsupported or configuration is unavailable.
+    /// X.509 is unsupported, configuration is unavailable, or a custom verifier is executing.
     #[corresponds(SSL_clear_verify_callback)]
     pub fn clear_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509()?;
+        self.require_verification_idle()?;
         // SAFETY: exclusive X.509 SSL; native checks config before changing it.
         unsafe {
             cvt(ffi::SSL_clear_verify_callback(
@@ -3984,9 +3946,12 @@ impl SslRef {
 
     /// Like [`SslContextBuilder::set_custom_verify_callback`].
     ///
-    /// # Errors
+    /// May replace a verifier between invocations, including a suspended
+    /// handshake. A verifier cannot replace itself during execution.
     ///
-    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    /// # Errors
+    /// Configuration is unavailable, a custom verifier is executing, or
+    /// native callback storage cannot be allocated.
     #[corresponds(SSL_set_custom_verify)]
     pub fn set_custom_verify_callback<F>(
         &mut self,
@@ -3996,7 +3961,7 @@ impl SslRef {
     where
         F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         self.set_ex_data(
             SSL_CUSTOM_VERIFY_INDEX.register()?,
             Some(Arc::new(callback)),
@@ -4017,10 +3982,10 @@ impl SslRef {
     /// sets the mode. Native verification, including configured X.509 callbacks,
     /// is used instead. Any pending asynchronous custom verification is discarded.
     /// # Errors
-    /// The connection configuration is unavailable.
+    /// Configuration is unavailable or a custom verifier is executing.
     #[corresponds(SSL_set_custom_verify)]
     pub fn clear_custom_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         // SAFETY: exclusive live SSL with configuration; null clears the callback.
         unsafe { ffi::SSL_set_custom_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
         if let Some(index) = SSL_CUSTOM_VERIFY_INDEX.get()
@@ -4033,11 +3998,16 @@ impl SslRef {
     }
 
     /// Configures whether ClientHello extensions should be permuted.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_permute_extensions)]
-    pub fn set_permute_extensions(&mut self, enabled: bool) {
+    pub fn set_permute_extensions(&mut self, enabled: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The uniquely borrowed SSL connection receives
         // a scalar extension-permutation flag.
-        unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), c_int::from(enabled)) }
+        unsafe { ffi::SSL_set_permute_extensions(self.as_ptr(), c_int::from(enabled)) };
+        Ok(())
     }
 
     /// Sets the [RFC 8449] record size limit for this connection only.
@@ -4048,12 +4018,17 @@ impl SslRef {
     /// change the limit.
     ///
     /// [RFC 8449]: https://www.rfc-editor.org/rfc/rfc8449
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[cfg(not(feature = "fips"))]
     #[corresponds(SSL_set_record_size_limit)]
-    pub fn set_record_size_limit(&mut self, limit: u16) {
+    pub fn set_record_size_limit(&mut self, limit: u16) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The native connection is exclusively borrowed
         // while BoringSSL installs its scalar record-size setting.
-        unsafe { ffi::SSL_set_record_size_limit(self.as_ptr(), limit as _) }
+        unsafe { ffi::SSL_set_record_size_limit(self.as_ptr(), limit as _) };
+        Ok(())
     }
 
     /// Like [`SslContextBuilder::set_alpn_protos`].
@@ -4078,15 +4053,21 @@ impl SslRef {
         }
     }
 
-    /// Returns the stack of available SslCiphers for `SSL`, sorted by preference.
+    /// Returns the configured cipher list, sorted by preference.
+    ///
+    /// Returns `None` if the handshake configuration has been discarded.
     #[corresponds(SSL_get_ciphers)]
     #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
-    pub fn ciphers(&self) -> &StackRef<SslCipher> {
-        // SAFETY: The live connection owns the returned cipher stack;
-        // the wrapper only borrows it while that connection remains live.
+    pub fn ciphers(&self) -> Option<&StackRef<SslCipher>> {
+        // SAFETY: The live connection owns the optional native cipher stack.
+        // Check for null before constructing a borrowed reference.
         unsafe {
             let cipher_list = ffi::SSL_get_ciphers(self.as_ptr());
-            StackRef::from_ptr(cipher_list)
+            if cipher_list.is_null() {
+                None
+            } else {
+                Some(StackRef::from_ptr(cipher_list))
+            }
         }
     }
 
@@ -4869,8 +4850,11 @@ impl SslRef {
         self.ex_data(slot.get()?)
     }
 
-    fn session_context(&self) -> Option<&SslContextRef> {
-        self.slot_data(&SESSION_CTX_INDEX).map(|owner| &**owner)
+    #[corresponds(SSL_get0_session_context)]
+    fn session_context(&self) -> &SslContextRef {
+        // SAFETY: every live native SSL retains its original session context
+        // for its entire lifetime, even after SSL_set_SSL_CTX.
+        unsafe { SslContextRef::from_ptr(ffi::SSL_get0_session_context(self.as_ptr())) }
     }
 
     /// Copies the contents of the last Finished message sent to the peer into the provided buffer.
@@ -5016,34 +5000,31 @@ impl SslRef {
         }
     }
 
-    /// Sets the certificate.
-    #[corresponds(SSL_use_certificate)]
-    pub fn set_certificate(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        // SAFETY: The certificate remains live until BoringSSL
-        // retains its own reference in the exclusively borrowed connection.
-        unsafe {
-            cvt(ffi::SSL_use_certificate(self.as_ptr(), cert.as_ptr()))?;
-        }
-
-        Ok(())
+    checked_x509_setter! {
+        /// Replaces the complete certificate chain, starting with the leaf.
+        ///
+        /// A failed replacement leaves the previous chain and key unchanged.
+        /// On success, a mismatching private key is discarded.
+        ///
+        /// # Errors
+        /// X.509 configuration is unavailable, the chain is empty, or installation fails.
+        set_certificate_chain(chain: StackRef<X509>) => SSL_use_certificate_chain
     }
 
-    /// Sets the list of CA names sent to the client.
-    ///
-    /// The CA certificates must still be added to the trust root - they are not automatically set
-    /// as trusted by this method.
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates.
-    #[corresponds(SSL_set_client_CA_list)]
-    pub fn set_client_ca_list(&mut self, list: Stack<X509Name>) -> Result<(), ErrorStack> {
-        self.ssl_context().check_x509()?;
+    checked_x509_setter! {
+        /// Sets the certificate.
+        set_certificate(cert: X509Ref) => SSL_use_certificate
+    }
 
-        // SAFETY: The connection takes ownership of the native
-        // CA-name stack, and Rust relinquishes the original owner exactly once.
-        unsafe { ffi::SSL_set_client_CA_list(self.as_ptr(), list.as_ptr()) }
-        mem::forget(list);
-        Ok(())
+    checked_x509_setter! {
+        /// Sets the list of CA names sent to the client.
+        ///
+        /// The CA certificates must still be added to the trust root - they are not automatically set
+        /// as trusted by this method.
+        ///
+        /// # Errors
+        /// The context does not support X.509 certificates.
+        set_client_ca_list(list: StackRef<X509Name>) => SSL_set1_client_CA_list
     }
 
     /// Sets the private key.
@@ -5077,12 +5058,9 @@ impl SslRef {
         SslMode::from_bits_retain(bits)
     }
 
-    /// Appends `cert` to the chain associated with the current certificate of `SSL`.
-    #[corresponds(SSL_add1_chain_cert)]
-    pub fn add_chain_cert(&mut self, cert: &X509Ref) -> Result<(), ErrorStack> {
-        // SAFETY: The live connection borrows this certificate while
-        // BoringSSL increments and stores its own reference.
-        unsafe { cvt(ffi::SSL_add1_chain_cert(self.as_ptr(), cert.as_ptr())) }
+    checked_x509_setter! {
+        /// Appends `cert` to the chain associated with the current certificate of `SSL`.
+        add_chain_cert(cert: X509Ref) => SSL_add1_chain_cert
     }
 
     /// Configures `ech_config_list` on `SSL` for offering ECH during handshakes. If the server
@@ -5090,7 +5068,7 @@ impl SslRef {
     /// the cleartext parameters of the ClientHelloOuter.
     ///
     /// Clients should use `get_ech_name_override` to verify the server certificate in case of ECH
-    /// rejection, and follow up with `get_ech_retry_configs` to retry the connection with a fresh
+    /// rejection, and follow up with `ech_retry_configs` to retry the connection with a fresh
     /// set of ECHConfigs. If the retry also fails, clients should report a connection failure.
     #[corresponds(SSL_set1_ech_config_list)]
     pub fn set_ech_config_list(&mut self, ech_config_list: &[u8]) -> Result<(), ErrorStack> {
@@ -5106,29 +5084,28 @@ impl SslRef {
         }
     }
 
-    /// This function returns a serialized `ECHConfigList` as provided by the
-    /// server, if one exists.
+    /// Returns the authenticated retry `ECHConfigList` after ECH rejection.
     ///
-    /// Clients should call this function when handling an `SSL_R_ECH_REJECTED` error code to
-    /// recover from potential key mismatches. If the result is `Some`, the client should retry the
-    /// connection using the returned `ECHConfigList`.
+    /// An empty successful result means the authenticated peer did not supply
+    /// retry configs. A nonempty result can be passed to
+    /// [`Self::set_ech_config_list`] for a new connection.
+    ///
+    /// # Errors
+    /// No authenticated ECH rejection is available.
     #[corresponds(SSL_get0_ech_retry_configs)]
-    #[must_use = "Use the returned handshake or negotiated protocol data to inspect or drive the connection."]
-    pub fn get_ech_retry_configs(&self) -> Option<&[u8]> {
-        // SAFETY: The live SSL connection owns its optional
-        // ECH retry config and writes pointer and size to valid local slots.
+    pub fn ech_retry_configs(&self) -> Result<&[u8], ErrorStack> {
+        // SAFETY: The live SSL owns the retry config buffer. The native
+        // getter checks authentication before writing the output slots.
         unsafe {
             let mut data = ptr::null();
-            let mut len: usize = 0;
-            ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &raw mut data, &raw mut len);
-
-            if data.is_null() {
-                None
-            } else {
-                // SAFETY: the ECH retry bytes are owned by the live SSL
-                // connection and stay immutable for the borrowed lifetime.
-                native_input(data, len)
+            let mut len = 0;
+            if ffi::SSL_get0_ech_retry_configs(self.as_ptr(), &raw mut data, &raw mut len) == 0 {
+                return Err(ErrorStack::internal_error_str(
+                    "no authenticated ECH rejection",
+                ));
             }
+            native_input(data, len)
+                .ok_or_else(|| ErrorStack::internal_error_str("invalid ECH retry config buffer"))
         }
     }
 
@@ -5169,8 +5146,12 @@ impl SslRef {
 
     /// Enables ECH GREASE when no supported ECH configuration is available.
     /// Set before the first ClientHello. This does not enable real ECH.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_enable_ech_grease)]
-    pub fn set_enable_ech_grease(&mut self, enable: bool) {
+    pub fn set_enable_ech_grease(&mut self, enable: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         let enable = c_int::from(enable);
 
         // SAFETY: The exclusively borrowed connection receives a scalar ECH
@@ -5178,6 +5159,7 @@ impl SslRef {
         unsafe {
             ffi::SSL_set_enable_ech_grease(self.as_ptr(), enable);
         }
+        Ok(())
     }
 
     /// Sets the compliance policy on `SSL`.
@@ -5405,12 +5387,17 @@ impl SslRef {
     /// one (17513). Defaults to the new codepoint.
     ///
     /// Both peers must use the same codepoint for ALPS to be negotiated.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_alps_use_new_codepoint)]
-    pub fn set_alps_use_new_codepoint(&mut self, enable: bool) {
+    pub fn set_alps_use_new_codepoint(&mut self, enable: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         let enable = c_int::from(enable);
         // SAFETY: The native connection receives a scalar
         // ALPS codepoint-selection flag.
-        unsafe { ffi::SSL_set_alps_use_new_codepoint(self.as_ptr(), enable) }
+        unsafe { ffi::SSL_set_alps_use_new_codepoint(self.as_ptr(), enable) };
+        Ok(())
     }
 
     /// Overrides [`SslContextBuilder::set_tls13_ciphers`] for this connection.
@@ -5433,19 +5420,29 @@ impl SslRef {
     ///
     /// Servers answer only over TLS 1.3, and not for more than 16 KiB. The extension is
     /// experimental in BoringSSL.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_server_padding_request)]
-    pub fn set_server_padding_request(&mut self, num_bytes: u16) {
+    pub fn set_server_padding_request(&mut self, num_bytes: u16) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The uniquely borrowed SSL connection
         // receives a scalar padding size and no pointer is retained.
-        unsafe { ffi::SSL_set_server_padding_request(self.as_ptr(), num_bytes) }
+        unsafe { ffi::SSL_set_server_padding_request(self.as_ptr(), num_bytes) };
+        Ok(())
     }
 
     /// Sets whether a server answers the client's server padding request.
+    ///
+    /// # Errors
+    /// The native handshake configuration has been discarded.
     #[corresponds(SSL_set_server_padding_enabled)]
-    pub fn set_server_padding_enabled(&mut self, enabled: bool) {
+    pub fn set_server_padding_enabled(&mut self, enabled: bool) -> Result<(), ErrorStack> {
+        self.require_handshake_config()?;
         // SAFETY: The uniquely borrowed SSL connection
         // receives a scalar boolean converted to a native integer.
-        unsafe { ffi::SSL_set_server_padding_enabled(self.as_ptr(), c_int::from(enabled)) }
+        unsafe { ffi::SSL_set_server_padding_enabled(self.as_ptr(), c_int::from(enabled)) };
+        Ok(())
     }
 
     /// Returns whether the server sent the padding requested with
@@ -5512,10 +5509,12 @@ pub struct Sealed {
 // `CRYPTO_IVEC` when `iovec` has the same field layout.
 #[cfg(all(unix, not(feature = "fips")))]
 const _: () = assert!(
-    mem::size_of::<IoSlice<'static>>() == mem::size_of::<ffi::CRYPTO_IVEC>()
-        && mem::align_of::<IoSlice<'static>>() == mem::align_of::<ffi::CRYPTO_IVEC>()
-        && mem::offset_of!(libc::iovec, iov_base) == mem::offset_of!(ffi::CRYPTO_IVEC, in_)
-        && mem::offset_of!(libc::iovec, iov_len) == mem::offset_of!(ffi::CRYPTO_IVEC, len)
+    std::mem::size_of::<IoSlice<'static>>() == std::mem::size_of::<ffi::CRYPTO_IVEC>()
+        && std::mem::align_of::<IoSlice<'static>>() == std::mem::align_of::<ffi::CRYPTO_IVEC>()
+        && std::mem::offset_of!(libc::iovec, iov_base)
+            == std::mem::offset_of!(ffi::CRYPTO_IVEC, in_)
+        && std::mem::offset_of!(libc::iovec, iov_len)
+            == std::mem::offset_of!(ffi::CRYPTO_IVEC, len)
 );
 
 /// Passes `bufs` to `f` as `CRYPTO_IVEC`s.

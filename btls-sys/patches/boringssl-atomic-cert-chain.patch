@@ -1,0 +1,262 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 1d6872528..7579cf9a9 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -1090,4 +1090,13 @@ OPENSSL_EXPORT int SSL_CTX_use_certificate(SSL_CTX *ctx, X509 *x509);
+ OPENSSL_EXPORT int SSL_use_certificate(SSL *ssl, X509 *x509);
+ 
++// SSL_CTX_use_certificate_chain and SSL_use_certificate_chain install the
++// complete X.509 chain including its leaf. The caller retains ownership of
++// the certificates. On failure, the old chain and key remain unchanged. As
++// with SSL_use_certificate, a mismatching private key is dropped on success.
++OPENSSL_EXPORT int SSL_CTX_use_certificate_chain(
++    SSL_CTX *ctx, const STACK_OF(X509) *chain);
++OPENSSL_EXPORT int SSL_use_certificate_chain(
++    SSL *ssl, const STACK_OF(X509) *chain);
++
+ // SSL_CTX_use_PrivateKey sets `ctx`'s private key to `pkey`. It returns one on
+ // success and zero on failure. If `ctx` had a private key or
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 09c255ae9..4695791e3 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -1558,4 +1558,9 @@ class SSLCredential : public ssl_credential_st,
+   bool SetLeafCert(UniquePtr<CRYPTO_BUFFER> leaf, bool discard_key_on_mismatch);
+ 
++  // SetCertChain installs an already allocated complete chain, validating its
++  // leaf before committing any change. Failure preserves the old credential.
++  bool SetCertChain(UniquePtr<STACK_OF(CRYPTO_BUFFER)> new_chain,
++                    bool discard_key_on_mismatch);
++
+   // ClearIntermediateCerts clears intermediate certificates in the certificate
+   // chain, while preserving the leaf.
+diff --git a/ssl/ssl_cert.cc b/ssl/ssl_cert.cc
+index d7abd6878..70ff7c88b 100644
+--- a/ssl/ssl_cert.cc
++++ b/ssl/ssl_cert.cc
+@@ -102,18 +102,20 @@ static int cert_set_chain_and_key(
+   }
+ 
+-  cert->legacy_credential->ClearCertAndKey();
+-  if (!SSL_CREDENTIAL_set1_cert_chain(cert->legacy_credential.get(), certs,
+-                                      num_certs)) {
++  auto replacement = cert->legacy_credential->Dup();
++  if (!replacement) {
+     return 0;
+   }
+-
++  replacement->ClearCertAndKey();
++  if (!SSL_CREDENTIAL_set1_cert_chain(replacement.get(), certs, num_certs) ||
++      !(privkey != nullptr
++            ? SSL_CREDENTIAL_set1_private_key(replacement.get(), privkey)
++            : SSL_CREDENTIAL_set_private_key_method(replacement.get(),
++                                                    privkey_method))) {
++    return 0;
++  }
++  cert->legacy_credential = std::move(replacement);
+   cert->x509_method->cert_flush_cached_leaf(cert);
+   cert->x509_method->cert_flush_cached_chain(cert);
+-
+-  return privkey != nullptr
+-             ? SSL_CREDENTIAL_set1_private_key(cert->legacy_credential.get(),
+-                                               privkey)
+-             : SSL_CREDENTIAL_set_private_key_method(
+-                   cert->legacy_credential.get(), privkey_method);
++  return 1;
+ }
+ 
+diff --git a/ssl/ssl_credential.cc b/ssl/ssl_credential.cc
+index 44ea574eb..51f2a1af0 100644
+--- a/ssl/ssl_credential.cc
++++ b/ssl/ssl_credential.cc
+@@ -309,11 +309,11 @@ bool SSLCredential::SetLeafCert(UniquePtr<CRYPTO_BUFFER> leaf,
+   }
+ 
+-  if (private_key_matches_leaf && privkey != nullptr &&
+-      !ssl_compare_public_and_private_key(new_pubkey.get(), privkey.get())) {
+-    if (!discard_key_on_mismatch) {
+-      return false;
+-    }
++  const bool mismatch = private_key_matches_leaf && privkey != nullptr &&
++      !ssl_compare_public_and_private_key(new_pubkey.get(), privkey.get());
++  if (mismatch && !discard_key_on_mismatch) {
++    return false;
++  }
++  if (mismatch) {
+     ERR_clear_error();
+-    privkey = nullptr;
+   }
+ 
+@@ -325,4 +325,8 @@ bool SSLCredential::SetLeafCert(UniquePtr<CRYPTO_BUFFER> leaf,
+   }
+ 
++  if (mismatch) {
++    privkey = nullptr;
++  }
++
+   CRYPTO_BUFFER_free(sk_CRYPTO_BUFFER_value(chain.get(), 0));
+   sk_CRYPTO_BUFFER_set(chain.get(), 0, leaf.release());
+@@ -333,4 +337,19 @@ bool SSLCredential::SetLeafCert(UniquePtr<CRYPTO_BUFFER> leaf,
+ }
+ 
++bool SSLCredential::SetCertChain(
++    UniquePtr<STACK_OF(CRYPTO_BUFFER)> new_chain,
++    bool discard_key_on_mismatch) {
++  CRYPTO_BUFFER *leaf = sk_CRYPTO_BUFFER_value(new_chain.get(), 0);
++  if (leaf == nullptr) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_PASSED_NULL_PARAMETER);
++    return false;
++  }
++  if (!SetLeafCert(UpRef(leaf), discard_key_on_mismatch)) {
++    return false;
++  }
++  chain = std::move(new_chain);
++  return true;
++}
++
+ void SSLCredential::ClearIntermediateCerts() {
+   if (chain == nullptr) {
+@@ -623,17 +642,19 @@ int SSL_CREDENTIAL_set1_cert_chain(SSL_CREDENTIAL *cred,
+   }
+ 
+-  if (!cred_impl->SetLeafCert(UpRef(certs[0]),
+-                              /*discard_key_on_mismatch=*/false)) {
++  UniquePtr<STACK_OF(CRYPTO_BUFFER)> chain(sk_CRYPTO_BUFFER_new_null());
++  if (!chain) {
+     return 0;
+   }
+-
+-  cred_impl->ClearIntermediateCerts();
+-  for (size_t i = 1; i < num_certs; i++) {
+-    if (!cred_impl->AppendIntermediateCert(UpRef(certs[i]))) {
++  for (size_t i = 0; i < num_certs; i++) {
++    if (certs[i] == nullptr) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_PASSED_NULL_PARAMETER);
++      return 0;
++    }
++    if (!PushToStack(chain.get(), UpRef(certs[i]))) {
+       return 0;
+     }
+   }
+-
+-  return 1;
++  return cred_impl->SetCertChain(std::move(chain),
++                                 /*discard_key_on_mismatch=*/false);
+ }
+ 
+diff --git a/ssl/ssl_file.cc b/ssl/ssl_file.cc
+index c7d464591..e6c858de3 100644
+--- a/ssl/ssl_file.cc
++++ b/ssl/ssl_file.cc
+@@ -332,10 +332,9 @@ int SSL_CTX_use_certificate_chain_file(SSL_CTX *ctx, const char *file) {
+   }
+ 
+-  if (!SSL_CTX_use_certificate(ctx, x.get())) {
++  UniquePtr<STACK_OF(X509)> chain(sk_X509_new_null());
++  if (!chain || !PushToStack(chain.get(), std::move(x))) {
+     return 0;
+   }
+ 
+-  // If we could set up our certificate, now proceed to the CA certificates.
+-  SSL_CTX_clear_chain_certs(ctx);
+   for (;;) {
+     UniquePtr<X509> ca(
+@@ -345,16 +344,14 @@ int SSL_CTX_use_certificate_chain_file(SSL_CTX *ctx, const char *file) {
+       break;
+     }
+-    if (!SSL_CTX_add1_chain_cert(ctx, ca.get())) {
++    if (!PushToStack(chain.get(), std::move(ca))) {
+       return 0;
+     }
+   }
+ 
+-  // When the while loop ends, it's usually just EOF.
+-  if (ERR_equals(ERR_peek_last_error(), ERR_LIB_PEM, PEM_R_NO_START_LINE)) {
+-    ERR_clear_error();
+-    return 1;
++  if (!ERR_equals(ERR_peek_last_error(), ERR_LIB_PEM, PEM_R_NO_START_LINE)) {
++    return 0;
+   }
+-
+-  return 0;  // Some real error.
++  ERR_clear_error();
++  return SSL_CTX_use_certificate_chain(ctx, chain.get());
+ }
+ 
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index 263941c35..7d87214bd 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -77,12 +77,24 @@ static void ssl_crypto_x509_cert_flush_cached_chain(CERT *cert) {
+ // leaf from `cert->chain`, if any.
+ static bool ssl_cert_set1_chain(CERT *cert, STACK_OF(X509) *chain) {
+-  cert->legacy_credential->ClearIntermediateCerts();
++  auto *cred = cert->legacy_credential.get();
++  UniquePtr<STACK_OF(CRYPTO_BUFFER)> replacement(sk_CRYPTO_BUFFER_new_null());
++  if (!replacement ||
++      !PushToStack(replacement.get(),
++                   UpRef(sk_CRYPTO_BUFFER_value(cred->chain.get(), 0)))) {
++    return false;
++  }
+   for (X509 *x509 : chain) {
+     UniquePtr<CRYPTO_BUFFER> buffer = x509_to_buffer(x509);
+-    if (!buffer ||
+-        !cert->legacy_credential->AppendIntermediateCert(std::move(buffer))) {
++    if (!buffer || !PushToStack(replacement.get(), std::move(buffer))) {
+       return false;
+     }
+   }
++  // An absent leaf is represented by a null placeholder. Keep the chain
++  // entirely absent if there are no certificates at all.
++  if (sk_CRYPTO_BUFFER_num(replacement.get()) == 1 &&
++      sk_CRYPTO_BUFFER_value(replacement.get(), 0) == nullptr) {
++    replacement.reset();
++  }
++  cred->chain = std::move(replacement);
+ 
+   ssl_crypto_x509_cert_flush_cached_chain(cert);
+@@ -702,4 +714,44 @@ static int ssl_use_certificate(CERT *cert, X509 *x) {
+ }
+ 
++static int ssl_use_certificate_chain(CERT *cert,
++                                     const STACK_OF(X509) *chain) {
++  UniquePtr<STACK_OF(CRYPTO_BUFFER)> buffers(sk_CRYPTO_BUFFER_new_null());
++  if (!buffers) {
++    return 0;
++  }
++  for (X509 *x509 : chain) {
++    UniquePtr<CRYPTO_BUFFER> buffer = x509_to_buffer(x509);
++    if (!buffer || !PushToStack(buffers.get(), std::move(buffer))) {
++      return 0;
++    }
++  }
++  if (!cert->legacy_credential->SetCertChain(
++          std::move(buffers), /*discard_key_on_mismatch=*/true)) {
++    return 0;
++  }
++  ssl_crypto_x509_cert_flush_cached_leaf(cert);
++  ssl_crypto_x509_cert_flush_cached_chain(cert);
++  return 1;
++}
++
++int SSL_CTX_use_certificate_chain(SSL_CTX *ctx,
++                                   const STACK_OF(X509) *chain) {
++  auto *impl = FromOpaque(ctx);
++  if (impl->x509_method != &ssl_crypto_x509_method) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
++  }
++  return ssl_use_certificate_chain(impl->cert.get(), chain);
++}
++
++int SSL_use_certificate_chain(SSL *ssl, const STACK_OF(X509) *chain) {
++  auto *impl = FromOpaque(ssl);
++  if (!impl->config || impl->ctx->x509_method != &ssl_crypto_x509_method) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
++  }
++  return ssl_use_certificate_chain(impl->config->cert.get(), chain);
++}
++
+ int SSL_use_certificate(SSL *ssl, X509 *x) {
+   auto *ssl_impl = FromOpaque(ssl);

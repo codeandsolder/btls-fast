@@ -1,7 +1,6 @@
 use std::io::{Read, Write};
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use foreign_types::ForeignTypeRef;
@@ -29,7 +28,6 @@ pub(super) static SESSION_PEER_INDEX: IndexSlot<Ssl, SessionPeer> =
     IndexSlot::new(Ssl::new_ex_index);
 static CLIENT_SESSION_OFFER_INDEX: IndexSlot<Ssl, SessionAuthentication> =
     IndexSlot::new(Ssl::new_ex_index);
-static NEXT_ISSUER: AtomicU64 = AtomicU64::new(1);
 
 fn ctx(method: SslMethod) -> Result<SslContextBuilder, ErrorStack> {
     let mut ctx = SslContextBuilder::new(method)?;
@@ -171,7 +169,7 @@ impl SslConnectorBuilder {
         F: Fn(&mut SslRef, ClientSession) + 'static + Sync + Send,
     {
         let callback = ClientSessionCallback {
-            issuer: NEXT_ISSUER.fetch_add(1, Ordering::Relaxed),
+            issuer: Arc::new(()),
             callback: Box::new(callback),
         };
         self.set_ex_data(
@@ -218,7 +216,8 @@ pub struct ConnectConfiguration {
 /// [`ConnectConfiguration::set_client_session`] offers a session only to the same
 /// domain and SNI use, with no stronger hostname or peer verification request,
 /// and the same nonempty [session ID context](SslContextBuilder::set_session_id_context)
-/// or, without one, the same issuing context. The built-in X.509 authentication
+/// or, without one, the same originating session callback registration, even
+/// if the current TLS context was changed. The built-in X.509 authentication
 /// policy is revalidated against the current store and parameters immediately
 /// before the session is offered, including changes made after `into_ssl`.
 /// A rejected session falls back to a full handshake.
@@ -240,7 +239,7 @@ struct SessionAuthentication {
     peer: SessionPeer,
     verify_peer: bool,
     not_after: Option<i64>,
-    issuer: Option<u64>,
+    issuer: Arc<()>,
 }
 
 /// Domain, SNI, and hostname verification of a connection created by
@@ -270,7 +269,7 @@ type ClientSessionFn = dyn Fn(&mut SslRef, ClientSession) + Sync + Send;
 ///
 /// The issuer token identifies the context without keeping it alive.
 pub(super) struct ClientSessionCallback {
-    issuer: u64,
+    issuer: Arc<()>,
     pub(super) callback: Box<ClientSessionFn>,
 }
 
@@ -292,21 +291,28 @@ impl NewSessionCallback {
     }
 }
 
-impl ClientSession {
-    pub(super) fn new(session: SslSession, mut peer: SessionPeer, ssl: &SslRef) -> Self {
+impl ClientSessionCallback {
+    pub(super) fn issue(
+        &self,
+        session: SslSession,
+        mut peer: SessionPeer,
+        ssl: &SslRef,
+    ) -> ClientSession {
         peer.builtin_authentication &= builtin_authentication(ssl) && peer.matches_sni(ssl);
         let verify_peer = peer.builtin_authentication && verifies_peer(ssl);
-        Self {
+        ClientSession {
             session,
             authentication: SessionAuthentication {
                 peer,
                 verify_peer,
                 not_after: chain_not_after(ssl),
-                issuer: issuer(ssl.ssl_context()),
+                issuer: Arc::clone(&self.issuer),
             },
         }
     }
+}
 
+impl ClientSession {
     /// Returns the underlying session.
     #[must_use = "Use the returned session reference to inspect the resumption state."]
     pub fn session(&self) -> &SslSessionRef {
@@ -331,7 +337,8 @@ impl SessionAuthentication {
         let verify_peer = verifies_peer(ssl);
         ssl.session_id_context() == Some(scope)
             && (!scope.is_empty()
-                || self.issuer.is_some() && self.issuer == issuer(ssl.ssl_context()))
+                || issuer(ssl.session_context())
+                    .is_some_and(|issuer| Arc::ptr_eq(&self.issuer, issuer)))
             && self.peer.domain.eq_ignore_ascii_case(domain)
             && self.peer.sni == sni
             && (self.peer.verify_hostname || !verify_hostname)
@@ -421,12 +428,12 @@ where
         .min()
 }
 
-/// Returns the token of the client session callback installed on `context`.
-fn issuer(context: &SslContextRef) -> Option<u64> {
+/// Returns the registration identity of a checked session notification callback.
+fn issuer(context: &SslContextRef) -> Option<&Arc<()>> {
     context
         .slot_data(&NEW_SESSION_INDEX)
         .and_then(NewSessionCallback::checked)
-        .map(|callback| callback.issuer)
+        .map(|callback| &callback.issuer)
 }
 
 /// Returns whether `ssl` verifies the peer certificate; an unavailable mode counts as not.
@@ -503,12 +510,7 @@ impl ConnectConfiguration {
             setup_verify_hostname(&mut self.ssl, domain)?;
         }
 
-        let reports_sessions = self.ssl.session_context().is_some_and(|context| {
-            context
-                .slot_data(&NEW_SESSION_INDEX)
-                .and_then(NewSessionCallback::checked)
-                .is_some()
-        });
+        let reports_sessions = issuer(self.ssl.session_context()).is_some();
         let session = self.session.take().filter(|session| {
             session.authentication.permits(
                 &session.session,

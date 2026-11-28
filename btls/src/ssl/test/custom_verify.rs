@@ -476,3 +476,110 @@ fn copied_custom_verifier_survives_context_switch() {
     assert!(called.load(Ordering::SeqCst));
     assert!(!replacement_called.load(Ordering::SeqCst));
 }
+
+#[test]
+fn verifier_cannot_change_its_own_policy_during_invocation() {
+    let mut server = Server::builder();
+    server.err_cb(|error| {
+        let HandshakeError::Failure(handshake) = error else {
+            panic!("expected fatal verification alert");
+        };
+        assert_eq!(
+            handshake.error().to_string(),
+            "[SSLV3_ALERT_CERTIFICATE_REVOKED]"
+        );
+    });
+    let server = server.build();
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, |ssl| {
+            assert!(ssl.set_verify_mode(SslVerifyMode::NONE).is_err());
+            assert!(
+                ssl.set_verify_callback(SslVerifyMode::NONE, |_, _| true)
+                    .is_err()
+            );
+            assert!(ssl.clear_verify_callback(SslVerifyMode::NONE).is_err());
+            assert!(
+                ssl.set_custom_verify_callback(SslVerifyMode::NONE, |_| Ok(()))
+                    .is_err()
+            );
+            assert!(
+                ssl.clear_custom_verify_callback(SslVerifyMode::NONE)
+                    .is_err()
+            );
+            assert_eq!(ssl.verify_mode().unwrap(), SslVerifyMode::PEER);
+            Err(SslVerifyError::Invalid(SslAlert::CERTIFICATE_REVOKED))
+        })
+        .unwrap();
+    assert!(matches!(client.connect_err(), HandshakeError::Failure(_)));
+}
+
+#[test]
+fn async_verifier_replacement_is_rejected_during_creation_and_completion() {
+    use crate::ssl::BoxCustomVerifyFinish;
+    use std::future::poll_fn;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::task::{Poll, Waker};
+
+    let server = Server::builder().build();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicBool::new(false));
+    let mut client = server.client().build().builder();
+    let callback_calls = Arc::clone(&calls);
+    let callback_completed = Arc::clone(&completed);
+    client
+        .ssl()
+        .set_async_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            callback_calls.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                ssl.clear_custom_verify_callback(SslVerifyMode::NONE)
+                    .is_err()
+            );
+            assert!(
+                ssl.set_async_custom_verify_callback(SslVerifyMode::NONE, |_| Ok(Box::pin(
+                    async { Err(SslAlert::INTERNAL_ERROR) }
+                )))
+                .is_err()
+            );
+            let mut first = true;
+            let completed = Arc::clone(&callback_completed);
+            Ok(Box::pin(poll_fn(move |_| {
+                if std::mem::take(&mut first) {
+                    Poll::Pending
+                } else {
+                    let completed = Arc::clone(&completed);
+                    let finish: BoxCustomVerifyFinish = Box::new(move |ssl| {
+                        assert!(
+                            ssl.set_custom_verify_callback(SslVerifyMode::NONE, |_| Ok(()))
+                                .is_err()
+                        );
+                        assert!(
+                            ssl.clear_custom_verify_callback(SslVerifyMode::NONE)
+                                .is_err()
+                        );
+                        assert_eq!(ssl.verify_mode().unwrap(), SslVerifyMode::PEER);
+                        completed.store(true, Ordering::SeqCst);
+                        Ok(())
+                    });
+                    Poll::Ready(Ok(finish))
+                }
+            })))
+        })
+        .unwrap();
+    client
+        .ssl()
+        .set_task_waker(Some(Waker::noop().clone()))
+        .unwrap();
+    let HandshakeError::WouldBlock(handshake) = client.connect_err() else {
+        panic!("expected pending verifier");
+    };
+    assert_eq!(handshake.error().code(), ErrorCode::WANT_CERTIFICATE_VERIFY);
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(!completed.load(Ordering::SeqCst));
+    let mut stream = handshake.handshake().unwrap();
+    std::io::Read::read_exact(&mut stream, &mut [0]).unwrap();
+    assert!(completed.load(Ordering::SeqCst));
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}

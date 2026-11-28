@@ -306,7 +306,7 @@ impl<'a> EchGreaseSizeInfo<'a> {
     /// let host_length = host.len();
     /// let connector = SslConnector::builder(SslMethod::tls())?.build();
     /// let mut connection = connector.configure()?;
-    /// connection.set_enable_ech_grease(true);
+    /// connection.set_enable_ech_grease(true).unwrap();
     /// connection.set_ech_grease_callback(move |_, info| {
     ///     info.nss_parameters(100, host_length, EchGreaseRounding::NssPre3127)
     /// })?;

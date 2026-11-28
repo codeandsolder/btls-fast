@@ -92,9 +92,76 @@ fn context_extra_chain_handles_empty_and_populated_chains() {
     assert!(ctx.ctx.extra_chain_certs().is_none());
 
     let extra = X509::from_pem(ROOT_CERT).unwrap();
-    ctx.add_extra_chain_cert(extra).unwrap();
+    ctx.add_chain_cert(&extra).unwrap();
     let ctx = ctx.build();
     assert_eq!(ctx.extra_chain_certs().unwrap().len(), 1);
+}
+
+#[test]
+fn complete_certificate_chain_replacement_is_atomic() {
+    let cert = X509::from_pem(CERT).unwrap();
+    let root = X509::from_pem(ROOT_CERT).unwrap();
+    let key = PKey::private_key_from_pem(KEY).unwrap();
+    let mut chain = crate::stack::Stack::new().unwrap();
+    chain.push(cert.clone()).unwrap();
+    chain.push(root.clone()).unwrap();
+    let empty = crate::stack::Stack::new().unwrap();
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_certificate_chain(&chain).unwrap();
+    ctx.set_private_key(&key).unwrap();
+    assert!(ctx.set_certificate_chain(&empty).is_err());
+    assert_eq!(
+        ctx.ctx.certificate().unwrap().to_der().unwrap(),
+        cert.to_der().unwrap()
+    );
+    assert!(ctx.ctx.private_key().unwrap().public_eq(&key));
+    assert_eq!(ctx.ctx.extra_chain_certs().unwrap().len(), 1);
+    assert_eq!(
+        ctx.ctx.extra_chain_certs().unwrap()[0].to_der().unwrap(),
+        root.to_der().unwrap()
+    );
+    assert_eq!(chain.len(), 2);
+
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    assert!(ssl.set_certificate_chain(&empty).is_err());
+    assert_eq!(
+        ssl.certificate().unwrap().to_der().unwrap(),
+        cert.to_der().unwrap()
+    );
+    assert!(ssl.private_key().unwrap().public_eq(&key));
+    ssl.set_certificate_chain(&chain).unwrap();
+    assert!(ssl.private_key().unwrap().public_eq(&key));
+}
+
+#[test]
+fn raw_native_contexts_and_connections_have_authoritative_capabilities() {
+    crate::ffi::init();
+    // SAFETY: each native allocation is checked before transferring its unique
+    // ownership to the Rust wrapper. No Rust marker or extra-data setup is used.
+    let mut context = unsafe {
+        let ptr = crate::cvt_p(crate::ffi::SSL_CTX_new(crate::ffi::TLS_method())).unwrap();
+        ssl::SslContextBuilder::from_ptr(ptr)
+    };
+    assert!(context.ctx.has_x509_support());
+    context.set_verify_mode(SslVerifyMode::PEER).unwrap();
+    let context = context.build();
+    let mut ssl = unsafe {
+        let ptr = crate::cvt_p(crate::ffi::SSL_new(context.as_ptr())).unwrap();
+        Ssl::from_ptr(ptr)
+    };
+    assert_eq!(ssl.session_context().as_ptr(), context.as_ptr());
+    let replacement = SslContext::builder(SslMethod::tls()).unwrap().build();
+    ssl.set_ssl_context(&replacement).unwrap();
+    assert_eq!(ssl.ssl_context().as_ptr(), replacement.as_ptr());
+    assert_eq!(ssl.session_context().as_ptr(), context.as_ptr());
+    // SAFETY: the native method is a static valid descriptor and no handshake
+    // is driven with this buffer-only context.
+    let method = unsafe { SslMethod::from_ptr(crate::ffi::TLS_with_buffers_method()) };
+    let buffer = SslContext::builder(method).unwrap().build();
+    assert!(!buffer.has_x509_support());
+    assert!(ssl.set_ssl_context(&buffer).is_err());
+    assert_eq!(ssl.ssl_context().as_ptr(), replacement.as_ptr());
 }
 
 #[test]
@@ -116,6 +183,12 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     assert!(ctx.set_default_verify_paths().is_err());
     assert!(ctx.ctx.certificate().is_none());
     assert!(ctx.ctx.extra_chain_certs().is_none());
+    let cert = X509::from_pem(CERT).unwrap();
+    let names = X509Name::load_client_ca_file("test/root-ca.pem").unwrap();
+    assert!(ctx.set_certificate(&cert).is_err());
+    assert!(ctx.set_certificate_chain_file("test/cert.pem").is_err());
+    assert!(ctx.add_chain_cert(&cert).is_err());
+    assert!(ctx.set_client_ca_list(&names).is_err());
     // Custom verification is explicitly supported by this native method.
     ctx.set_custom_verify_callback(SslVerifyMode::PEER, |_| {
         Err(super::SslVerifyError::Invalid(
@@ -129,6 +202,9 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     assert!(ssl.set_verify_mode(SslVerifyMode::PEER).is_err());
     assert!(ssl.verify_mode().is_err());
     assert!(ssl.verify_param_mut().is_err());
+    assert!(ssl.set_certificate(&cert).is_err());
+    assert!(ssl.add_chain_cert(&cert).is_err());
+    assert!(ssl.set_client_ca_list(&names).is_err());
     assert!(ssl.peer_certificate().is_none());
     assert!(ssl.peer_cert_chain().is_none());
     assert!(ssl.certificate().is_none());
@@ -467,7 +543,7 @@ fn application_settings() {
                 Ok(proto)
             })
             .unwrap();
-        builder.ssl_cb(move |ssl| ssl.set_alps_use_new_codepoint(new_codepoint[1]));
+        builder.ssl_cb(move |ssl| ssl.set_alps_use_new_codepoint(new_codepoint[1]).unwrap());
         builder.io_cb(move |s| {
             let received = s.ssl().peer_application_settings().map(ToOwned::to_owned);
             tx.send(received).unwrap();
@@ -476,7 +552,10 @@ fn application_settings() {
 
         let mut builder = server.client().build().builder();
         builder.ssl().set_alpn_protos(b"\x02h2").unwrap();
-        builder.ssl().set_alps_use_new_codepoint(new_codepoint[0]);
+        builder
+            .ssl()
+            .set_alps_use_new_codepoint(new_codepoint[0])
+            .unwrap();
         builder
             .ssl()
             .add_application_settings(b"h2", client)
@@ -915,10 +994,10 @@ fn default_verify_paths() {
 }
 
 #[test]
-fn add_extra_chain_cert() {
+fn add_chain_cert() {
     let cert = X509::from_pem(CERT).unwrap();
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.add_extra_chain_cert(cert).unwrap();
+    ctx.add_chain_cert(&cert).unwrap();
 }
 
 #[test]
@@ -1371,7 +1450,50 @@ fn client_ca_list() {
     assert_eq!(names.len(), 1);
 
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.set_client_ca_list(names).unwrap();
+    ctx.set_client_ca_list(&names).unwrap();
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    ssl.set_client_ca_list(&names).unwrap();
+    assert_eq!(names.len(), 1);
+}
+
+#[test]
+fn certificate_configuration_shedding_is_reported() {
+    let server = Server::builder().build();
+    let mut client = server.client().build().builder();
+    let cert = X509::from_pem(CERT).unwrap();
+    let key = PKey::private_key_from_pem(KEY).unwrap();
+    client.ssl().set_certificate(&cert).unwrap();
+    client.ssl().set_private_key(&key).unwrap();
+    assert!(client.ssl().certificate().is_some());
+    assert!(client.ssl().private_key().is_some());
+    assert!(client.ssl().has_handshake_config());
+    assert!(client.ssl().ciphers().is_some());
+    // SAFETY: Enable native handshake configuration shedding on the uniquely
+    // owned connection before the handshake starts.
+    unsafe { crate::ffi::SSL_set_shed_handshake_config(client.ssl().as_ptr(), 1) };
+    let mut stream = client.connect();
+    assert!(stream.ssl().certificate().is_none());
+    assert!(stream.ssl().private_key().is_none());
+    assert!(!stream.ssl().has_handshake_config());
+    assert!(stream.ssl().ciphers().is_none());
+    assert!(stream.ssl().current_cipher().is_some());
+    assert!(stream.ssl().session_id_context().is_none());
+    assert!(stream.ssl_mut().set_permute_extensions(true).is_err());
+    assert!(stream.ssl_mut().set_enable_ech_grease(true).is_err());
+    assert!(stream.ssl_mut().set_alps_use_new_codepoint(false).is_err());
+    assert!(stream.ssl_mut().set_server_padding_request(128).is_err());
+    assert!(stream.ssl_mut().set_server_padding_enabled(true).is_err());
+    assert!(
+        stream
+            .ssl_mut()
+            .set_quic_use_legacy_codepoint(true)
+            .is_err()
+    );
+    #[cfg(not(feature = "fips"))]
+    assert!(stream.ssl_mut().set_record_size_limit(512).is_err());
+    let names = X509Name::load_client_ca_file("test/root-ca.pem").unwrap();
+    assert!(stream.ssl_mut().set_client_ca_list(&names).is_err());
+    assert_eq!(names.len(), 1);
 }
 
 #[test]
@@ -1765,51 +1887,61 @@ fn set_tls13_ciphers_orders_offer_and_selection() {
     assert!(ctx.set_tls13_ciphers(&[Tls13Cipher(0xc02f)]).is_err());
 }
 
+fn assert_compliance_configuration(
+    min: Option<SslVersion>,
+    max: Option<SslVersion>,
+    ciphers: &crate::stack::StackRef<ssl::SslCipher>,
+    expected: &[&str],
+) {
+    assert_eq!(min, Some(SslVersion::TLS1_2));
+    assert_eq!(max, Some(SslVersion::TLS1_3));
+    assert_eq!(ciphers.len(), expected.len());
+    for (cipher, name) in ciphers.into_iter().zip(expected) {
+        assert_eq!(cipher.name(), Some(*name));
+    }
+}
+
 #[test]
 fn test_set_compliance() {
-    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.set_compliance_policy(CompliancePolicy::FIPS_202205)
-        .unwrap();
-
-    assert_eq!(ctx.max_proto_version().unwrap(), SslVersion::TLS1_3);
-    assert_eq!(ctx.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-    const FIPS_CIPHERS: [&str; 4] = [
-        "ECDHE-ECDSA-AES128-GCM-SHA256",
-        "ECDHE-RSA-AES128-GCM-SHA256",
-        "ECDHE-ECDSA-AES256-GCM-SHA384",
-        "ECDHE-RSA-AES256-GCM-SHA384",
+    let policies: [(CompliancePolicy, &[&str]); 2] = [
+        (
+            CompliancePolicy::FIPS_202205,
+            &[
+                "ECDHE-ECDSA-AES128-GCM-SHA256",
+                "ECDHE-RSA-AES128-GCM-SHA256",
+                "ECDHE-ECDSA-AES256-GCM-SHA384",
+                "ECDHE-RSA-AES256-GCM-SHA384",
+            ],
+        ),
+        (
+            CompliancePolicy::WPA3_192_202304,
+            &[
+                "ECDHE-ECDSA-AES256-GCM-SHA384",
+                "ECDHE-RSA-AES256-GCM-SHA384",
+            ],
+        ),
     ];
-
-    let ciphers = ctx.ciphers().unwrap();
-    assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
-
-    for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
-        assert_eq!(cipher.0.name(), Some(cipher.1));
-    }
-
-    {
+    for (policy, expected) in policies {
         let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-        ctx.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
-            .unwrap();
+        ctx.set_compliance_policy(policy).unwrap();
+        assert_compliance_configuration(
+            ctx.min_proto_version(),
+            ctx.max_proto_version(),
+            ctx.ciphers().unwrap(),
+            expected,
+        );
+        assert!(ctx.set_compliance_policy(CompliancePolicy::NONE).is_err());
 
-        assert_eq!(ctx.max_proto_version().unwrap(), SslVersion::TLS1_3);
-        assert_eq!(ctx.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-        const WPA3_192_CIPHERS: [&str; 2] = [
-            "ECDHE-ECDSA-AES256-GCM-SHA384",
-            "ECDHE-RSA-AES256-GCM-SHA384",
-        ];
-
-        let ciphers = ctx.ciphers().unwrap();
-        assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
-
-        for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
-            assert_eq!(cipher.0.name(), Some(cipher.1));
-        }
-
-        ctx.set_compliance_policy(CompliancePolicy::NONE)
-            .expect_err("Testing expect err if set compliance policy to NONE");
+        let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
+        let mut ssl = Ssl::new(&ctx).unwrap();
+        ssl.set_compliance_policy(policy).unwrap();
+        assert_compliance_configuration(
+            ssl.min_proto_version(),
+            ssl.max_proto_version(),
+            ssl.ciphers().unwrap(),
+            expected,
+        );
+        assert!(ssl.set_compliance_policy(CompliancePolicy::NONE).is_err());
     }
 }
 
@@ -1861,56 +1993,6 @@ fn test_info_callback() {
 
     client.connect();
     assert!(CALLED_BACK.load(Ordering::Relaxed));
-}
-
-#[test]
-fn test_ssl_set_compliance() {
-    let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
-    let mut ssl = Ssl::new(&ctx).unwrap();
-    ssl.set_compliance_policy(CompliancePolicy::FIPS_202205)
-        .unwrap();
-
-    assert_eq!(ssl.max_proto_version().unwrap(), SslVersion::TLS1_3);
-    assert_eq!(ssl.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-    const FIPS_CIPHERS: [&str; 4] = [
-        "ECDHE-ECDSA-AES128-GCM-SHA256",
-        "ECDHE-RSA-AES128-GCM-SHA256",
-        "ECDHE-ECDSA-AES256-GCM-SHA384",
-        "ECDHE-RSA-AES256-GCM-SHA384",
-    ];
-
-    let ciphers = ssl.ciphers();
-    assert_eq!(ciphers.len(), FIPS_CIPHERS.len());
-
-    for cipher in ciphers.into_iter().zip(FIPS_CIPHERS) {
-        assert_eq!(cipher.0.name(), Some(cipher.1));
-    }
-
-    {
-        let ctx = SslContext::builder(SslMethod::tls()).unwrap().build();
-        let mut ssl = Ssl::new(&ctx).unwrap();
-        ssl.set_compliance_policy(CompliancePolicy::WPA3_192_202304)
-            .unwrap();
-
-        assert_eq!(ssl.max_proto_version().unwrap(), SslVersion::TLS1_3);
-        assert_eq!(ssl.min_proto_version().unwrap(), SslVersion::TLS1_2);
-
-        const WPA3_192_CIPHERS: [&str; 2] = [
-            "ECDHE-ECDSA-AES256-GCM-SHA384",
-            "ECDHE-RSA-AES256-GCM-SHA384",
-        ];
-
-        let ciphers = ssl.ciphers();
-        assert_eq!(ciphers.len(), WPA3_192_CIPHERS.len());
-
-        for cipher in ciphers.into_iter().zip(WPA3_192_CIPHERS) {
-            assert_eq!(cipher.0.name(), Some(cipher.1));
-        }
-
-        ssl.set_compliance_policy(CompliancePolicy::NONE)
-            .expect_err("Testing expect err if set compliance policy to NONE");
-    }
 }
 
 #[test]

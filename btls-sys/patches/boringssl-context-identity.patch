@@ -1,0 +1,44 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index ed08215c4..35a9b391a 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -104,4 +104,13 @@ OPENSSL_EXPORT void SSL_free(SSL *ssl);
+ OPENSSL_EXPORT SSL_CTX *SSL_get_SSL_CTX(const SSL *ssl);
+ 
++// SSL_get0_session_context returns the original SSL_CTX retained by the
++// connection for session-cache operations and inherited callbacks. Unlike
++// SSL_get_SSL_CTX, this does not change after SSL_set_SSL_CTX.
++OPENSSL_EXPORT SSL_CTX *SSL_get0_session_context(const SSL *ssl);
++
++// SSL_CTX_has_x509_support returns one if ctx uses the native X.509 certificate
++// method and zero for a buffer-only context.
++OPENSSL_EXPORT int SSL_CTX_has_x509_support(const SSL_CTX *ctx);
++
+ // SSL_set_connect_state configures `ssl` to be a client.
+ OPENSSL_EXPORT void SSL_set_connect_state(SSL *ssl);
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 359dff5a2..1c8631416 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -2844,4 +2844,8 @@ int SSL_get_shutdown(const SSL *ssl) {
+ SSL_CTX *SSL_get_SSL_CTX(const SSL *ssl) { return FromOpaque(ssl)->ctx.get(); }
+ 
++SSL_CTX *SSL_get0_session_context(const SSL *ssl) {
++  return FromOpaque(ssl)->session_ctx.get();
++}
++
+ SSL_CTX *SSL_set_SSL_CTX(SSL *ssl, SSL_CTX *ctx) {
+   auto *ssl_impl = FromOpaque(ssl);
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index c5aa8f969..911886162 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -383,4 +383,8 @@ BSSL_NAMESPACE_END
+ using namespace bssl;
+ 
++int SSL_CTX_has_x509_support(const SSL_CTX *ctx) {
++  return FromOpaque(ctx)->x509_method == &ssl_crypto_x509_method;
++}
++
+ X509 *SSL_get_peer_certificate(const SSL *ssl) {
+   const auto *ssl_impl = FromOpaque(ssl);

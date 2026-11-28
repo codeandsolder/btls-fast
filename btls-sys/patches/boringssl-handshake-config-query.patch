@@ -1,0 +1,30 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 7579cf9a9..44bf37621 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -5696,2 +5696,6 @@ OPENSSL_EXPORT void SSL_set_shed_handshake_config(SSL *ssl, int enable);
+ 
++// SSL_has_handshake_config returns one while the SSL retains its handshake
++// configuration and zero after it has been shed.
++OPENSSL_EXPORT int SSL_has_handshake_config(const SSL *ssl);
++
+ enum ssl_renegotiate_mode_t BORINGSSL_ENUM_INT {
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 107621049..32212862e 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -1512,3 +1512,2 @@ const uint8_t *SSL_get0_session_id_context(const SSL *ssl, size_t *out_len) {
+   if (!ssl_impl->config) {
+-    assert(ssl_impl->config);
+     *out_len = 0;
+@@ -2274,3 +2273,2 @@ STACK_OF(SSL_CIPHER) *SSL_get_ciphers(const SSL *ssl) {
+   if (ssl_impl->config == nullptr) {
+-    assert(ssl_impl->config);
+     return nullptr;
+@@ -3443,2 +3441,6 @@ int SSL_used_hello_retry_request(const SSL *ssl) {
+ 
++int SSL_has_handshake_config(const SSL *ssl) {
++  return FromOpaque(ssl)->config != nullptr;
++}
++
+ void SSL_set_shed_handshake_config(SSL *ssl, int enable) {
