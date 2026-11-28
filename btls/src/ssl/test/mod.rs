@@ -92,7 +92,7 @@ fn context_extra_chain_handles_empty_and_populated_chains() {
     assert!(ctx.ctx.extra_chain_certs().is_none());
 
     let extra = X509::from_pem(ROOT_CERT).unwrap();
-    ctx.add_extra_chain_cert(extra).unwrap();
+    ctx.add_chain_cert(&extra).unwrap();
     let ctx = ctx.build();
     assert_eq!(ctx.extra_chain_certs().unwrap().len(), 1);
 }
@@ -146,6 +146,12 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     assert!(ctx.set_default_verify_paths().is_err());
     assert!(ctx.ctx.certificate().is_none());
     assert!(ctx.ctx.extra_chain_certs().is_none());
+    let cert = X509::from_pem(CERT).unwrap();
+    let names = X509Name::load_client_ca_file("test/root-ca.pem").unwrap();
+    assert!(ctx.set_certificate(&cert).is_err());
+    assert!(ctx.set_certificate_chain_file("test/cert.pem").is_err());
+    assert!(ctx.add_chain_cert(&cert).is_err());
+    assert!(ctx.set_client_ca_list(&names).is_err());
     // Custom verification is explicitly supported by this native method.
     ctx.set_custom_verify_callback(SslVerifyMode::PEER, |_| {
         Err(super::SslVerifyError::Invalid(
@@ -159,6 +165,9 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     assert!(ssl.set_verify_mode(SslVerifyMode::PEER).is_err());
     assert!(ssl.verify_mode().is_err());
     assert!(ssl.verify_param_mut().is_err());
+    assert!(ssl.set_certificate(&cert).is_err());
+    assert!(ssl.add_chain_cert(&cert).is_err());
+    assert!(ssl.set_client_ca_list(&names).is_err());
     assert!(ssl.peer_certificate().is_none());
     assert!(ssl.peer_cert_chain().is_none());
     assert!(ssl.certificate().is_none());
@@ -945,10 +954,10 @@ fn default_verify_paths() {
 }
 
 #[test]
-fn add_extra_chain_cert() {
+fn add_chain_cert() {
     let cert = X509::from_pem(CERT).unwrap();
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.add_extra_chain_cert(cert).unwrap();
+    ctx.add_chain_cert(&cert).unwrap();
 }
 
 #[test]
@@ -1401,7 +1410,31 @@ fn client_ca_list() {
     assert_eq!(names.len(), 1);
 
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.set_client_ca_list(names).unwrap();
+    ctx.set_client_ca_list(&names).unwrap();
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    ssl.set_client_ca_list(&names).unwrap();
+    assert_eq!(names.len(), 1);
+}
+
+#[test]
+fn certificate_configuration_shedding_is_reported() {
+    let server = Server::builder().build();
+    let mut client = server.client().build().builder();
+    let cert = X509::from_pem(CERT).unwrap();
+    let key = PKey::private_key_from_pem(KEY).unwrap();
+    client.ssl().set_certificate(&cert).unwrap();
+    client.ssl().set_private_key(&key).unwrap();
+    assert!(client.ssl().certificate().is_some());
+    assert!(client.ssl().private_key().is_some());
+    // SAFETY: Enable native handshake configuration shedding on the uniquely
+    // owned connection before the handshake starts.
+    unsafe { crate::ffi::SSL_set_shed_handshake_config(client.ssl().as_ptr(), 1) };
+    let mut stream = client.connect();
+    assert!(stream.ssl().certificate().is_none());
+    assert!(stream.ssl().private_key().is_none());
+    let names = X509Name::load_client_ca_file("test/root-ca.pem").unwrap();
+    assert!(stream.ssl_mut().set_client_ca_list(&names).is_err());
+    assert_eq!(names.len(), 1);
 }
 
 #[test]
