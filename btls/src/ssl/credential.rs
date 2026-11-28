@@ -1,7 +1,7 @@
 #[cfg(feature = "rpk")]
 use crate::cvt_p;
 use crate::error::ErrorStack;
-use crate::ex_data::{Index, IndexRegistry};
+use crate::ex_data::Index;
 use crate::pkey::{PKeyRef, Private};
 use crate::ssl::PrivateKeyMethod;
 use crate::ssl::callbacks;
@@ -11,10 +11,6 @@ use foreign_types::{ForeignType, ForeignTypeRef};
 use openssl_macros::corresponds;
 use std::ffi::c_int;
 use std::ptr;
-use std::sync::{Arc, LazyLock};
-
-static SSL_CREDENTIAL_INDEXES: LazyLock<IndexRegistry<SslCredential, ()>> =
-    LazyLock::new(IndexRegistry::new);
 
 foreign_type_and_impl_send_sync! {
     type CType = ffi::SSL_CREDENTIAL;
@@ -62,15 +58,6 @@ impl SslCredential {
             let idx = cvt_n(get_new_ssl_credential_idx(Some(free_data_box::<T>)))?;
             Ok(Index::from_raw(idx))
         }
-    }
-
-    pub(super) fn register_callback<T: 'static + Send + Sync>() -> Result<Index<Self, T>, ErrorStack>
-    {
-        SSL_CREDENTIAL_INDEXES.register((), Self::new_ex_index)
-    }
-
-    pub(super) fn registered_ex_index<T: 'static + Send + Sync>() -> Option<Index<Self, T>> {
-        SSL_CREDENTIAL_INDEXES.get(())
     }
 }
 
@@ -162,26 +149,23 @@ impl SslCredentialBuilder {
     /// # Errors
     ///
     /// Typed callback storage allocation or native registration fails.
-    #[corresponds(SSL_CREDENTIAL_set_private_key_method)]
+    #[corresponds(SSL_CREDENTIAL_set_private_key_method_with_data)]
     pub fn set_private_key_method<M>(&mut self, method: M) -> Result<(), ErrorStack>
     where
         M: PrivateKeyMethod,
     {
-        // SAFETY: the unpublished credential exclusively owns its callback
-        // state. BoringSSL retains the monomorphized static method descriptor,
-        // not a temporary stack allocation.
-        unsafe {
-            self.replace_ex_data(
-                SslCredential::register_callback::<Arc<M>>()?,
-                Arc::new(method),
-            )?;
-
-            cvt_0i(ffi::SSL_CREDENTIAL_set_private_key_method(
-                self.0.as_ptr(),
-                callbacks::PrivateKeyMethodDescriptor::<M, true>::descriptor(),
-            ))
-            .map(|_| ())
-        }
+        callbacks::install_private_key_method(method, |table, data, free_data| {
+            // SAFETY: the credential builder has exclusive access; the native
+            // setter takes ownership of data only after successful installation.
+            unsafe {
+                ffi::SSL_CREDENTIAL_set_private_key_method_with_data(
+                    self.0.as_ptr(),
+                    table,
+                    data,
+                    free_data,
+                )
+            }
+        })
     }
 
     /// Sets the SPKI of the raw public key credential.

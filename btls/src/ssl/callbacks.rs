@@ -28,23 +28,50 @@ use std::slice;
 use std::str;
 use std::sync::Arc;
 
-/// `BoringSSL` retains the pointer to a private-key callback method table.
-/// Every monomorphized table therefore needs storage that outlives the native
-/// context or credential, not a temporary constructed by its setter.
-pub(super) struct PrivateKeyMethodDescriptor<M, const CREDENTIAL: bool>(
-    std::marker::PhantomData<M>,
-);
+// The native credential owns a reference-counted handle to the Rust method.
+// A single descriptor suffices for legacy and explicit credentials.
+static PRIVATE_KEY_METHOD: ffi::SSL_PRIVATE_KEY_METHOD = ffi::SSL_PRIVATE_KEY_METHOD {
+    sign: Some(raw_sign),
+    decrypt: Some(raw_decrypt),
+    complete: Some(raw_complete),
+};
 
-impl<M: PrivateKeyMethod, const CREDENTIAL: bool> PrivateKeyMethodDescriptor<M, CREDENTIAL> {
-    const TABLE: ffi::SSL_PRIVATE_KEY_METHOD = ffi::SSL_PRIVATE_KEY_METHOD {
-        sign: Some(raw_sign::<M, CREDENTIAL>),
-        decrypt: Some(raw_decrypt::<M, CREDENTIAL>),
-        complete: Some(raw_complete::<M, CREDENTIAL>),
-    };
+type OwnedPrivateKeyMethod = Arc<dyn PrivateKeyMethod>;
 
-    pub(super) const fn descriptor() -> &'static ffi::SSL_PRIVATE_KEY_METHOD {
-        &Self::TABLE
+pub(super) const fn private_key_method_descriptor() -> &'static ffi::SSL_PRIVATE_KEY_METHOD {
+    &PRIVATE_KEY_METHOD
+}
+
+unsafe extern "C" fn free_private_key_method(data: *mut c_void) {
+    // SAFETY: native owns this allocation after successful registration and
+    // invokes the destructor exactly once, after its last credential reference.
+    let _ = catch_native(|| unsafe { drop(Box::from_raw(data.cast::<OwnedPrivateKeyMethod>())) });
+}
+
+// The native setter transfers ownership on success only. Its data pointer
+// must remain valid in every native copy of the selected credential.
+pub(super) fn install_private_key_method(
+    method: impl PrivateKeyMethod,
+    install: impl FnOnce(
+        *const ffi::SSL_PRIVATE_KEY_METHOD,
+        *mut c_void,
+        Option<unsafe extern "C" fn(*mut c_void)>,
+    ) -> c_int,
+) -> Result<(), ErrorStack> {
+    let method: OwnedPrivateKeyMethod = Arc::new(method);
+    let data = Box::into_raw(Box::new(method));
+    let result = install(
+        private_key_method_descriptor(),
+        data.cast(),
+        Some(free_private_key_method),
+    );
+    if result != 1 {
+        let error = ErrorStack::get();
+        // SAFETY: the setter did not take ownership on failure.
+        unsafe { drop(Box::from_raw(data)) };
+        return Err(error);
     }
+    Ok(())
 }
 
 pub(super) extern "C" fn raw_verify(
@@ -668,7 +695,7 @@ where
     catch_native(|| callback(ssl, &line));
 }
 
-pub(super) unsafe extern "C" fn raw_sign<M, const CREDENTIAL: bool>(
+pub(super) unsafe extern "C" fn raw_sign(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
@@ -676,10 +703,7 @@ pub(super) unsafe extern "C" fn raw_sign<M, const CREDENTIAL: bool>(
     signature_algorithm: u16,
     in_: *const u8,
     in_len: usize,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+) -> ffi::ssl_private_key_result_t {
     // SAFETY: the native private-key callback supplies readable input for
     // the duration of the call.
     let Some(input) = (unsafe { native_input(in_, in_len) }) else {
@@ -688,60 +712,57 @@ where
 
     let signature_algorithm = SslSignatureAlgorithm(signature_algorithm);
 
-    let callback = |method: &M, ssl: &mut _, output: &mut _| {
+    let callback = |method: &dyn PrivateKeyMethod, ssl: &mut _, output: &mut _| {
         method.sign(ssl, input, signature_algorithm, output)
     };
 
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, callback) }
+    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_decrypt<M, const CREDENTIAL: bool>(
+pub(super) unsafe extern "C" fn raw_decrypt(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
     max_out: usize,
     in_: *const u8,
     in_len: usize,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+) -> ffi::ssl_private_key_result_t {
     // SAFETY: the native private-key callback supplies readable input for
     // the duration of the call.
     let Some(input) = (unsafe { native_input(in_, in_len) }) else {
         return PrivateKeyMethodError::FAILURE.0;
     };
 
-    let callback = |method: &M, ssl: &mut _, output: &mut _| method.decrypt(ssl, input, output);
+    let callback = |method: &dyn PrivateKeyMethod, ssl: &mut _, output: &mut _| {
+        method.decrypt(ssl, input, output)
+    };
 
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, callback) }
+    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_complete<M, const CREDENTIAL: bool>(
+pub(super) unsafe extern "C" fn raw_complete(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
     max_out: usize,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+) -> ffi::ssl_private_key_result_t {
     // SAFETY: btls provides valid inputs.
-    unsafe { raw_private_key_callback::<M, CREDENTIAL>(ssl, out, out_len, max_out, M::complete) }
+    unsafe { raw_private_key_callback(ssl, out, out_len, max_out, PrivateKeyMethod::complete) }
 }
 
-unsafe fn raw_private_key_callback<M, const CREDENTIAL: bool>(
+unsafe fn raw_private_key_callback(
     ssl: *mut ffi::SSL,
     out: *mut u8,
     out_len: *mut usize,
     max_out: usize,
-    callback: impl FnOnce(&M, &mut SslRef, &mut [u8]) -> Result<usize, PrivateKeyMethodError>,
-) -> ffi::ssl_private_key_result_t
-where
-    M: PrivateKeyMethod,
-{
+    callback: impl FnOnce(
+        &dyn PrivateKeyMethod,
+        &mut SslRef,
+        &mut [u8],
+    ) -> Result<usize, PrivateKeyMethodError>,
+) -> ffi::ssl_private_key_result_t {
     if ssl.is_null()
         || out_len.is_null()
         || max_out > isize::MAX.unsigned_abs()
@@ -763,31 +784,12 @@ where
     // Hold a separate Arc while calling application code, rather than borrow
     // data through an SSL/credential whose configuration the callback can change.
     let result = catch_native(|| {
-        let method: Option<Arc<M>> = if CREDENTIAL {
-            #[cfg(feature = "credential")]
-            {
-                // SAFETY: BoringSSL exposes the currently selected credential
-                // for use during a private-key callback. Its typed ex-data
-                // slot was allocated for Arc<M> by the credential builder.
-                unsafe {
-                    let cred = ffi::SSL_get0_selected_credential(ssl.as_ptr());
-                    let index = super::SslCredential::registered_ex_index::<Arc<M>>()?;
-                    if cred.is_null() {
-                        return None;
-                    }
-                    ffi::SSL_CREDENTIAL_get_ex_data(cred, index.as_raw())
-                        .cast::<Arc<M>>()
-                        .as_ref()
-                        .cloned()
-                }
-            }
-            #[cfg(not(feature = "credential"))]
-            {
-                None
-            }
-        } else {
-            ssl.ssl_context()
-                .callback::<Arc<M>>(CallbackRole::PrivateKey)
+        // SAFETY: native supplies the selected credential's live, owned
+        // method data. Clone its Arc before application code can mutate SSL.
+        let method = unsafe {
+            ffi::SSL_get0_private_key_method_data(ssl.as_ptr())
+                .cast::<OwnedPrivateKeyMethod>()
+                .as_ref()
                 .cloned()
         };
         Some(callback(method.as_deref()?, ssl, output))
