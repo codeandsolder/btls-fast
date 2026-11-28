@@ -1,0 +1,66 @@
+diff --git a/ssl/ssl_test.cc b/ssl/ssl_test.cc
+index 2031d3810..d2999445c 100644
+--- a/ssl/ssl_test.cc
++++ b/ssl/ssl_test.cc
+@@ -11939,4 +11939,37 @@ TEST(SSLTest, CertificatesFromFile) {
+     ERR_clear_error();
+   }
++
++  // A malformed replacement must not discard an existing chain or key.
++  {
++    TemporaryFile good, bad;
++    ASSERT_TRUE(good.Init(std::string(kChainTestCertificatePEM) +
++                          kChainTestIntermediatePEM));
++    ASSERT_TRUE(bad.Init(std::string(kChainTestIntermediatePEM) + kInvalidPEM));
++    bssl::UniquePtr<SSL_CTX> ctx(SSL_CTX_new(TLS_method()));
++    ASSERT_TRUE(ctx);
++    ASSERT_TRUE(
++        SSL_CTX_use_certificate_chain_file(ctx.get(), good.path().c_str()));
++    ASSERT_TRUE(SSL_CTX_use_PrivateKey(ctx.get(), key.get()));
++    ASSERT_FALSE(
++        SSL_CTX_use_certificate_chain_file(ctx.get(), bad.path().c_str()));
++    ERR_clear_error();
++    EXPECT_EQ(X509_cmp(cert.get(), SSL_CTX_get0_certificate(ctx.get())), 0);
++    EXPECT_EQ(SSL_CTX_get0_privatekey(ctx.get()), key.get());
++    STACK_OF(X509) *chain = nullptr;
++    ASSERT_TRUE(SSL_CTX_get0_chain_certs(ctx.get(), &chain));
++    ASSERT_EQ(sk_X509_num(chain), 1u);
++    EXPECT_EQ(X509_cmp(ca.get(), sk_X509_value(chain, 0)), 0);
++
++    // Invalid intermediate elements also fail transactionally, including
++    // when the legacy setter replaces only the intermediates.
++    bssl::UniquePtr<STACK_OF(X509)> invalid(sk_X509_new_null());
++    ASSERT_TRUE(invalid);
++    ASSERT_TRUE(sk_X509_push(invalid.get(), nullptr));
++    ASSERT_FALSE(SSL_CTX_set1_chain(ctx.get(), invalid.get()));
++    ERR_clear_error();
++    ASSERT_TRUE(SSL_CTX_get0_chain_certs(ctx.get(), &chain));
++    ASSERT_EQ(sk_X509_num(chain), 1u);
++    EXPECT_EQ(X509_cmp(ca.get(), sk_X509_value(chain, 0)), 0);
++  }
+ }
+ 
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index 7d87214bd..44b76b39a 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -50,13 +50,15 @@ static void check_ssl_ctx_x509_method(const SSLContext *ctx) {
+ // contents of `x509`.
+ static UniquePtr<CRYPTO_BUFFER> x509_to_buffer(X509 *x509) {
++  if (x509 == nullptr) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_PASSED_NULL_PARAMETER);
++    return nullptr;
++  }
+   uint8_t *buf = nullptr;
+   int cert_len = i2d_X509(x509, &buf);
++  UniquePtr<uint8_t> encoded(buf);
+   if (cert_len <= 0) {
+     return nullptr;
+   }
+ 
+-  UniquePtr<CRYPTO_BUFFER> buffer(CRYPTO_BUFFER_new(buf, cert_len, nullptr));
+-  OPENSSL_free(buf);
+-
+-  return buffer;
++  return UniquePtr<CRYPTO_BUFFER>(CRYPTO_BUFFER_new(buf, cert_len, nullptr));
+ }

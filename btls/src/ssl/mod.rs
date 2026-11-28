@@ -1672,7 +1672,7 @@ impl SslContextBuilder {
     ///
     /// The file should contain a sequence of PEM-formatted certificates, the first being the leaf
     /// certificate, and the remainder forming the chain of certificates up to and including the
-    /// trusted root certificate.
+    /// trusted root certificate. A failed load leaves the current chain and key unchanged.
     #[corresponds(SSL_CTX_use_certificate_chain_file)]
     pub fn set_certificate_chain_file<P: AsRef<Path>>(
         &mut self,
@@ -1685,6 +1685,26 @@ impl SslContextBuilder {
             cvt(ffi::SSL_CTX_use_certificate_chain_file(
                 self.as_ptr(),
                 file.as_ptr(),
+            ))
+        }
+    }
+
+    /// Replaces the complete certificate chain, starting with the leaf.
+    ///
+    /// The caller retains ownership of every certificate. A failure leaves
+    /// the previous chain and key unchanged. On success, a private key that
+    /// does not match the new leaf is discarded.
+    ///
+    /// # Errors
+    /// The context does not support X.509, the chain is empty, or installation fails.
+    #[corresponds(SSL_CTX_use_certificate_chain)]
+    pub fn set_certificate_chain(&mut self, chain: &StackRef<X509>) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
+        // SAFETY: Native code serializes the borrowed chain before committing it.
+        unsafe {
+            cvt(ffi::SSL_CTX_use_certificate_chain(
+                self.as_ptr(),
+                chain.as_ptr(),
             ))
         }
     }
@@ -4952,6 +4972,25 @@ impl SslRef {
         {
             let _ = (bufs, max_in, out);
             Ok(None)
+        }
+    }
+
+    /// Replaces the complete certificate chain, starting with the leaf.
+    ///
+    /// A failed replacement leaves the previous chain and key unchanged.
+    /// On success, a mismatching private key is discarded.
+    ///
+    /// # Errors
+    /// X.509 configuration is unavailable, the chain is empty, or installation fails.
+    #[corresponds(SSL_use_certificate_chain)]
+    pub fn set_certificate_chain(&mut self, chain: &StackRef<X509>) -> Result<(), ErrorStack> {
+        self.ssl_context().check_x509()?;
+        // SAFETY: Native code serializes the borrowed chain before committing it.
+        unsafe {
+            cvt(ffi::SSL_use_certificate_chain(
+                self.as_ptr(),
+                chain.as_ptr(),
+            ))
         }
     }
 

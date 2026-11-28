@@ -33,3 +33,5 @@ always boringssl-pkcs12-framing.patch
 always boringssl-pbkdf2-reject-zero.patch
 always boringssl-context-identity.patch
 always boringssl-checked-ca-list.patch
+always boringssl-atomic-cert-chain.patch
+always boringssl-atomic-cert-chain-tests.patch

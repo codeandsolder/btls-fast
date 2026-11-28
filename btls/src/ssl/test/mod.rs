@@ -98,6 +98,43 @@ fn context_extra_chain_handles_empty_and_populated_chains() {
 }
 
 #[test]
+fn complete_certificate_chain_replacement_is_atomic() {
+    let cert = X509::from_pem(CERT).unwrap();
+    let root = X509::from_pem(ROOT_CERT).unwrap();
+    let key = PKey::private_key_from_pem(KEY).unwrap();
+    let mut chain = crate::stack::Stack::new().unwrap();
+    chain.push(cert.clone()).unwrap();
+    chain.push(root.clone()).unwrap();
+    let empty = crate::stack::Stack::new().unwrap();
+
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_certificate_chain(&chain).unwrap();
+    ctx.set_private_key(&key).unwrap();
+    assert!(ctx.set_certificate_chain(&empty).is_err());
+    assert_eq!(
+        ctx.ctx.certificate().unwrap().to_der().unwrap(),
+        cert.to_der().unwrap()
+    );
+    assert!(ctx.ctx.private_key().unwrap().public_eq(&key));
+    assert_eq!(ctx.ctx.extra_chain_certs().unwrap().len(), 1);
+    assert_eq!(
+        ctx.ctx.extra_chain_certs().unwrap()[0].to_der().unwrap(),
+        root.to_der().unwrap()
+    );
+    assert_eq!(chain.len(), 2);
+
+    let mut ssl = Ssl::new(&ctx.build()).unwrap();
+    assert!(ssl.set_certificate_chain(&empty).is_err());
+    assert_eq!(
+        ssl.certificate().unwrap().to_der().unwrap(),
+        cert.to_der().unwrap()
+    );
+    assert!(ssl.private_key().unwrap().public_eq(&key));
+    ssl.set_certificate_chain(&chain).unwrap();
+    assert!(ssl.private_key().unwrap().public_eq(&key));
+}
+
+#[test]
 fn raw_native_contexts_and_connections_have_authoritative_capabilities() {
     crate::ffi::init();
     // SAFETY: each native allocation is checked before transferring its unique
