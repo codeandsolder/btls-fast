@@ -376,6 +376,51 @@ fn client_session_resumes_within_scope_and_domain() {
 }
 
 #[test]
+fn unscoped_session_issuer_is_the_original_notification_registration() {
+    for version in [SslVersion::TLS1_2, SslVersion::TLS1_3] {
+        let mut server = Server::builder();
+        server.expected_connections_count(2);
+        server.ctx().set_min_proto_version(Some(version)).unwrap();
+        server.ctx().set_max_proto_version(Some(version)).unwrap();
+        let server = server.build();
+        let origin_sessions = Arc::new(Mutex::new(Vec::new()));
+        let replacement_sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut origin = trusted_connector();
+        collect_sessions(&mut origin, &origin_sessions);
+        let origin = origin.build();
+        let mut replacement = trusted_connector();
+        collect_sessions(&mut replacement, &replacement_sessions);
+        let replacement = replacement.build();
+
+        let mut config = origin.configure().unwrap();
+        config.set_ssl_context(replacement.context()).unwrap();
+        let session = issue_session(config, &server, "foobar.com", &origin_sessions);
+        assert!(replacement_sessions.lock().unwrap().is_empty());
+        let wrong_origin = replacement
+            .configure()
+            .unwrap()
+            .client_session(session.clone())
+            .into_ssl("foobar.com")
+            .unwrap();
+        assert!(wrong_origin.session().is_none());
+        let mut resumed = origin
+            .configure()
+            .unwrap()
+            .client_session(session)
+            .into_ssl("foobar.com")
+            .unwrap();
+        assert!(resumed.session().is_some());
+        // A switch after tentative installation also keeps the original session
+        // scope. Current native trust and hostname policy are still revalidated.
+        resumed.set_ssl_context(replacement.context()).unwrap();
+        let mut stream = resumed.connect(server.connect_tcp()).unwrap();
+        assert!(stream.ssl().session_reused());
+        stream.read_exact(&mut [0]).unwrap();
+        assert!(replacement_sessions.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
 fn cached_session_rechecks_current_hostname_policy_before_client_hello() {
     use crate::x509::verify::X509CheckFlags;
     for version in [SslVersion::TLS1_2, SslVersion::TLS1_3] {

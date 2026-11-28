@@ -8,10 +8,10 @@ use super::{
     STATUS_INDEX, ServerNameCallback, TICKET_KEY_INDEX,
 };
 use super::{
-    AlpnError, CertificateCompressor, ClientHello, ClientSession, GetSessionPendingError,
-    PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert,
-    SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef,
-    SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
+    AlpnError, CertificateCompressor, ClientHello, GetSessionPendingError, PrivateKeyMethod,
+    PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert, SslContextRef,
+    SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef, SslSession,
+    SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
 use crate::error::ErrorStack;
 use crate::ffi;
@@ -614,7 +614,7 @@ pub(super) unsafe extern "C" fn raw_new_session(
                 // Only connections configured by ConnectConfiguration report
                 // checked sessions. All other session references are dropped.
                 if let Some(peer) = ssl.slot_data(&SESSION_PEER_INDEX).cloned() {
-                    let session = ClientSession::new(session, peer, ssl);
+                    let session = callback.issue(session, peer, ssl);
                     (callback.callback)(ssl, session);
                 }
             }
