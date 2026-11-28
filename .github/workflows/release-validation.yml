@@ -248,8 +248,8 @@ jobs:
         run: echo "CARGO_TARGET_$(echo ${{ matrix.target }} | tr \\-a-z _A-Z)_LINKER=$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/$(echo ${{ matrix.target }} | sed s/armv7/armv7a/)21-clang++" >> "$GITHUB_ENV"
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Fetch deps
@@ -280,7 +280,7 @@ jobs:
         run: cargo package --locked --target ${{ matrix.target }} -p btls-sys
         shell: bash
         env: ${{ matrix.custom_env }}
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         if: always()
 
   test-fips:
@@ -300,8 +300,8 @@ jobs:
         go-version: '>=1.27.0'
     - name: Resolve fleet compiler
       id: compiler
-      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
-    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
       with:
         rust-toolchain: ${{ steps.compiler.outputs.channel }}
     - name: Run tests
@@ -318,7 +318,7 @@ jobs:
       # Both of these may no longer be the case after updating the BoringSSL
       # submodules to a new revision, so it's important to test this on CI.
       run: cargo package --locked -p btls-sys --features fips
-    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
       if: always()
 
   test-boringssl:
@@ -352,8 +352,8 @@ jobs:
       run: rustup show
     - name: Resolve fleet compiler
       id: compiler
-      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
-    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+      uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+    - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
       with:
         rust-toolchain: ${{ steps.compiler.outputs.channel }}
     - name: Configure BoringSSL ASan build
@@ -380,7 +380,7 @@ jobs:
       run: >-
         go test -shim-extra-flags=-seal-app-data
         -test='Basic-*;TLS-*;*KeyUpdate*;*CBCRecordSplitting*;*MaxSendFragment*;Renegotiate-*;*Shutdown*;*EarlyData*;*FalseStart*;*Alert*'
-    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+    - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
       if: always()
 
   cross-build:
@@ -419,13 +419,13 @@ jobs:
         run: echo "CXXFLAGS=-D__STDC_FORMAT_MACROS" >> $GITHUB_ENV
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Build for ${{ matrix.target }}
         run: cargo build --locked --target ${{ matrix.target }} --all-targets
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         if: always()
 
   test-features:
@@ -445,8 +445,8 @@ jobs:
           cache-dependency-path: btls-sys/deps/boringssl/go.sum
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Run `rpk` and `underscore-wildcards` tests
@@ -483,7 +483,7 @@ jobs:
           fi
           cat "$log"
           grep -qF '`prefix-symbols` features are mutually exclusive' "$log"
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         if: always()
 
   prefix-symbols:
@@ -577,8 +577,8 @@ jobs:
         run: rustup show
       - name: Resolve fleet compiler
         id: compiler
-        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
-      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+        uses: codeandsolder/ci-workflows/.github/actions/resolve-rust-toolchain@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
+      - uses: codeandsolder/ci-workflows/.github/actions/setup-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         with:
           rust-toolchain: ${{ steps.compiler.outputs.channel }}
       - name: Create test project
@@ -705,5 +705,5 @@ jobs:
         working-directory: btls-sys
         shell: bash
         run: cargo package --locked --features prefix-symbols
-      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1ef8b180d04fbeb8c095e8d701f8a5107472370e # main
+      - uses: codeandsolder/ci-workflows/.github/actions/finalize-sccache@1293f1c247f07a14a85859f908b4f6b7e2553922 # main
         if: always()
