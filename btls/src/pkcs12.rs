@@ -16,7 +16,9 @@ use libc::c_int;
 use openssl_macros::corresponds;
 use std::{ffi::CString, ptr};
 
+/// Default native encryption and MAC iteration count.
 pub const PKCS12_DEFAULT_ITER: c_int = ffi::PKCS12_DEFAULT_ITER;
+/// Maximum supported production iteration count.
 pub const PKCS12_MAX_ITER: c_int = ffi::PKCS12_MAX_ITER;
 
 /// The authenticated contents of one PKCS #12 archive.
@@ -43,7 +45,8 @@ impl ParsedPkcs12 {
         };
         let mut matches = Vec::new();
         for cert in &self.certificates {
-            if key.public_eq(&cert.public_key()?) {
+            let public_key = cert.public_key()?;
+            if key.public_eq(&public_key) {
                 matches.push(cert);
             }
         }
@@ -338,6 +341,14 @@ mod test {
         trailing[2..4].copy_from_slice(&len.to_be_bytes());
         assert!(super::parse(&trailing, "mypass").is_err());
         assert!(super::parse(&der[..der.len() - 1], "mypass").is_err());
+        // BER indefinite-length outer container, same authenticated payload.
+        let mut ber = vec![0x30, 0x80];
+        ber.extend_from_slice(&der[4..]);
+        ber.extend_from_slice(&[0, 0]);
+        let parsed_ber = super::parse(&ber, "mypass").unwrap();
+        assert_eq!(parsed_ber.certificates.len(), parsed.certificates.len());
+        ber.extend_from_slice(&[0x30, 0]);
+        assert!(super::parse(&ber, "mypass").is_err());
     }
 
     #[test]
@@ -383,6 +394,8 @@ mod test {
         let parsed = super::parse(&encoded, "mypass").unwrap();
         let matches = parsed.matching_certificates().unwrap();
         assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].alias().unwrap(), Some(subject_name.as_bytes()));
+        assert_eq!(cert.alias().unwrap(), None);
         assert_eq!(
             matches[0].digest(MessageDigest::sha1()).unwrap().as_ref(),
             cert.digest(MessageDigest::sha1()).unwrap().as_ref()
