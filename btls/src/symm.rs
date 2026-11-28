@@ -351,7 +351,7 @@ impl Cipher {
     pub fn is_aead(self) -> bool {
         // SAFETY: the cipher descriptor is immutable and process-lifetime.
         unsafe {
-            ffi::EVP_CIPHER_flags(self.as_ptr()) & crate::native_u32(ffi::EVP_CIPH_FLAG_AEAD_CIPHER)
+            ffi::EVP_CIPHER_flags(self.as_ptr()) & ffi::EVP_CIPH_FLAG_AEAD_CIPHER.cast_unsigned()
                 != 0
         }
     }
