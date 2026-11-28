@@ -346,6 +346,16 @@ impl Cipher {
         unsafe { EVP_CIPHER_block_size(self.0) as usize }
     }
 
+    /// Returns whether this cipher requires authenticated encryption or decryption.
+    #[must_use = "Select authenticated or unauthenticated operations for the cipher."]
+    pub fn is_aead(self) -> bool {
+        // SAFETY: the cipher descriptor is immutable and process-lifetime.
+        unsafe {
+            ffi::EVP_CIPHER_flags(self.as_ptr()) & ffi::EVP_CIPH_FLAG_AEAD_CIPHER.cast_unsigned()
+                != 0
+        }
+    }
+
     /// Returns the cipher's NID.
     #[corresponds(EVP_CIPHER_nid)]
     #[must_use = "Use the returned algorithm or parameter identity when selecting or reporting cryptographic settings."]
@@ -362,9 +372,11 @@ unsafe impl Sync for Cipher {}
 // SAFETY: static cipher descriptors are not thread-affine.
 unsafe impl Send for Cipher {}
 
-/// Represents a symmetric cipher context.
+/// Represents an unauthenticated symmetric cipher context.
 ///
-/// Padding is enabled by default.
+/// Padding is enabled by default. AEAD ciphers must use [`encrypt_aead`],
+/// [`decrypt_aead`], or [`crate::aead`] instead; streaming unauthenticated
+/// plaintext from an AEAD operation is intentionally not exposed.
 ///
 /// # Examples
 ///
@@ -435,13 +447,30 @@ enum CipherState {
 }
 
 impl Crypter {
-    /// Creates a new cipher operation for the requested key and IV.
+    /// Creates a new unauthenticated cipher operation for the requested key and IV.
     ///
     /// # Errors
-    ///
-    /// Allocation or initialization fails, including a missing or invalid IV
-    /// or an invalid key length.
+    /// The cipher requires authentication, or allocation or initialization fails,
+    /// including a missing or invalid IV or an invalid key length.
     pub fn new(t: Cipher, mode: Mode, key: &[u8], iv: Option<&[u8]>) -> Result<Self, ErrorStack> {
+        if t.is_aead() {
+            return Err(ErrorStack::internal_error_str(
+                "AEAD cipher requires an authenticated operation",
+            ));
+        }
+        Self::new_inner(t, mode, key, iv)
+    }
+
+    fn new_aead(t: Cipher, mode: Mode, key: &[u8], iv: Option<&[u8]>) -> Result<Self, ErrorStack> {
+        if !t.is_aead() {
+            return Err(ErrorStack::internal_error_str(
+                "cipher does not support authentication",
+            ));
+        }
+        Self::new_inner(t, mode, key, iv)
+    }
+
+    fn new_inner(t: Cipher, mode: Mode, key: &[u8], iv: Option<&[u8]>) -> Result<Self, ErrorStack> {
         ffi::init();
         // SAFETY: the native allocator returns an owned context or null.
         let mut ctx = unsafe { CipherCtx::from_ptr(cvt_p(ffi::EVP_CIPHER_CTX_new())?) };
@@ -484,7 +513,7 @@ impl Crypter {
     /// # Errors
     ///
     /// The cipher mode or tag length is unsupported, or the operation is inactive.
-    pub fn set_tag(&mut self, tag: &[u8]) -> Result<(), ErrorStack> {
+    fn set_tag(&mut self, tag: &[u8]) -> Result<(), ErrorStack> {
         self.require_active()?;
         // SAFETY: the native SET_TAG command reads the supplied number of
         // bytes from tag; it does not mutate the caller's slice.
@@ -503,7 +532,7 @@ impl Crypter {
     /// # Errors
     ///
     /// The cipher does not support associated data, or the operation fails.
-    pub fn aad_update(&mut self, input: &[u8]) -> Result<(), ErrorStack> {
+    fn aad_update(&mut self, input: &[u8]) -> Result<(), ErrorStack> {
         self.require_active()?;
         // SAFETY: self owns the initialized context; input is readable for
         // the length explicitly supplied to the native AAD operation.
@@ -522,7 +551,6 @@ impl Crypter {
 
     /// Processes input and returns the number of output bytes.
     ///
-    /// For AEAD decryption, do not use plaintext until finalization succeeds.
     ///
     /// # Errors
     ///
@@ -610,7 +638,7 @@ impl Crypter {
     ///
     /// Encryption has not successfully finalized, or the tag length or cipher
     /// mode is unsupported.
-    pub fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), ErrorStack> {
+    fn get_tag(&mut self, tag: &mut [u8]) -> Result<(), ErrorStack> {
         if self.state != CipherState::Finalized {
             return Err(ErrorStack::internal_error_str(
                 "cipher has not successfully finalized",
@@ -629,7 +657,8 @@ impl Crypter {
     }
 }
 
-/// Encrypts data in one go, and returns the encrypted data.
+/// Encrypts data in one go using a non-AEAD cipher, and returns the encrypted data.
+/// AEAD ciphers must use [`encrypt_aead`] or [`crate::aead`] so the tag cannot be discarded.
 ///
 /// Data is encrypted using the specified cipher type `t` in encrypt mode with the specified `key`
 /// and initailization vector `iv`. Padding is enabled.
@@ -672,7 +701,8 @@ pub fn encrypt(
     cipher(t, Mode::Encrypt, key, iv, data)
 }
 
-/// Decrypts data in one go, and returns the decrypted data.
+/// Decrypts data in one go using a non-AEAD cipher, and returns the decrypted data.
+/// AEAD ciphers must use [`decrypt_aead`] or [`crate::aead`] to verify authentication.
 ///
 /// Data is decrypted using the specified cipher type `t` in decrypt mode with the specified `key`
 /// and initailization vector `iv`. Padding is enabled.
@@ -733,7 +763,9 @@ fn cipher(
     out.into_vec(count + rest)
 }
 
-/// Like `encrypt`, but for AEAD ciphers such as AES GCM.
+/// Encrypts and authenticates a complete message using an AEAD cipher such as AES-GCM.
+/// Only authenticated cipher algorithms are accepted. Use a unique IV for every
+/// message encrypted under the same key.
 ///
 /// Additional Authenticated Data can be provided in the `aad` field, and the authentication tag
 /// will be copied into the `tag` field.
@@ -753,23 +785,22 @@ pub fn encrypt_aead(
     data: &[u8],
     tag: &mut [u8],
 ) -> Result<Vec<u8>, ErrorStack> {
-    let mut c = Crypter::new(t, Mode::Encrypt, key, iv)?;
-    let mut out = vec![
-        0;
-        data.len().checked_add(t.block_size()).ok_or_else(|| {
-            ErrorStack::internal_error_str("cipher output length overflow")
-        })?
-    ];
+    let mut c = Crypter::new_aead(t, Mode::Encrypt, key, iv)?;
+    let mut out = SecretBytes::zeroed(
+        data.len()
+            .checked_add(t.block_size())
+            .ok_or_else(|| ErrorStack::internal_error_str("cipher output length overflow"))?,
+    )?;
 
     c.aad_update(aad)?;
     let count = c.update(data, &mut out)?;
     let rest = c.finalize(&mut out[count..])?;
     c.get_tag(tag)?;
-    out.truncate(count + rest);
-    Ok(out)
+    out.into_vec(count + rest)
 }
 
-/// Like `decrypt`, but for AEAD ciphers such as AES GCM.
+/// Authenticates and decrypts a complete message using an AEAD cipher such as AES-GCM.
+/// No plaintext is returned unless authentication succeeds. Failed output is cleansed.
 ///
 /// Additional Authenticated Data can be provided in the `aad` field, and the authentication tag
 /// should be provided in the `tag` field.
@@ -785,7 +816,7 @@ pub fn decrypt_aead(
     data: &[u8],
     tag: &[u8],
 ) -> Result<Vec<u8>, ErrorStack> {
-    let mut c = Crypter::new(t, Mode::Decrypt, key, iv)?;
+    let mut c = Crypter::new_aead(t, Mode::Decrypt, key, iv)?;
     let mut out = SecretBytes::zeroed(
         data.len()
             .checked_add(t.block_size())
@@ -807,6 +838,47 @@ use crate::ffi::{EVP_CIPHER_block_size, EVP_CIPHER_iv_length, EVP_CIPHER_key_len
 mod tests {
     use super::*;
     use hex::{self, FromHex};
+
+    #[test]
+    fn authenticated_and_unauthenticated_operations_cannot_be_mixed() {
+        let iv = [0; 12];
+        for (cipher, key_len) in [
+            (Cipher::aes_128_gcm(), 16),
+            (Cipher::aes_192_gcm(), 24),
+            (Cipher::aes_256_gcm(), 32),
+        ] {
+            let key = [0; 32];
+            let key = &key[..key_len];
+            assert!(cipher.is_aead());
+            assert!(Crypter::new(cipher, Mode::Encrypt, key, Some(&iv)).is_err());
+            assert!(Crypter::new(cipher, Mode::Decrypt, key, Some(&iv)).is_err());
+            assert!(encrypt(cipher, key, Some(&iv), b"message").is_err());
+            assert!(decrypt(cipher, key, Some(&iv), b"message").is_err());
+            let mut tag = [0; 16];
+            let ciphertext =
+                encrypt_aead(cipher, key, Some(&iv), b"header", b"message", &mut tag).unwrap();
+            assert_eq!(
+                decrypt_aead(cipher, key, Some(&iv), b"header", &ciphertext, &tag).unwrap(),
+                b"message"
+            );
+            tag[0] ^= 1;
+            assert!(decrypt_aead(cipher, key, Some(&iv), b"header", &ciphertext, &tag).is_err());
+        }
+        let cipher = Cipher::aes_128_ctr();
+        assert!(!cipher.is_aead());
+        assert!(
+            encrypt_aead(
+                cipher,
+                &[0; 16],
+                Some(&[0; 16]),
+                b"",
+                b"message",
+                &mut [0; 16]
+            )
+            .is_err()
+        );
+        assert!(decrypt_aead(cipher, &[0; 16], Some(&[0; 16]), b"", b"message", &[0; 16]).is_err());
+    }
 
     #[test]
     fn checked_cipher_outputs_and_state() {
