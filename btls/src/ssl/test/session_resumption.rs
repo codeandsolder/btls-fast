@@ -13,7 +13,6 @@ use crate::ssl::SslSessionCacheMode;
 use crate::ssl::SslVerifyError;
 use crate::ssl::SslVerifyMode;
 use crate::ssl::SslVersion;
-use crate::ssl::connector::earliest_not_after;
 use crate::ssl::test::MessageDigest;
 use crate::ssl::{SslConnector, SslConnectorBuilder};
 use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
@@ -542,7 +541,7 @@ fn cached_session_does_not_skip_custom_verification() {
 }
 
 #[test]
-fn client_session_is_not_offered_after_its_chain_expires() {
+fn cached_session_uses_current_native_verification_time() {
     // A foobar.com leaf from the test root that expired a day ago.
     let day: i64 = 24 * 60 * 60;
     let now: i64 = SystemTime::now()
@@ -578,6 +577,8 @@ fn client_session_is_not_offered_after_its_chain_expires() {
         .unwrap();
 
     let mut server = Server::builder();
+    server.expected_connections_count(4);
+    server.should_error_when(|index| index == 2);
     server.ctx().set_certificate(&leaf).unwrap();
     let server = server.build();
 
@@ -594,22 +595,46 @@ fn client_session_is_not_offered_after_its_chain_expires() {
         .unwrap()
         .set_time(now - day - day / 2);
     let session = issue_session(config, &server, "foobar.com", &sessions);
-    let not_after = session.session().peer_chain_not_after();
-    assert!(not_after.is_some());
-    assert_eq!(not_after, earliest_not_after([&*leaf]));
+    assert_eq!(
+        session.session().peer_chain_not_after().unwrap(),
+        Some(now - day)
+    );
 
-    let offers = |configure: fn(&mut ConnectConfiguration)| {
-        let mut config = connector
-            .configure()
-            .unwrap()
-            .client_session(session.clone());
-        configure(&mut config);
-        config.into_ssl("foobar.com").unwrap().session().is_some()
-    };
-    assert!(!offers(|_| {}));
-    assert!(offers(|config| config
-        .set_verify_mode(SslVerifyMode::NONE)
-        .unwrap()));
+    // The certificate is expired at the wall clock, but valid under the
+    // explicitly requested historical verification policy.
+    let mut historical = connector
+        .configure()
+        .unwrap()
+        .client_session(session.clone());
+    historical
+        .verify_param_mut()
+        .unwrap()
+        .set_time(now - day - day / 2);
+    let mut stream = historical
+        .connect("foobar.com", server.connect_tcp())
+        .unwrap();
+    assert!(stream.ssl().session_reused());
+    stream.read_exact(&mut [0]).unwrap();
+
+    // Changing the policy to the current time must reject the cached session
+    // before it is offered. A full handshake with the expired leaf then fails.
+    let result = connector
+        .configure()
+        .unwrap()
+        .client_session(session.clone())
+        .connect("foobar.com", server.connect_tcp());
+    assert!(
+        matches!(result, Err(crate::ssl::HandshakeError::Failure(ref mid))
+        if mid.ssl().verify_result() == Err(crate::x509::X509VerifyError::CERT_HAS_EXPIRED))
+    );
+
+    let mut unverified = connector.configure().unwrap().client_session(session);
+    unverified.set_verify_mode(SslVerifyMode::NONE).unwrap();
+    let mut stream = unverified
+        .connect("foobar.com", server.connect_tcp())
+        .unwrap();
+    assert!(stream.ssl().session_reused());
+    stream.read_exact(&mut [0]).unwrap();
 }
 
 #[test]
