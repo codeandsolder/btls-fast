@@ -26,3 +26,4 @@ relax-cert-validation relax-cert-validation.patch
 always boringssl-resume-verify-mode.patch
 always boringssl-clear-verify-callback.patch
 always boringssl-strict-cipher-rules.patch
+always boringssl-private-key-method-owner.patch

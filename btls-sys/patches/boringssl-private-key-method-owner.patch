@@ -1,0 +1,153 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index b361ac72c..da7b13559 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -1617,6 +1617,27 @@ OPENSSL_EXPORT void SSL_CTX_set_private_key_method(
+ OPENSSL_EXPORT int SSL_CREDENTIAL_set_private_key_method(
+     SSL_CREDENTIAL *cred, const SSL_PRIVATE_KEY_METHOD *key_method);
+ 
++// SSL_CREDENTIAL_set_private_key_method_with_data installs a private-key
++// method and transfers ownership of non-null |data| on success only. The
++// non-null |free_data| callback is called once when the last credential copy
++// drops the data or replaces the method or private key. The method table must
++// outlive the credential and its copies. Returns one on success, zero on error.
++OPENSSL_EXPORT int SSL_CREDENTIAL_set_private_key_method_with_data(
++    SSL_CREDENTIAL *cred, const SSL_PRIVATE_KEY_METHOD *key_method,
++    void *data, void (*free_data)(void *));
++
++// SSL_CTX_set_private_key_method_with_data is the equivalent operation for
++// the context's legacy credential. Copies into SSL objects retain the data.
++OPENSSL_EXPORT int SSL_CTX_set_private_key_method_with_data(
++    SSL_CTX *ctx, const SSL_PRIVATE_KEY_METHOD *key_method,
++    void *data, void (*free_data)(void *));
++
++// SSL_get0_private_key_method_data returns the borrowed application data of
++// the selected credential, or NULL if there is no such data. It is intended
++// for use in private-key callbacks. Changing the credential's method or key
++// may release the data, so retain it if invoking application code can do so.
++OPENSSL_EXPORT const void *SSL_get0_private_key_method_data(const SSL *ssl);
++
+ // SSL_can_release_private_key returns one if `ssl` will no longer call into the
+ // private key and zero otherwise. If the function returns one, the caller can
+ // release state associated with the private key.
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 2137ec35b..aba0b4565 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -1509,6 +1509,22 @@ enum class SSLCredentialType {
+   kRawPublicKey,
+ };
+ 
++// Owns opaque application state alongside a private-key method. The legacy
++// credential is copied into each connection and on context switches, so the
++// state must follow the credential rather than its current SSL_CTX.
++class SSLPrivateKeyMethodData : public RefCounted<SSLPrivateKeyMethodData> {
++ public:
++  SSLPrivateKeyMethodData(void *data, void (*free_data)(void *))
++      : RefCounted(CheckSubClass()), data(data), free_data_(free_data) {}
++
++  void *const data;
++
++ private:
++  friend RefCounted<SSLPrivateKeyMethodData>;
++  ~SSLPrivateKeyMethodData() { free_data_(data); }
++  void (*const free_data_)(void *);
++};
++
+ class SSLCredential : public ssl_credential_st,
+                       public RefCounted<SSLCredential> {
+  public:
+@@ -1569,6 +1585,7 @@ class SSLCredential : public ssl_credential_st,
+   // key_method, if non-null, is a set of callbacks to call for private key
+   // operations.
+   const SSL_PRIVATE_KEY_METHOD *key_method = nullptr;
++  UniquePtr<SSLPrivateKeyMethodData> key_method_data;
+ 
+   // sigalgs, if non-empty, is the set of signature algorithms supported by the
+   // private key in decreasing order of preference. If empty, the default list
+diff --git a/ssl/ssl_credential.cc b/ssl/ssl_credential.cc
+index 921d0de3f..3f80ec78b 100644
+--- a/ssl/ssl_credential.cc
++++ b/ssl/ssl_credential.cc
+@@ -204,6 +204,7 @@ UniquePtr<SSLCredential> SSLCredential::Dup() const {
+   ret->pubkey = UpRef(pubkey);
+   ret->privkey = UpRef(privkey);
+   ret->key_method = key_method;
++  ret->key_method_data = UpRef(key_method_data);
+   if (!ret->sigalgs.CopyFrom(sigalgs)) {
+     return nullptr;
+   }
+@@ -225,6 +226,7 @@ void SSLCredential::ClearCertAndKey() {
+   pubkey = nullptr;
+   privkey = nullptr;
+   key_method = nullptr;
++  key_method_data.reset();
+   chain = nullptr;
+ }
+ 
+@@ -565,6 +567,7 @@ int SSL_CREDENTIAL_set1_private_key(SSL_CREDENTIAL *cred, EVP_PKEY *key) {
+ 
+   cred_impl->privkey = UpRef(key);
+   cred_impl->key_method = nullptr;
++  cred_impl->key_method_data.reset();
+   return 1;
+ }
+ 
+@@ -578,9 +581,38 @@ int SSL_CREDENTIAL_set_private_key_method(
+ 
+   cred_impl->privkey = nullptr;
+   cred_impl->key_method = key_method;
++  cred_impl->key_method_data.reset();
+   return 1;
+ }
+ 
++int SSL_CREDENTIAL_set_private_key_method_with_data(
++    SSL_CREDENTIAL *cred, const SSL_PRIVATE_KEY_METHOD *key_method,
++    void *data, void (*free_data)(void *)) {
++  auto *impl = FromOpaque(cred);
++  if (!impl->UsesPrivateKey() || key_method == nullptr || data == nullptr ||
++      free_data == nullptr) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
++  }
++  auto owner = MakeUnique<SSLPrivateKeyMethodData>(data, free_data);
++  if (!owner) {
++    return 0;
++  }
++  impl->privkey.reset();
++  impl->key_method = key_method;
++  impl->key_method_data = std::move(owner);
++  return 1;
++}
++
++const void *SSL_get0_private_key_method_data(const SSL *ssl) {
++  const SSL_CREDENTIAL *cred = SSL_get0_selected_credential(ssl);
++  if (cred == nullptr) {
++    return nullptr;
++  }
++  const auto *impl = FromOpaque(cred);
++  return impl->key_method_data ? impl->key_method_data->data : nullptr;
++}
++
+ int SSL_CREDENTIAL_set1_cert_chain(SSL_CREDENTIAL *cred,
+                                    CRYPTO_BUFFER *const *certs,
+                                    size_t num_certs) {
+diff --git a/ssl/ssl_privkey.cc b/ssl/ssl_privkey.cc
+index af40dd514..d2870582d 100644
+--- a/ssl/ssl_privkey.cc
++++ b/ssl/ssl_privkey.cc
+@@ -494,6 +494,14 @@ void SSL_CTX_set_private_key_method(SSL_CTX *ctx,
+       FromOpaque(ctx)->cert->legacy_credential.get(), key_method));
+ }
+ 
++int SSL_CTX_set_private_key_method_with_data(
++    SSL_CTX *ctx, const SSL_PRIVATE_KEY_METHOD *key_method,
++    void *data, void (*free_data)(void *)) {
++  return SSL_CREDENTIAL_set_private_key_method_with_data(
++      FromOpaque(ctx)->cert->legacy_credential.get(), key_method, data,
++      free_data);
++}
++
+ static constexpr size_t kMaxSignatureAlgorithmNameLen = 24;
+ 
+ struct SignatureAlgorithmName {

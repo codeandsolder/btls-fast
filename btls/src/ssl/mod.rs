@@ -480,7 +480,6 @@ impl NameType {
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum CallbackRole {
     Compression,
-    PrivateKey,
 }
 
 static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
@@ -2114,25 +2113,18 @@ impl SslContextBuilder {
     /// # Errors
     ///
     /// Returns an error if the native extra-data index or callback storage cannot be allocated.
-    #[corresponds(SSL_CTX_set_private_key_method)]
+    #[corresponds(SSL_CTX_set_private_key_method_with_data)]
     pub fn set_private_key_method<M>(&mut self, method: M) -> Result<(), ErrorStack>
     where
         M: PrivateKeyMethod,
     {
-        // SAFETY: The context retains a static method table associated with
-        // the callback type, while its Rust callback state lives in extra-data.
-        unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<Arc<M>>(CallbackRole::PrivateKey)?,
-                Arc::new(method),
-            )?;
-
-            ffi::SSL_CTX_set_private_key_method(
-                self.as_ptr(),
-                callbacks::PrivateKeyMethodDescriptor::<M, false>::descriptor(),
-            );
-        }
-        Ok(())
+        callbacks::install_private_key_method(method, |table, data, free_data| {
+            // SAFETY: the builder has exclusive context access; native owns
+            // the provided method data only if registration succeeds.
+            unsafe {
+                ffi::SSL_CTX_set_private_key_method_with_data(self.as_ptr(), table, data, free_data)
+            }
+        })
     }
 
     /// Checks for consistency between the private key and certificate.
