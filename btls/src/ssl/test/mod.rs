@@ -49,13 +49,9 @@ fn singleton_context_callbacks_release_replaced_closures() {
     replace_callback!(set_remove_session_callback, |_, _| ());
     replace_callback!(set_keylog_callback, |_, _| ());
     replace_callback!(set_info_callback, |_, _, _| ());
-    // SAFETY: the lookup always returns no session; ticket callback rejects
-    // without claiming to have initialized any cryptographic state.
+    // SAFETY: the lookup always returns no session.
     unsafe {
         replace_callback!(set_get_session_callback, |_, _| Ok(None));
-        replace_callback!(set_ticket_key_callback, |_, _, _, _| {
-            ssl::TicketKeyCallbackResult::Error
-        });
     }
 }
 

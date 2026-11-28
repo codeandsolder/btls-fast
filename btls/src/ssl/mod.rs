@@ -77,7 +77,6 @@ use std::sync::Arc;
 
 use crate::error::ErrorStack;
 use crate::ex_data::{Index, IndexSlot, replace_boxed};
-use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
 use crate::pkey::Public;
@@ -85,13 +84,12 @@ use crate::pkey::{HasPrivate, PKeyRef, Private};
 use crate::srtp::{SrtpProtectionProfile, SrtpProtectionProfileRef};
 use crate::ssl::bio::BioMethod;
 use crate::ssl::callbacks::{
-    raw_cert_verify, raw_client_psk, raw_custom_verify, raw_server_psk, raw_sni, raw_ticket_key,
-    raw_tlsext_status, raw_verify, ssl_raw_custom_verify, ssl_raw_verify,
+    raw_cert_verify, raw_client_psk, raw_custom_verify, raw_server_psk, raw_sni, raw_tlsext_status,
+    raw_verify, ssl_raw_custom_verify, ssl_raw_verify,
 };
 use crate::ssl::ech::SslEchKeys;
 use crate::ssl::error::InnerError;
 use crate::stack::{StackRef, Stackable};
-use crate::symm::CipherCtxRef;
 use crate::try_int;
 use crate::util::native_input;
 use crate::x509::store::{X509Store, X509StoreBuilder, X509StoreBuilderRef, X509StoreRef};
@@ -122,6 +120,7 @@ pub use self::ech_grease::{
 };
 pub use self::error::{Error, ErrorCode, HandshakeError};
 pub use self::quic::{QuicEncryptionLevel, QuicMethod, QuicMethodError};
+pub use self::ticket::{TicketKey, TicketKeyProvider, TicketRenewal};
 
 mod async_callbacks;
 mod bio;
@@ -139,6 +138,7 @@ mod mut_only;
 mod quic;
 #[cfg(test)]
 mod test;
+mod ticket;
 
 bitflags! {
     /// Options controlling the behavior of an `SslContext`.
@@ -456,18 +456,6 @@ impl NameType {
 type ServerNameCallback =
     Box<dyn Fn(&mut SslRef, &mut SslAlert) -> Result<(), SniError> + Send + Sync>;
 static SNI_INDEX: IndexSlot<SslContext, ServerNameCallback> =
-    IndexSlot::new(SslContext::new_ex_index);
-type TicketKeyCallback = Box<
-    dyn Fn(
-            &SslRef,
-            TicketKeyMode<'_>,
-            &mut CipherCtxRef,
-            &mut HmacCtxRef,
-        ) -> TicketKeyCallbackResult
-        + Send
-        + Sync,
->;
-static TICKET_KEY_INDEX: IndexSlot<SslContext, TicketKeyCallback> =
     IndexSlot::new(SslContext::new_ex_index);
 type AlpnCallback =
     Box<dyn for<'a> Fn(&mut SslRef, &'a [u8]) -> Result<&'a [u8], AlpnError> + Send + Sync>;
@@ -1022,67 +1010,6 @@ pub enum SslInfoCallbackValue {
     Alert(SslInfoCallbackAlert),
 }
 
-/// Session-ticket key callback mode and the corresponding ticket header buffers.
-pub enum TicketKeyMode<'a> {
-    /// Populate the key name and IV for a new ticket.
-    Encrypt {
-        key_name: &'a mut [u8; 16],
-        iv: &'a mut [u8; ffi::EVP_MAX_IV_LENGTH as usize],
-    },
-    /// Inspect the immutable key name and IV supplied by the peer.
-    Decrypt {
-        key_name: &'a [u8; 16],
-        iv: &'a [u8; ffi::EVP_MAX_IV_LENGTH as usize],
-    },
-}
-
-/// Ticket key callback status.
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-pub enum TicketKeyCallbackResult {
-    /// Abort the handshake.
-    Error,
-
-    /// Continue with a full handshake.
-    ///
-    /// When in decryption mode, this indicates that the peer supplied session ticket was not
-    /// recognized. When in encryption mode, this instructs btls to not send a session ticket.
-    ///
-    /// # Note
-    ///
-    /// This is a decryption specific status code when using the submoduled `BoringSSL`.
-    Noop,
-
-    /// Resumption callback was successful.
-    ///
-    /// When in decryption mode, attempt an abbreviated handshake via session resumption. When in
-    /// encryption mode, provide a new ticket to the client.
-    Success,
-
-    /// Resumption callback was successful. Attempt an abbreviated handshake, and additionally
-    /// provide new session tickets to the peer.
-    ///
-    /// Session resumption short-circuits some security checks of a full-handshake, in exchange for
-    /// potential performance gains. For this reason, a session ticket should only be valid for a
-    /// limited time. Providing the peer with renewed session tickets allows them to continue
-    /// session resumption with the new tickets.
-    ///
-    /// # Note
-    ///
-    /// This is a decryption specific status code.
-    DecryptSuccessRenew,
-}
-
-impl From<TicketKeyCallbackResult> for c_int {
-    fn from(value: TicketKeyCallbackResult) -> Self {
-        match value {
-            TicketKeyCallbackResult::Error => -1,
-            TicketKeyCallbackResult::Noop => 0,
-            TicketKeyCallbackResult::Success => 1,
-            TicketKeyCallbackResult::DecryptSuccessRenew => 2,
-        }
-    }
-}
-
 #[derive(Hash, Copy, Clone, PartialOrd, Ord, Eq, PartialEq, Debug)]
 pub struct SslInfoCallbackAlert(c_int);
 
@@ -1406,56 +1333,6 @@ impl SslContextBuilder {
                 Some(raw_sni),
             ))?;
         }
-        Ok(())
-    }
-
-    /// Configures a custom session ticket key callback for session resumption.
-    ///
-    /// Session Resumption uses the security context (aka. session tickets) of a previous
-    /// connection to establish a new connection via an abbreviated handshake. Skipping portions of
-    /// a handshake can potentially yield performance gains.
-    ///
-    /// An attacker that compromises a server's session ticket key can impersonate the server and,
-    /// prior to TLS 1.3, retroactively decrypt all application traffic from sessions using that
-    /// ticket key. Thus ticket keys must be regularly rotated for forward secrecy.
-    ///
-    /// CipherCtx and HmacCtx are guaranteed to be initialized.
-    ///
-    /// # Safety
-    ///
-    /// The application is responsible for correctly setting the key_name, iv, encryption context
-    /// and hmac context. See the [`SSL_CTX_set_tlsext_ticket_key_cb`] docs for additional info.
-    ///
-    /// [`SSL_CTX_set_tlsext_ticket_key_cb`]: https://commondatastorage.googleapis.com/chromium-boringssl-docs/ssl.h.html#SSL_CTX_set_tlsext_ticket_key_cb
-    ///
-    /// # Errors
-    /// The context does not support X.509 certificates.
-    ///
-    ///
-    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
-    #[corresponds(SSL_CTX_set_tlsext_ticket_key_cb)]
-    pub unsafe fn set_ticket_key_callback<F>(&mut self, callback: F) -> Result<(), ErrorStack>
-    where
-        F: Fn(
-                &SslRef,
-                TicketKeyMode<'_>,
-                &mut CipherCtxRef,
-                &mut HmacCtxRef,
-            ) -> TicketKeyCallbackResult
-            + 'static
-            + Sync
-            + Send,
-    {
-        self.ctx.check_x509()?;
-
-        // SAFETY: The registered ticket callback is owned in context extra data before the native callback hooks are installed.
-        unsafe {
-            self.replace_ex_data(TICKET_KEY_INDEX.register()?, Box::new(callback))?;
-            cvt(ffi::SSL_CTX_set_tlsext_ticket_key_cb(
-                self.as_ptr(),
-                Some(raw_ticket_key),
-            ))?;
-        };
         Ok(())
     }
 
