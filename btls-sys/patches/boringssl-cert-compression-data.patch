@@ -1,8 +1,8 @@
 diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
-index b361ac72c..97f989809 100644
+index 30de8343b..ed08215c4 100644
 --- a/include/openssl/ssl.h
 +++ b/include/openssl/ssl.h
-@@ -3862,4 +3862,23 @@ OPENSSL_EXPORT int SSL_CTX_add_cert_compression_alg(
+@@ -3885,4 +3885,23 @@ OPENSSL_EXPORT int SSL_CTX_add_cert_compression_alg(
  
  
 +// The data-aware callbacks have the same contracts as the callbacks above,
@@ -45,10 +45,10 @@ index 1c115b859..8b600c316 100644
          if (i < best_index) {
            best_index = i;
 diff --git a/ssl/internal.h b/ssl/internal.h
-index 2137ec35b..0233a2c01 100644
+index aba0b4565..09c255ae9 100644
 --- a/ssl/internal.h
 +++ b/ssl/internal.h
-@@ -2934,5 +2934,27 @@ struct CertCompressionAlg {
+@@ -2951,5 +2951,27 @@ struct CertCompressionAlg {
    ssl_cert_compression_func_t compress = nullptr;
    ssl_cert_decompression_func_t decompress = nullptr;
 +  ssl_cert_compression_with_data_func_t compress_with_data = nullptr;
@@ -149,15 +149,19 @@ index 394115665..359dff5a2 100644
  }
  
 diff --git a/ssl/tls13_both.cc b/ssl/tls13_both.cc
-index 87f6b9c57..929ae6775 100644
+index 87f6b9c57..6857916d6 100644
 --- a/ssl/tls13_both.cc
 +++ b/ssl/tls13_both.cc
-@@ -131,13 +131,13 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
+@@ -131,13 +131,16 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
      }
  
 -    ssl_cert_decompression_func_t decompress = nullptr;
+-    for (const auto &alg : ssl->ctx->cert_compression_algs) {
++    // Keep the registration and its application data alive even if a native
++    // callback changes the connection's current context.
++    auto compression_ctx = UpRef(ssl->ctx);
 +    const CertCompressionAlg *algorithm = nullptr;
-     for (const auto &alg : ssl->ctx->cert_compression_algs) {
++    for (const auto &alg : compression_ctx->cert_compression_algs) {
        if (alg.alg_id == alg_id) {
 -        decompress = alg.decompress;
 +        algorithm = &alg;
@@ -169,21 +173,30 @@ index 87f6b9c57..929ae6775 100644
 +    if (algorithm == nullptr || !algorithm->CanDecompress()) {
        ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_ILLEGAL_PARAMETER);
        OPENSSL_PUT_ERROR(SSL, SSL_R_UNKNOWN_CERT_COMPRESSION_ALG);
-@@ -147,5 +147,5 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
+@@ -147,5 +150,5 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
  
      CRYPTO_BUFFER *decompressed_ptr = nullptr;
 -    if (!decompress(ssl, &decompressed_ptr, uncompressed_len,
 +    if (!algorithm->Decompress(ssl, &decompressed_ptr, uncompressed_len,
                      CBS_data(&compressed), CBS_len(&compressed))) {
        ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_DECODE_ERROR);
-@@ -590,5 +590,5 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
+@@ -582,6 +585,7 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
+   }
+ 
++  auto compression_ctx = UpRef(ssl->ctx);
+   const CertCompressionAlg *alg = nullptr;
+-  for (const auto &candidate : ssl->ctx->cert_compression_algs) {
++  for (const auto &candidate : compression_ctx->cert_compression_algs) {
+     if (candidate.alg_id == hs->cert_compression_alg_id) {
+       alg = &candidate;
+@@ -590,5 +594,5 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
    }
  
 -  if (alg == nullptr || alg->compress == nullptr) {
 +  if (alg == nullptr || !alg->CanCompress()) {
      OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
      return false;
-@@ -617,5 +617,5 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
+@@ -617,5 +621,5 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
      }
    } else {
 -    if (!alg->compress(ssl, &compressed, msg.data(), msg.size())) {

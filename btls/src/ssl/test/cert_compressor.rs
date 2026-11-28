@@ -184,3 +184,47 @@ fn native_compression_registration_dispatches_by_algorithm_and_owns_state() {
     assert_eq!(Arc::strong_count(&chosen_decompress), 1);
     assert_eq!(Arc::strong_count(&unused), 1);
 }
+
+#[test]
+fn certificate_compression_advertisement_limit_is_checked_at_registration() {
+    use crate::{
+        ffi,
+        ssl::{SslContext, SslMethod},
+    };
+    use foreign_types::ForeignTypeRef;
+    unsafe extern "C" fn unused_decompress(
+        _: *mut ffi::SSL,
+        _: *mut *mut ffi::CRYPTO_BUFFER,
+        _: usize,
+        _: *const u8,
+        _: usize,
+    ) -> libc::c_int {
+        0
+    }
+    let context = SslContext::builder(SslMethod::tls()).unwrap();
+    // SAFETY: the unpublished context is exclusively owned by the test. The
+    // native callback has static lifetime and no handshake invokes it.
+    unsafe {
+        for id in 1..=127 {
+            assert_eq!(
+                ffi::SSL_CTX_add_cert_compression_alg(
+                    context.as_ptr(),
+                    id,
+                    None,
+                    Some(unused_decompress)
+                ),
+                1
+            );
+        }
+        assert_eq!(
+            ffi::SSL_CTX_add_cert_compression_alg(
+                context.as_ptr(),
+                128,
+                None,
+                Some(unused_decompress)
+            ),
+            0
+        );
+        assert!(!crate::error::ErrorStack::get().errors().is_empty());
+    }
+}
