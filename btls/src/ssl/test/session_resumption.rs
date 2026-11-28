@@ -1,11 +1,11 @@
 use super::server::Server;
 use crate::asn1::Asn1Time;
 use crate::bn::BigNum;
+use crate::error::ErrorStack;
 use crate::pkey::PKey;
 use crate::sign::Signer;
 use crate::ssl::ClientSession;
 use crate::ssl::ConnectConfiguration;
-use crate::ssl::HmacCtxRef;
 use crate::ssl::SslMethod;
 use crate::ssl::SslRef;
 use crate::ssl::SslSession;
@@ -15,9 +15,7 @@ use crate::ssl::SslVerifyMode;
 use crate::ssl::SslVersion;
 use crate::ssl::test::MessageDigest;
 use crate::ssl::{SslConnector, SslConnectorBuilder};
-use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
-use crate::symm::Cipher;
-use crate::symm::CipherCtxRef;
+use crate::ssl::{TicketKey, TicketKeyProvider, TicketRenewal};
 use crate::x509::extension::SubjectAlternativeName;
 use crate::x509::{X509, X509Name};
 use std::fs;
@@ -26,11 +24,6 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-
-static SUCCESS_ENCRYPTION_CALLED_BACK: AtomicU8 = AtomicU8::new(0);
-static SUCCESS_DECRYPTION_CALLED_BACK: AtomicU8 = AtomicU8::new(0);
-static NOOP_ENCRYPTION_CALLED_BACK: AtomicU8 = AtomicU8::new(0);
-static NOOP_DECRYPTION_CALLED_BACK: AtomicU8 = AtomicU8::new(0);
 
 #[test]
 fn resume_session() {
@@ -637,195 +630,143 @@ fn cached_session_uses_current_native_verification_time() {
     stream.read_exact(&mut [0]).unwrap();
 }
 
-#[test]
-fn custom_callback_success() {
-    custom_callback_roundtrip(
-        test_success_tickey_key_callback,
-        &SUCCESS_ENCRYPTION_CALLED_BACK,
-        &SUCCESS_DECRYPTION_CALLED_BACK,
-        true,
-    );
+#[derive(Default)]
+struct TicketKeys {
+    current: Option<TicketKey>,
+    previous: Option<TicketKey>,
+}
+
+struct TestTicketProvider(Arc<Mutex<TicketKeys>>);
+
+impl TicketKeyProvider for TestTicketProvider {
+    fn issuing_key(&self, _: &SslRef) -> Result<Option<TicketKey>, ErrorStack> {
+        Ok(self.0.lock().unwrap().current.clone())
+    }
+
+    fn decryption_key(
+        &self,
+        _: &SslRef,
+        name: &[u8; 16],
+    ) -> Result<Option<(TicketKey, TicketRenewal)>, ErrorStack> {
+        let keys = self.0.lock().unwrap();
+        Ok([
+            (keys.current.as_ref(), TicketRenewal::Keep),
+            (keys.previous.as_ref(), TicketRenewal::Renew),
+        ]
+        .into_iter()
+        .find_map(|(key, renewal)| {
+            key.filter(|key| key.name() == name)
+                .map(|key| (key.clone(), renewal))
+        }))
+    }
 }
 
 #[test]
-fn custom_callback_unrecognized_decryption_ticket() {
-    custom_callback_roundtrip(
-        test_noop_tickey_key_callback,
-        &NOOP_ENCRYPTION_CALLED_BACK,
-        &NOOP_DECRYPTION_CALLED_BACK,
-        false,
-    );
-}
-
-fn custom_callback_roundtrip(
-    callback: fn(
-        &SslRef,
-        TicketKeyMode<'_>,
-        &mut CipherCtxRef,
-        &mut HmacCtxRef,
-    ) -> TicketKeyCallbackResult,
-    encryptions: &AtomicU8,
-    decryptions: &AtomicU8,
-    resumed: bool,
-) {
-    let session_ticket = std::sync::Arc::new(OnceLock::new());
-    let received = std::sync::Arc::new(AtomicU8::new(0));
-
-    let mut server = Server::builder();
-    server.expected_connections_count(2);
-    unsafe {
-        server.ctx().set_ticket_key_callback(callback).unwrap();
-    };
-    let server = server.build();
-
-    let mut client = server.client();
-    client
-        .ctx()
-        .set_session_cache_mode(SslSessionCacheMode::CLIENT);
-    let ticket_out = session_ticket.clone();
-    let received_out = received.clone();
-    client
-        .ctx()
-        .set_new_session_callback(move |_, session| {
-            received_out.fetch_add(1, Ordering::SeqCst);
-            // The server sends multiple session tickets but we only care to retrieve one.
-            let _ = ticket_out.set(session);
-        })
+fn ticket_provider_replacement_and_clear_release_state() {
+    let keys = Arc::new(Mutex::new(TicketKeys::default()));
+    let mut ctx = crate::ssl::SslContext::builder(SslMethod::tls()).unwrap();
+    ctx.set_ticket_key_provider(TestTicketProvider(Arc::clone(&keys)))
         .unwrap();
-    let ssl_stream = client.connect();
-
-    assert!(!ssl_stream.ssl().session_reused());
-    assert!(session_ticket.get().is_some());
-    assert_eq!(encryptions.load(Ordering::SeqCst), 2);
-    assert_eq!(decryptions.load(Ordering::SeqCst), 0);
-    assert_eq!(received.load(Ordering::SeqCst), 2);
-
-    // Retrieve the session ticket
-    let session_ticket = session_ticket.get().unwrap();
-
-    // Attempt to resume the connection using the session ticket
-    let client_2 = server.client();
-    let mut ssl_builder = client_2.build().builder();
-    unsafe { ssl_builder.ssl().set_session(session_ticket).unwrap() };
-    let ssl_stream_2 = ssl_builder.connect();
-
-    assert_eq!(ssl_stream_2.ssl().session_reused(), resumed);
-    assert_eq!(encryptions.load(Ordering::SeqCst), 4);
-    assert_eq!(decryptions.load(Ordering::SeqCst), 1);
+    assert_eq!(Arc::strong_count(&keys), 2);
+    ctx.set_ticket_key_provider(TestTicketProvider(Arc::default()))
+        .unwrap();
+    assert_eq!(Arc::strong_count(&keys), 1);
+    ctx.set_ticket_key_provider(TestTicketProvider(Arc::clone(&keys)))
+        .unwrap();
+    ctx.clear_ticket_key_provider().unwrap();
+    assert_eq!(Arc::strong_count(&keys), 1);
 }
 
-// Successfully return a session ticket in encryption mode but return a
-// TicketKeyCallbackResult::Noop in decryption mode.
-fn test_noop_tickey_key_callback(
-    _ssl: &SslRef,
-    mode: TicketKeyMode<'_>,
-    evp_ctx: &mut CipherCtxRef,
-    hmac_ctx: &mut HmacCtxRef,
-) -> TicketKeyCallbackResult {
-    // These should only be used for testing purposes.
-    const TEST_KEY_NAME: [u8; 16] = [5; 16];
-    const TEST_CBC_IV: [u8; ffi::EVP_MAX_IV_LENGTH as usize] = [1; ffi::EVP_MAX_IV_LENGTH as usize];
-    const TEST_AES_128_CBC_KEY: [u8; 16] = [2; 16];
-    const TEST_HMAC_KEY: [u8; 32] = [3; 32];
-
-    let digest = MessageDigest::sha256();
-    let cipher = Cipher::aes_128_cbc();
-
-    match mode {
-        TicketKeyMode::Encrypt { key_name, iv } => {
-            NOOP_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
-
-            // Ensure key_name and iv are initialized and set test values.
-            assert_eq!(key_name, &[0; 16]);
-            assert_eq!(iv, &[0; 16]);
-            key_name.copy_from_slice(&TEST_KEY_NAME);
-            iv.copy_from_slice(&TEST_CBC_IV);
-
-            // Set the encryption context.
-            evp_ctx
-                .init(
-                    cipher,
-                    crate::symm::Mode::Encrypt,
-                    &TEST_AES_128_CBC_KEY,
-                    Some(&TEST_CBC_IV),
-                )
-                .unwrap();
-
-            // Set the hmac context.
-            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
-
-            TicketKeyCallbackResult::Success
+#[test]
+fn ticket_provider_rotates_renews_and_retires_keys() {
+    for version in [SslVersion::TLS1_2, SslVersion::TLS1_3] {
+        let old_key = TicketKey::from_keys([1; 16], &[2; 16], &[3; 32]).unwrap();
+        let new_key = TicketKey::generate().unwrap();
+        let keys = Arc::new(Mutex::new(TicketKeys {
+            current: Some(old_key),
+            previous: None,
+        }));
+        let mut server = Server::builder();
+        server.ctx().set_min_proto_version(Some(version)).unwrap();
+        server.ctx().set_max_proto_version(Some(version)).unwrap();
+        server
+            .ctx()
+            .set_ticket_key_provider(TestTicketProvider(Arc::clone(&keys)))
+            .unwrap();
+        server.expected_connections_count(4);
+        let server = server.build();
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let mut connector = trusted_connector();
+        collect_sessions(&mut connector, &sessions);
+        let connector = connector.build();
+        let old_session = issue_session(
+            connector.configure().unwrap(),
+            &server,
+            "foobar.com",
+            &sessions,
+        );
+        {
+            let mut keys = keys.lock().unwrap();
+            keys.previous = keys.current.replace(new_key);
         }
-        TicketKeyMode::Decrypt { key_name, iv: _ } => {
-            NOOP_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
 
-            // Check key_name matches.
-            assert_eq!(key_name, &TEST_KEY_NAME);
+        // Old keys resume and request a ticket encrypted with the new key.
+        let mut stream = connector
+            .configure()
+            .unwrap()
+            .client_session(old_session.clone())
+            .connect("foobar.com", server.connect_tcp())
+            .unwrap();
+        assert!(stream.ssl().session_reused());
+        stream.read_exact(&mut [0]).unwrap();
+        let renewed = sessions.lock().unwrap().drain(..).next_back().unwrap();
+        drop(stream);
 
-            TicketKeyCallbackResult::Noop
-        }
+        // A retired key is not a fatal error, but cannot resume.
+        keys.lock().unwrap().previous = None;
+        let mut stream = connector
+            .configure()
+            .unwrap()
+            .client_session(old_session)
+            .connect("foobar.com", server.connect_tcp())
+            .unwrap();
+        assert!(!stream.ssl().session_reused());
+        stream.read_exact(&mut [0]).unwrap();
+        drop(stream);
+
+        // The renewed ticket remains usable after retiring the old key.
+        let mut stream = connector
+            .configure()
+            .unwrap()
+            .client_session(renewed)
+            .connect("foobar.com", server.connect_tcp())
+            .unwrap();
+        assert!(stream.ssl().session_reused());
+        stream.read_exact(&mut [0]).unwrap();
     }
 }
 
-// Custom callback to encrypt and decrypt session tickets
-fn test_success_tickey_key_callback(
-    _ssl: &SslRef,
-    mode: TicketKeyMode<'_>,
-    evp_ctx: &mut CipherCtxRef,
-    hmac_ctx: &mut HmacCtxRef,
-) -> TicketKeyCallbackResult {
-    // These should only be used for testing purposes.
-    const TEST_KEY_NAME: [u8; 16] = [5; 16];
-    const TEST_CBC_IV: [u8; ffi::EVP_MAX_IV_LENGTH as usize] = [1; ffi::EVP_MAX_IV_LENGTH as usize];
-    const TEST_AES_128_CBC_KEY: [u8; 16] = [2; 16];
-    const TEST_HMAC_KEY: [u8; 32] = [3; 32];
-
-    let digest = MessageDigest::sha256();
-    let cipher = Cipher::aes_128_cbc();
-
-    match mode {
-        TicketKeyMode::Encrypt { key_name, iv } => {
-            SUCCESS_ENCRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
-
-            // Ensure key_name and iv are initialized and set test values.
-            assert_eq!(key_name, &[0; 16]);
-            assert_eq!(iv, &[0; 16]);
-            key_name.copy_from_slice(&TEST_KEY_NAME);
-            iv.copy_from_slice(&TEST_CBC_IV);
-
-            // Set the encryption context.
-            evp_ctx
-                .init(
-                    cipher,
-                    crate::symm::Mode::Encrypt,
-                    &TEST_AES_128_CBC_KEY,
-                    Some(&TEST_CBC_IV),
-                )
-                .unwrap();
-
-            // Set the hmac context.
-            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
-        }
-        TicketKeyMode::Decrypt { key_name, iv } => {
-            SUCCESS_DECRYPTION_CALLED_BACK.fetch_add(1, Ordering::SeqCst);
-
-            // Check key_name matches.
-            assert_eq!(key_name, &TEST_KEY_NAME);
-
-            // Set the decryption context.
-            evp_ctx
-                .init(
-                    cipher,
-                    crate::symm::Mode::Decrypt,
-                    &TEST_AES_128_CBC_KEY,
-                    Some(iv),
-                )
-                .unwrap();
-
-            // Set the hmac context.
-            hmac_ctx.init(&TEST_HMAC_KEY, &digest).unwrap();
-        }
-    }
-
-    TicketKeyCallbackResult::Success
+#[test]
+fn ticket_provider_can_decline_issuance() {
+    let mut server = Server::builder();
+    server
+        .ctx()
+        .set_min_proto_version(Some(SslVersion::TLS1_3))
+        .unwrap();
+    server
+        .ctx()
+        .set_ticket_key_provider(TestTicketProvider(Arc::default()))
+        .unwrap();
+    let server = server.build();
+    let sessions = Arc::new(Mutex::new(Vec::new()));
+    let mut connector = trusted_connector();
+    collect_sessions(&mut connector, &sessions);
+    let mut stream = connector
+        .build()
+        .configure()
+        .unwrap()
+        .connect("foobar.com", server.connect_tcp())
+        .unwrap();
+    stream.read_exact(&mut [0]).unwrap();
+    assert!(sessions.lock().unwrap().is_empty());
 }

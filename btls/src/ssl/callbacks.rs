@@ -5,7 +5,7 @@ use super::{
     ALPN_INDEX, CTX_CERT_VERIFY_INDEX, CTX_CUSTOM_VERIFY_INDEX, CTX_VERIFY_INDEX,
     GET_SESSION_INDEX, INFO_INDEX, KEYLOG_INDEX, PSK_CLIENT_INDEX, PSK_SERVER_INDEX,
     REMOVE_SESSION_INDEX, SELECT_CERT_INDEX, SSL_CUSTOM_VERIFY_INDEX, SSL_VERIFY_INDEX,
-    STATUS_INDEX, ServerNameCallback, TICKET_KEY_INDEX,
+    STATUS_INDEX, ServerNameCallback,
 };
 use super::{
     AlpnError, CertificateCompressor, ClientHello, GetSessionPendingError, PrivateKeyMethod,
@@ -15,9 +15,6 @@ use super::{
 };
 use crate::error::ErrorStack;
 use crate::ffi;
-use crate::hmac::HmacCtxRef;
-use crate::ssl::{TicketKeyCallbackResult, TicketKeyMode};
-use crate::symm::CipherCtxRef;
 use crate::util::{catch_native, native_input};
 use crate::x509::X509StoreContextRef;
 use foreign_types::ForeignType;
@@ -393,72 +390,6 @@ pub(super) unsafe extern "C" fn raw_sni(
         Some(Err(error)) => error.0,
         None => ffi::SSL_TLSEXT_ERR_ALERT_FATAL,
     }
-}
-
-pub(super) unsafe extern "C" fn raw_ticket_key(
-    ssl: *mut ffi::SSL,
-    key_name: *mut u8,
-    iv: *mut u8,
-    evp_ctx: *mut ffi::EVP_CIPHER_CTX,
-    hmac_ctx: *mut ffi::HMAC_CTX,
-    encrypt: c_int,
-) -> c_int {
-    if ssl.is_null()
-        || key_name.is_null()
-        || iv.is_null()
-        || evp_ctx.is_null()
-        || hmac_ctx.is_null()
-    {
-        return TicketKeyCallbackResult::Error.into();
-    }
-    // SAFETY: ticket processing borrows the live SSL and provides initialized
-    // uniquely borrowed cipher/HMAC contexts.
-    let ssl = unsafe { SslRef::from_ptr(ssl) };
-    // SAFETY: The cipher context is non-null and exclusively borrowed during ticket processing.
-    let evp_ctx = unsafe { CipherCtxRef::from_ptr_mut(evp_ctx) };
-    // SAFETY: The HMAC context is non-null, disjoint from the cipher context, and exclusive for this callback.
-    let hmac_ctx = unsafe { HmacCtxRef::from_ptr_mut(hmac_ctx) };
-    let key_name = key_name.cast::<[u8; 16]>();
-    let iv = iv.cast::<[u8; ffi::EVP_MAX_IV_LENGTH as usize]>();
-    let mode = match encrypt {
-        1 => {
-            // SAFETY: encryption receives writable output arrays which are
-            // uninitialized on entry. Initialize each before mutable borrowing.
-            unsafe {
-                key_name.write([0; 16]);
-                iv.write([0; ffi::EVP_MAX_IV_LENGTH as usize]);
-                TicketKeyMode::Encrypt {
-                    key_name: &mut *key_name,
-                    iv: &mut *iv,
-                }
-            }
-        }
-        0 => {
-            // SAFETY: decryption receives pointers into immutable ticket input
-            // (native API const_casts them). Expose shared references only.
-            unsafe {
-                TicketKeyMode::Decrypt {
-                    key_name: &*key_name,
-                    iv: &*iv,
-                }
-            }
-        }
-        _ => return TicketKeyCallbackResult::Error.into(),
-    };
-
-    // BoringSSL always invokes the callback of the original session context,
-    // even if SNI has switched the connection's current context.
-    let result = catch_native(|| {
-        let Some(callback) = ssl.session_context().slot_data(&TICKET_KEY_INDEX) else {
-            return TicketKeyCallbackResult::Error;
-        };
-        callback(ssl, mode, evp_ctx, hmac_ctx)
-    })
-    .unwrap_or(TicketKeyCallbackResult::Error);
-    if encrypt == 1 && result == TicketKeyCallbackResult::DecryptSuccessRenew {
-        return TicketKeyCallbackResult::Error.into();
-    }
-    result.into()
 }
 
 pub(super) unsafe extern "C" fn raw_alpn_select(
