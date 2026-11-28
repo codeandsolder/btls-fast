@@ -8,10 +8,10 @@ use super::{
     STATUS_INDEX, ServerNameCallback, TICKET_KEY_INDEX,
 };
 use super::{
-    AlpnError, CallbackRole, CertificateCompressor, ClientHello, ClientSession,
-    GetSessionPendingError, PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction,
-    SelectCertError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
-    SslInfoCallbackValue, SslRef, SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
+    AlpnError, CertificateCompressor, ClientHello, ClientSession, GetSessionPendingError,
+    PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction, SelectCertError, SslAlert,
+    SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode, SslInfoCallbackValue, SslRef,
+    SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
 use crate::error::ErrorStack;
 use crate::ffi;
@@ -766,44 +766,77 @@ pub(super) unsafe extern "C" fn raw_info_callback(ssl: *const ffi::SSL, mode: c_
     catch_native(|| callback(ssl, SslInfoCallbackMode(mode), value));
 }
 
-// Both native certificate-compression entry points need the same guarded
-// callback lookup and borrowed input. The closure may only return a boolean:
-// neither a borrowed native SSL value nor an input slice can escape this scope.
-//
+// The native algorithm registration directly owns the compressor, including
+// its concrete type's destructor. No context or global registry lookup occurs.
+pub(super) fn install_certificate_compressor<C: CertificateCompressor>(
+    context: &mut super::SslContextBuilder,
+    compressor: C,
+) -> Result<(), ErrorStack> {
+    let data = Box::into_raw(Box::new(compressor));
+    // SAFETY: the context is exclusive. The callback and destructor agree on
+    // C, and native assumes ownership of the data only on success.
+    let result = unsafe {
+        crate::cvt(ffi::SSL_CTX_add_cert_compression_alg_with_data(
+            context.as_ptr(),
+            C::ALGORITHM.0,
+            const {
+                if C::CAN_COMPRESS {
+                    Some(raw_ssl_cert_compress::<C>)
+                } else {
+                    None
+                }
+            },
+            const {
+                if C::CAN_DECOMPRESS {
+                    Some(raw_ssl_cert_decompress::<C>)
+                } else {
+                    None
+                }
+            },
+            data.cast(),
+            Some(free_certificate_compressor::<C>),
+        ))
+    };
+    if let Err(error) = result {
+        // SAFETY: a failed registration never takes ownership.
+        unsafe { drop(Box::from_raw(data)) };
+        return Err(error);
+    }
+    Ok(())
+}
+
+unsafe extern "C" fn free_certificate_compressor<C: CertificateCompressor>(data: *mut c_void) {
+    // SAFETY: the successful registration owns the exact Box<C>; native
+    // invokes this destructor once after the last context reference is gone.
+    let _ = catch_native(|| unsafe { drop(Box::from_raw(data.cast::<C>())) });
+}
+
 /// # Safety
-/// Non-null SSL and input pointers must remain live and readable for this
-/// synchronous native callback. A null input is allowed only for zero length.
+/// The registration supplies the live matching compressor; the input is
+/// readable for this synchronous invocation (null only for empty input).
 unsafe fn with_certificate_compressor<C: CertificateCompressor>(
-    ssl: *mut ffi::SSL,
+    compressor: *mut c_void,
     input: *const u8,
     input_len: usize,
     run: impl FnOnce(&C, &[u8]) -> bool,
 ) -> bool {
-    if ssl.is_null() {
-        return false;
-    }
-    // SAFETY: BoringSSL supplies a live exclusive SSL borrow for this callback.
-    let ssl = unsafe { SslRef::from_ptr_mut(ssl) };
-    let context = ssl.ssl_context();
-    let Some(compressor) = context
-        .callback::<Option<C>>(CallbackRole::Compression)
-        .and_then(Option::as_ref)
-    else {
+    // SAFETY: the registration binds this exact C and the context owns its box.
+    let Some(compressor) = (unsafe { compressor.cast::<C>().as_ref() }) else {
         return false;
     };
-    // SAFETY: The native caller provides the input for this synchronous callback;
-    // native_input checks its bounds and the null/empty representation.
+    // SAFETY: native provides the input for this synchronous callback.
     let Some(data) = (unsafe { native_input(input, input_len) }) else {
         return false;
     };
     catch_native(|| run(compressor, data)).unwrap_or(false)
 }
 
-pub(super) unsafe extern "C" fn raw_ssl_cert_compress<C>(
+unsafe extern "C" fn raw_ssl_cert_compress<C>(
     ssl: *mut ffi::SSL,
     out: *mut ffi::CBB,
     input: *const u8,
     input_len: usize,
+    compressor: *mut c_void,
 ) -> ::std::os::raw::c_int
 where
     C: CertificateCompressor,
@@ -819,7 +852,7 @@ where
     // SAFETY: Native SSL and input are live for the synchronous callback;
     // the output CBB is non-null and exclusively writable during compression.
     if !unsafe {
-        with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
+        with_certificate_compressor::<C>(compressor, input, input_len, |compressor, data| {
             compressor.compress(data, &mut writer).is_ok()
         })
     } {
@@ -829,12 +862,13 @@ where
     1
 }
 
-pub(super) unsafe extern "C" fn raw_ssl_cert_decompress<C>(
+unsafe extern "C" fn raw_ssl_cert_decompress<C>(
     ssl: *mut ffi::SSL,
     out: *mut *mut ffi::CRYPTO_BUFFER,
     uncompressed_len: usize,
     input: *const u8,
     input_len: usize,
+    compressor: *mut c_void,
 ) -> ::std::os::raw::c_int
 where
     C: CertificateCompressor,
@@ -850,7 +884,7 @@ where
     // Constructing the output only after validating the callback and input avoids
     // allocating the advertised decompressed size for malformed native input.
     if !unsafe {
-        with_certificate_compressor::<C>(ssl, input, input_len, |compressor, data| {
+        with_certificate_compressor::<C>(compressor, input, input_len, |compressor, data| {
             let Ok(mut buffer) = CryptoBufferBuilder::with_capacity(uncompressed_len) else {
                 return false;
             };

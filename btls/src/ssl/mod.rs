@@ -73,10 +73,10 @@ use std::path::Path;
 use std::ptr::{self, NonNull};
 use std::slice;
 use std::str;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 
 use crate::error::ErrorStack;
-use crate::ex_data::{Index, IndexRegistry, IndexSlot, replace_boxed};
+use crate::ex_data::{Index, IndexSlot, replace_boxed};
 use crate::hmac::HmacCtxRef;
 use crate::nid::Nid;
 #[cfg(feature = "rpk")]
@@ -476,14 +476,6 @@ impl NameType {
         self.0
     }
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum CallbackRole {
-    Compression,
-}
-
-static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
-    LazyLock::new(IndexRegistry::new);
 
 // Singleton context callbacks use one typed slot per native callback role.
 type ServerNameCallback =
@@ -2057,7 +2049,7 @@ impl SslContextBuilder {
     /// # Errors
     ///
     /// Returns an error if callback storage cannot be allocated or the algorithm cannot be registered.
-    #[corresponds(SSL_CTX_add_cert_compression_alg)]
+    #[corresponds(SSL_CTX_add_cert_compression_alg_with_data)]
     pub fn add_certificate_compression_algorithm<C>(
         &mut self,
         compressor: C,
@@ -2071,39 +2063,7 @@ impl SslContextBuilder {
                 "Either compression or decompression must be supported for algorithm to be registered"
             );
         };
-        let index = SslContext::register_callback::<Option<C>>(CallbackRole::Compression)?;
-        if self.ctx.ex_data(index).is_some_and(Option::is_some) {
-            return Err(ErrorStack::internal_error_str(
-                "compression algorithm already registered",
-            ));
-        }
-        self.set_ex_data(index, None)?;
-        // SAFETY: The native context is exclusively borrowed and receives
-        // static monomorphized callbacks. Callback state is held in its typed slot.
-        let success = unsafe {
-            ffi::SSL_CTX_add_cert_compression_alg(
-                self.as_ptr(),
-                C::ALGORITHM.0,
-                const {
-                    if C::CAN_COMPRESS {
-                        Some(callbacks::raw_ssl_cert_compress::<C>)
-                    } else {
-                        None
-                    }
-                },
-                const {
-                    if C::CAN_DECOMPRESS {
-                        Some(callbacks::raw_ssl_cert_decompress::<C>)
-                    } else {
-                        None
-                    }
-                },
-            ) == 1
-        };
-        if !success {
-            return Err(ErrorStack::get());
-        }
-        self.set_ex_data(index, Some(compressor))
+        callbacks::install_certificate_compressor(self, compressor)
     }
 
     /// Configures a custom private key method on the context.
@@ -2810,7 +2770,7 @@ impl fmt::Debug for SslContext {
 // Allocate a native index for the exact wrapper and payload type. The native
 // class-specific allocator installs the matching destructor.
 macro_rules! callback_indices {
-    ($native:ident, $allocate:ident $(, $registry:ident)?) => {
+    ($native:ident, $allocate:ident) => {
         /// Allocates a distinct typed extra-data index.
         ///
         /// # Errors
@@ -2825,14 +2785,6 @@ macro_rules! callback_indices {
                 Ok(Index::from_raw(idx))
             }
         }
-
-        $(
-        fn register_callback<T: 'static + Send + Sync>(
-            role: CallbackRole,
-        ) -> Result<Index<Self, T>, ErrorStack> {
-            $registry.register(role, Self::new_ex_index)
-        }
-        )?
     };
 }
 
@@ -2846,7 +2798,7 @@ impl SslContext {
         SslContextBuilder::new(method)
     }
 
-    callback_indices!(SSL_CTX_get_ex_new_index, get_new_idx, CONTEXT_CALLBACKS);
+    callback_indices!(SSL_CTX_get_ex_new_index, get_new_idx);
 
     /// Gets the list of supported ciphers for protocols before TLSv1.3.
     ///
@@ -2960,10 +2912,6 @@ impl SslContextRef {
 
     fn slot_data<T: 'static + Send + Sync>(&self, slot: &IndexSlot<SslContext, T>) -> Option<&T> {
         self.ex_data(slot.get()?)
-    }
-
-    fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
-        self.ex_data(CONTEXT_CALLBACKS.get(role)?)
     }
 
     // The caller must establish exclusive context ownership, as on a builder.

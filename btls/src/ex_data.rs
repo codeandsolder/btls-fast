@@ -1,8 +1,5 @@
 use crate::error::ErrorStack;
 use libc::{c_int, c_void};
-use std::any::TypeId;
-use std::collections::HashMap;
-use std::hash::Hash;
 use std::marker::PhantomData;
 use std::mem;
 use std::sync::{Mutex, OnceLock};
@@ -80,53 +77,6 @@ impl<O, T> IndexSlot<O, T> {
     }
 }
 
-// Native method tables use monomorphized callback entrypoints. Keep a
-// separate typed slot for each role and callback type, and never allocate
-// a new index from a callback lookup.
-pub(crate) struct IndexRegistry<O, K> {
-    indices: Mutex<HashMap<(K, TypeId), c_int>>,
-    owner: PhantomData<fn(O) -> O>,
-}
-
-impl<O, K: Copy + Eq + Hash> IndexRegistry<O, K> {
-    pub fn new() -> Self {
-        Self {
-            indices: Mutex::new(HashMap::new()),
-            owner: PhantomData,
-        }
-    }
-
-    pub fn register<T: 'static + Send + Sync>(
-        &self,
-        role: K,
-        allocate: fn() -> Result<Index<O, T>, ErrorStack>,
-    ) -> Result<Index<O, T>, ErrorStack> {
-        let mut indices = self
-            .indices
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let idx = match indices.entry((role, TypeId::of::<T>())) {
-            std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
-            std::collections::hash_map::Entry::Vacant(entry) => *entry.insert(allocate()?.as_raw()),
-        };
-        drop(indices);
-        // SAFETY: this key is inserted only by the allocator of the exact
-        // owner/type pair. The role further distinguishes callback slots.
-        Ok(unsafe { Index::from_raw(idx) })
-    }
-
-    pub fn get<T: 'static + Send + Sync>(&self, role: K) -> Option<Index<O, T>> {
-        let indices = self
-            .indices
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let &idx = indices.get(&(role, TypeId::of::<T>()))?;
-        drop(indices);
-        // SAFETY: register establishes the exact native owner and boxed type.
-        Some(unsafe { Index::from_raw(idx) })
-    }
-}
-
 // The caller must establish a live, uniquely accessible native object, a
 // matching typed ex-data slot, and a setter which transfers ownership only
 // on success, leaving the slot unchanged on failure.
@@ -164,33 +114,6 @@ mod tests {
         fn drop(&mut self) {
             self.0.fetch_add(1, Ordering::Relaxed);
         }
-    }
-
-    #[test]
-    fn callback_indices_distinguish_roles_and_types() {
-        use crate::ssl::SslContext;
-        let registry = IndexRegistry::<SslContext, u8>::new();
-        assert!(registry.get::<u8>(1).is_none());
-        let first = registry
-            .register::<u8>(1, SslContext::new_ex_index)
-            .unwrap();
-        let second = registry
-            .register::<u8>(2, SslContext::new_ex_index)
-            .unwrap();
-        let different_type = registry
-            .register::<u16>(1, SslContext::new_ex_index)
-            .unwrap();
-        assert_ne!(first.as_raw(), second.as_raw());
-        assert_ne!(first.as_raw(), different_type.as_raw());
-        assert_eq!(registry.get::<u8>(1).unwrap().as_raw(), first.as_raw());
-        assert_eq!(
-            registry
-                .register::<u8>(1, SslContext::new_ex_index)
-                .unwrap()
-                .as_raw(),
-            first.as_raw()
-        );
-        assert!(registry.get::<u16>(2).is_none());
     }
 
     #[test]
