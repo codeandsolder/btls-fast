@@ -328,8 +328,8 @@ impl SslPair {
         let client = SslHandle::new(client_context);
         let server = SslHandle::new(server_context);
         unsafe {
-            ffi::SSL_set_connect_state(client.as_ptr());
-            ffi::SSL_set_accept_state(server.as_ptr());
+            assert_eq!(ffi::SSL_set_connect_state(client.as_ptr()), 1);
+            assert_eq!(ffi::SSL_set_accept_state(server.as_ptr()), 1);
         }
 
         let mut client_bio = ptr::null_mut();
@@ -647,7 +647,9 @@ fn negotiate_with_openssl(addr: std::net::SocketAddr, cipher: &AddedCipher) -> R
     let context = SslContext::client(cipher);
     let ssl = SslHandle::new(&context);
     unsafe {
-        ffi::SSL_set_connect_state(ssl.as_ptr());
+        if ffi::SSL_set_connect_state(ssl.as_ptr()) != 1 {
+            return Err("SSL_set_connect_state failed".to_owned());
+        }
         if ffi::SSL_set_fd(ssl.as_ptr(), stream.as_raw_fd()) != 1 {
             return Err("SSL_set_fd failed".to_owned());
         }

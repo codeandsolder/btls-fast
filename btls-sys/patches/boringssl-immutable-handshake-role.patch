@@ -1,0 +1,139 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index c81312548..a27d9154e 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -112,11 +112,15 @@ OPENSSL_EXPORT SSL_CTX *SSL_get0_session_context(const SSL *ssl);
+ // method and zero for a buffer-only context.
+ OPENSSL_EXPORT int SSL_CTX_has_x509_support(const SSL_CTX *ctx);
+ 
+-// SSL_set_connect_state configures `ssl` to be a client.
+-OPENSSL_EXPORT void SSL_set_connect_state(SSL *ssl);
++// SSL_set_connect_state configures `ssl` to be a client. Returns one on
++// success (including if already configured as a client), or zero if it
++// was configured as a server. A connection's role cannot be changed.
++OPENSSL_EXPORT int SSL_set_connect_state(SSL *ssl);
+ 
+-// SSL_set_accept_state configures `ssl` to be a server.
+-OPENSSL_EXPORT void SSL_set_accept_state(SSL *ssl);
++// SSL_set_accept_state configures `ssl` to be a server. Returns one on
++// success (including if already configured as a server), or zero if it
++// was configured as a client.
++OPENSSL_EXPORT int SSL_set_accept_state(SSL *ssl);
+ 
+ // SSL_is_server returns one if `ssl` is configured as a server and zero
+ // otherwise.
+@@ -249,10 +253,14 @@ OPENSSL_EXPORT int SSL_do_handshake(SSL *ssl);
+ 
+ // SSL_connect configures `ssl` as a client, if unconfigured, and calls
+ // `SSL_do_handshake`.
++// It returns -1 without advancing the handshake if the connection has
++// already been configured for the opposite role.
+ OPENSSL_EXPORT int SSL_connect(SSL *ssl);
+ 
+ // SSL_accept configures `ssl` as a server, if unconfigured, and calls
+ // `SSL_do_handshake`.
++// It returns -1 without advancing the handshake if the connection has
++// already been configured for the opposite role.
+ OPENSSL_EXPORT int SSL_accept(SSL *ssl);
+ 
+ // SSL_read reads up to `num` bytes from `ssl` into `buf`. It implicitly runs
+diff --git a/ssl/handoff.cc b/ssl/handoff.cc
+index 89318de98..c8e4a521d 100644
+--- a/ssl/handoff.cc
++++ b/ssl/handoff.cc
+@@ -279,6 +279,13 @@ static bool uses_disallowed_feature(const SSLImpl *ssl) {
+ 
+ bool SSL_apply_handoff(SSL *ssl, Span<const uint8_t> handoff) {
+   auto *ssl_impl = FromOpaque(ssl);
++  if (!ssl_impl->config || !ssl_impl->s3->hs ||
++      ssl_impl->s3->hs->state != 0 ||
++      ssl_impl->s3->initial_handshake_complete ||
++      (ssl_impl->do_handshake != nullptr && !ssl_impl->server)) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return false;
++  }
+   if (uses_disallowed_feature(ssl_impl)) {
+     return false;
+   }
+@@ -298,7 +305,9 @@ bool SSL_apply_handoff(SSL *ssl, Span<const uint8_t> handoff) {
+     return false;
+   }
+ 
+-  SSL_set_accept_state(ssl_impl);
++  if (!SSL_set_accept_state(ssl_impl)) {
++    return false;
++  }
+ 
+   SSL3_STATE *const s3 = ssl_impl->s3;
+   s3->v2_hello_done = true;
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 173911739..77657ccf0 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -605,17 +605,24 @@ SSL_CONFIG::~SSL_CONFIG() {
+ 
+ void SSL_free(SSL *ssl) { Delete(FromOpaque(ssl)); }
+ 
+-void SSL_set_connect_state(SSL *ssl) {
+-  auto *ssl_impl = FromOpaque(ssl);
+-  ssl_impl->server = false;
+-  ssl_impl->do_handshake = ssl_client_handshake;
++static int ssl_set_role(SSL *ssl, bool server) {
++  auto *impl = FromOpaque(ssl);
++  const auto handshake = server ? ssl_server_handshake : ssl_client_handshake;
++  if (impl->do_handshake != nullptr) {
++    if (impl->do_handshake != handshake) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++      return 0;
++    }
++    return 1;
++  }
++  impl->server = server;
++  impl->do_handshake = handshake;
++  return 1;
+ }
+ 
+-void SSL_set_accept_state(SSL *ssl) {
+-  auto *ssl_impl = FromOpaque(ssl);
+-  ssl_impl->server = true;
+-  ssl_impl->do_handshake = ssl_server_handshake;
+-}
++int SSL_set_connect_state(SSL *ssl) { return ssl_set_role(ssl, false); }
++
++int SSL_set_accept_state(SSL *ssl) { return ssl_set_role(ssl, true); }
+ 
+ void SSL_set0_rbio(SSL *ssl, BIO *rbio) { FromOpaque(ssl)->rbio.reset(rbio); }
+ 
+@@ -766,23 +773,20 @@ int SSL_do_handshake(SSL *ssl) {
+   return 1;
+ }
+ 
+-int SSL_connect(SSL *ssl) {
+-  if (FromOpaque(ssl)->do_handshake == nullptr) {
+-    // Not properly initialized yet
+-    SSL_set_connect_state(ssl);
++static int ssl_handshake_for_role(SSL *ssl, bool server) {
++  auto *impl = FromOpaque(ssl);
++  if (impl->do_handshake == nullptr || impl->server != server) {
++    ssl_reset_error_state(impl);
++    if (!ssl_set_role(ssl, server)) {
++      return -1;
++    }
+   }
+-
+   return SSL_do_handshake(ssl);
+ }
+ 
+-int SSL_accept(SSL *ssl) {
+-  if (FromOpaque(ssl)->do_handshake == nullptr) {
+-    // Not properly initialized yet
+-    SSL_set_accept_state(ssl);
+-  }
++int SSL_connect(SSL *ssl) { return ssl_handshake_for_role(ssl, false); }
+ 
+-  return SSL_do_handshake(ssl);
+-}
++int SSL_accept(SSL *ssl) { return ssl_handshake_for_role(ssl, true); }
+ 
+ static int ssl_do_post_handshake(SSLImpl *ssl, const SSLMessage &msg) {
+   if (ssl_protocol_version(ssl) >= TLS1_3_VERSION) {

@@ -1420,6 +1420,63 @@ fn cipher_rules_reject_invalid_configuration_without_replacing_current_list() {
 }
 
 #[test]
+fn handshake_role_is_immutable_and_wrong_role_calls_do_not_drive_io() {
+    let context = SslContext::builder(SslMethod::tls()).unwrap().build();
+    for server in [false, true] {
+        let mut ssl = Ssl::new(&context).unwrap();
+        if server {
+            ssl.set_accept_state().unwrap();
+            ssl.set_accept_state().unwrap();
+            assert!(ssl.set_connect_state().is_err());
+        } else {
+            ssl.set_connect_state().unwrap();
+            ssl.set_connect_state().unwrap();
+            assert!(ssl.set_accept_state().is_err());
+        }
+        assert_eq!(ssl.is_server(), server);
+
+        let mut stream = SslStream::new(ssl, io::Cursor::new(Vec::new())).unwrap();
+        let error = if server {
+            stream.connect().unwrap_err()
+        } else {
+            stream.accept().unwrap_err()
+        };
+        assert_eq!(error.code(), ssl::ErrorCode::SSL);
+        assert!(stream.get_ref().get_ref().is_empty());
+        assert_eq!(stream.ssl().is_server(), server);
+
+        let mut ssl = Ssl::new(&context).unwrap();
+        let transport = io::Cursor::new(Vec::new());
+        if server {
+            ssl.set_accept_state().unwrap();
+            assert!(ssl.setup_connect(transport).is_err());
+        } else {
+            ssl.set_connect_state().unwrap();
+            assert!(ssl.setup_accept(transport).is_err());
+        }
+    }
+}
+
+#[test]
+fn wrong_role_after_handshake_does_not_change_connection() {
+    let mut server = Server::builder();
+    server.io_cb(|mut stream| {
+        assert_eq!(stream.connect().unwrap_err().code(), ssl::ErrorCode::SSL);
+        assert!(stream.ssl().is_server());
+        stream.accept().unwrap();
+        stream.write_all(b"hello").unwrap();
+    });
+    let server = server.build();
+    let mut stream = server.client().connect();
+    assert_eq!(stream.accept().unwrap_err().code(), ssl::ErrorCode::SSL);
+    assert!(!stream.ssl().is_server());
+    stream.connect().unwrap();
+    let mut data = [0; 5];
+    stream.read_exact(&mut data).unwrap();
+    assert_eq!(&data, b"hello");
+}
+
+#[test]
 fn shutdown() {
     let mut server = Server::builder();
     server.io_cb(|mut s| {
