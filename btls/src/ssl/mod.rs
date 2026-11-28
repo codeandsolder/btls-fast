@@ -120,8 +120,8 @@ pub use self::ech_grease::{
 };
 pub use self::error::{Error, ErrorCode, HandshakeError};
 pub use self::quic::{QuicEncryptionLevel, QuicMethod, QuicMethodError};
-pub use self::ticket::{TicketKey, TicketKeyProvider, TicketRenewal};
 pub use self::session_encoding::SessionEncoding;
+pub use self::ticket::{TicketKey, TicketKeyProvider, TicketRenewal};
 
 mod async_callbacks;
 mod bio;
