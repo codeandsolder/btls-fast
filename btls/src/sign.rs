@@ -407,6 +407,29 @@ impl Signer<'_, Streaming> {
 }
 
 impl Signer<'_, OneShot> {
+    /// Signs a native object with this configured single-message operation.
+    /// # Safety
+    /// The target must be valid and exclusively owned for the supplied native
+    /// signing function, which must not retain either pointer after returning.
+    pub(crate) unsafe fn sign_native<T>(
+        self,
+        target: *mut T,
+        sign: unsafe extern "C" fn(*mut T, *mut ffi::EVP_MD_CTX) -> c_int,
+    ) -> Result<(), ErrorStack> {
+        // SAFETY: the caller guarantees the target and function contract. This
+        // owner keeps the digest context live even if the native function resets it.
+        unsafe { cvt(sign(target, self.md_ctx)) }
+    }
+
+    pub(crate) fn matches_key<T: HasPublic>(&self, key: &PKeyRef<T>) -> bool {
+        // SAFETY: the initialized signing context retains a live key; the
+        // supplied public key is borrowed for this comparison only.
+        unsafe {
+            let signing_key = ffi::EVP_PKEY_CTX_get0_pkey(self.pctx);
+            !signing_key.is_null() && ffi::EVP_PKEY_cmp(signing_key, key.as_ptr()) == 1
+        }
+    }
+
     /// Signs exactly `data_buf`, consuming the single-message operation and writing
     /// the signature into `sig_buf`.
     ///

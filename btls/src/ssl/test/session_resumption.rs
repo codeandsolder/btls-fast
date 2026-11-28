@@ -2,6 +2,7 @@ use super::server::Server;
 use crate::asn1::Asn1Time;
 use crate::bn::BigNum;
 use crate::pkey::PKey;
+use crate::sign::Signer;
 use crate::ssl::ClientSession;
 use crate::ssl::ConnectConfiguration;
 use crate::ssl::HmacCtxRef;
@@ -476,8 +477,9 @@ fn client_session_is_not_offered_after_its_chain_expires() {
         .build(&leaf.x509v3_context(Some(&ca), None))
         .unwrap();
     leaf.append_extension(&san).unwrap();
-    leaf.sign(&ca_key, MessageDigest::sha256()).unwrap();
-    let leaf = leaf.build();
+    let leaf = leaf
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &ca_key).unwrap())
+        .unwrap();
 
     let mut server = Server::builder();
     server.ctx().set_certificate(&leaf).unwrap();

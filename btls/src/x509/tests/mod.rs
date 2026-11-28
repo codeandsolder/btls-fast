@@ -6,6 +6,7 @@ use crate::hash::MessageDigest;
 use crate::nid::Nid;
 use crate::pkey::{PKey, Private};
 use crate::rsa::Rsa;
+use crate::sign::Signer;
 use crate::stack::Stack;
 use crate::x509::extension::{
     AuthorityKeyIdentifier, BasicConstraints, ExtendedKeyUsage, KeyUsage, SubjectAlternativeName,
@@ -24,13 +25,39 @@ fn pkey() -> PKey<Private> {
 }
 
 fn cert_with_dns_name(dns_name: &str) -> X509 {
+    let key = PKey::from_ec_key(
+        crate::ec::EcKey::generate(
+            &crate::ec::EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "test.example.com")
+        .unwrap();
+    let name = name.build().unwrap();
     let mut builder = X509::builder().unwrap();
+    builder.set_version(2).unwrap();
+    builder.set_subject_name(&name).unwrap();
+    builder.set_issuer_name(&name).unwrap();
+    builder.set_pubkey(&key).unwrap();
+    builder
+        .set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+        .unwrap();
+    builder
+        .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    builder
+        .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     let subject_alternative_name = SubjectAlternativeName::new()
         .dns(dns_name)
         .build(&builder.x509v3_context(None, None))
         .unwrap();
     builder.append_extension(&subject_alternative_name).unwrap();
-    builder.build()
+    builder
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &key).unwrap())
+        .unwrap()
 }
 
 #[test]
@@ -333,9 +360,9 @@ fn x509_builder() {
         .unwrap();
     builder.append_extension(&subject_alternative_name).unwrap();
 
-    builder.sign(&pkey, MessageDigest::sha256()).unwrap();
-
-    let x509 = builder.build();
+    let x509 = builder
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &pkey).unwrap())
+        .unwrap();
 
     assert!(pkey.public_eq(&x509.public_key().unwrap()));
     assert!(x509.verify(&pkey).unwrap());
@@ -448,12 +475,81 @@ fn x509_req_builder() {
     extensions.push(subject_alternative_name).unwrap();
     builder.add_extensions(&extensions).unwrap();
 
-    builder.sign(&pkey, MessageDigest::sha256()).unwrap();
-
-    let req = builder.build();
+    let req = builder
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &pkey).unwrap())
+        .unwrap();
     assert!(req.public_key().unwrap().public_eq(&pkey));
     assert_eq!(req.extensions().unwrap().len(), extensions.len());
     assert!(req.verify(&pkey).unwrap());
+}
+
+#[test]
+fn certificate_and_request_support_configured_signers() {
+    use crate::pkey::Id;
+    use crate::rsa::Padding;
+    use crate::sign::RsaPssSaltlen;
+
+    let rsa = pkey();
+    let ed25519 = PKey::generate(Id::ED25519).unwrap();
+    let mut name = X509Name::builder().unwrap();
+    name.append_entry_by_nid(Nid::COMMONNAME, "signing test")
+        .unwrap();
+    let name = name.build().unwrap();
+    fn configure(key: &PKey<Private>, algorithm: Nid) -> Signer<'_, crate::sign::OneShot> {
+        if algorithm == Nid::RSASSAPSS {
+            let mut signer = Signer::new_oneshot(MessageDigest::sha256(), key).unwrap();
+            signer.set_rsa_padding(Padding::PKCS1_PSS).unwrap();
+            signer.set_rsa_mgf1_md(MessageDigest::sha256()).unwrap();
+            signer
+                .set_rsa_pss_saltlen(RsaPssSaltlen::DIGEST_LENGTH)
+                .unwrap();
+            signer
+        } else {
+            Signer::new_without_digest(key).unwrap()
+        }
+    }
+    for (key, algorithm) in [(&rsa, Nid::RSASSAPSS), (&ed25519, Nid::ED25519)] {
+        let mut builder = X509::builder().unwrap();
+        builder.set_version(2).unwrap();
+        builder.set_subject_name(&name).unwrap();
+        builder.set_issuer_name(&name).unwrap();
+        builder.set_pubkey(key).unwrap();
+        builder
+            .set_serial_number(&BigNum::from_u32(1).unwrap().to_asn1_integer().unwrap())
+            .unwrap();
+        builder
+            .set_not_before(&Asn1Time::days_from_now(0).unwrap())
+            .unwrap();
+        builder
+            .set_not_after(&Asn1Time::days_from_now(1).unwrap())
+            .unwrap();
+        let certificate = builder.sign(configure(key, algorithm)).unwrap();
+        let certificate = X509::from_der(&certificate.to_der().unwrap()).unwrap();
+        assert_eq!(
+            certificate.signature_algorithm().object().unwrap().nid(),
+            algorithm
+        );
+        assert!(certificate.verify(key).unwrap());
+
+        let mut request = X509Req::builder().unwrap();
+        request.set_subject_name(&name).unwrap();
+        request.set_pubkey(key).unwrap();
+        let request = request.sign(configure(key, algorithm)).unwrap();
+        let request = X509Req::from_der(&request.to_der().unwrap()).unwrap();
+        assert!(request.verify(&request.public_key().unwrap()).unwrap());
+    }
+}
+
+#[test]
+fn request_rejects_missing_or_mismatched_subject_key() {
+    let key = pkey();
+    let other = pkey();
+    let signer = Signer::new_oneshot(MessageDigest::sha256(), &key).unwrap();
+    assert!(X509Req::builder().unwrap().sign(signer).is_err());
+    let mut builder = X509Req::builder().unwrap();
+    builder.set_pubkey(&other).unwrap();
+    let signer = Signer::new_oneshot(MessageDigest::sha256(), &key).unwrap();
+    assert!(builder.sign(signer).is_err());
 }
 
 #[test]
@@ -582,8 +678,9 @@ fn verification_purpose_enforces_extended_key_usage() {
         .unwrap();
     ca.append_extension(&KeyUsage::new().critical().key_cert_sign().build().unwrap())
         .unwrap();
-    ca.sign(&key, MessageDigest::sha256()).unwrap();
-    let ca = ca.build();
+    let ca = ca
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &key).unwrap())
+        .unwrap();
 
     let leaf_key = pkey();
     let mut leaf = X509::builder().unwrap();
@@ -615,8 +712,9 @@ fn verification_purpose_enforces_extended_key_usage() {
             .unwrap(),
     )
     .unwrap();
-    leaf.sign(&key, MessageDigest::sha256()).unwrap();
-    let leaf = leaf.build();
+    let leaf = leaf
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &key).unwrap())
+        .unwrap();
     let chain = Stack::new().unwrap();
     for (purpose, expected) in [
         (X509Purpose::TlsClient, true),

@@ -11,6 +11,7 @@
 //! use btls::asn1::Asn1Time;
 //! use btls::pkey::PKey;
 //! use btls::hash::MessageDigest;
+//! use btls::sign::Signer;
 //! use btls::rsa::Rsa;
 //! use btls::nid::Nid;
 //!
@@ -30,11 +31,9 @@
 //! builder.set_subject_name(&name).unwrap();
 //! builder.set_issuer_name(&name).unwrap();
 //! builder.set_pubkey(&pkey).unwrap();
-//! builder.set_not_before(&sample_time);
-//! builder.set_not_after(&sample_time);
-//! builder.sign(&pkey, MessageDigest::sha256()).unwrap();
-//!
-//! let certificate: X509 = builder.build();
+//! builder.set_not_before(&sample_time).unwrap();
+//! builder.set_not_after(&sample_time).unwrap();
+//! let certificate: X509 = builder.sign(Signer::new_oneshot(MessageDigest::sha256(), &pkey).unwrap()).unwrap();
 //! let mut builder = X509StoreBuilder::new().unwrap();
 //! let _ = builder.add_cert(&certificate);
 //! let store: X509Store = builder.build();

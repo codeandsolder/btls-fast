@@ -243,6 +243,7 @@ impl Pkcs12Builder {
 #[cfg(test)]
 mod test {
     use crate::hash::MessageDigest;
+    use crate::sign::Signer;
     use hex;
 
     use crate::asn1::Asn1Time;
@@ -321,8 +322,9 @@ mod test {
         builder.set_issuer_name(&name).unwrap();
         builder.append_extension(&key_usage).unwrap();
         builder.set_pubkey(&pkey).unwrap();
-        builder.sign(&pkey, MessageDigest::sha256()).unwrap();
-        let cert = builder.build();
+        let cert = builder
+            .sign(Signer::new_oneshot(MessageDigest::sha256(), &pkey).unwrap())
+            .unwrap();
 
         let pkcs12_builder = Pkcs12::builder();
         let pkcs12 = pkcs12_builder

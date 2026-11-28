@@ -11,6 +11,7 @@ use foreign_types::ForeignTypeRef;
 use super::server::{ClientSslBuilder, Server};
 use crate::error::ErrorStack;
 use crate::ffi;
+use crate::sign::Signer;
 use crate::ssl::EchGreaseRounding::{Nss3127, NssPre3127};
 use crate::ssl::{
     EchGreaseAead, EchGreaseParameters, EchGreaseSizeInfo, ExtensionType, Ssl, SslConnector,
@@ -721,8 +722,9 @@ fn ech_connector_policy_uses_per_connection_host_length() {
         .build(&certificate.x509v3_context(None, None))
         .unwrap();
     certificate.append_extension(&names).unwrap();
-    certificate.sign(&key, MessageDigest::sha256()).unwrap();
-    let certificate = certificate.build();
+    let certificate = certificate
+        .sign(Signer::new_oneshot(MessageDigest::sha256(), &key).unwrap())
+        .unwrap();
     let wire = Arc::new(Mutex::new(Vec::new()));
     let captured = Arc::clone(&wire);
     let mut server = Server::builder();

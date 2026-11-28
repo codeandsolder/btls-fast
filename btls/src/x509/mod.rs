@@ -31,7 +31,8 @@ use crate::error::ErrorStack;
 use crate::ex_data::{Index, IndexSlot, replace_boxed};
 use crate::hash::{DigestBytes, MessageDigest};
 use crate::nid::Nid;
-use crate::pkey::{HasPrivate, HasPublic, PKey, PKeyRef, Public};
+use crate::pkey::{HasPublic, PKey, PKeyRef, Public};
+use crate::sign::{OneShot, Signer};
 use crate::ssl::SslRef;
 use crate::stack::{Stack, StackRef, Stackable};
 use crate::string::OpensslString;
@@ -571,20 +572,26 @@ impl X509Builder {
         }
     }
 
-    /// Signs the certificate with a private key.
-    #[corresponds(X509_sign)]
-    pub fn sign<T>(&mut self, key: &PKeyRef<T>, hash: MessageDigest) -> Result<(), ErrorStack>
-    where
-        T: HasPrivate,
-    {
-        // SAFETY: The private key and digest handles remain live for the synchronous native signature operation.
-        unsafe { cvt(ffi::X509_sign(self.0.as_ptr(), key.as_ptr(), hash.as_ptr())) }
-    }
-
-    /// Consumes the builder, returning the certificate.
-    #[must_use = "The returned owned value is the result of consuming the original owner."]
-    pub fn build(self) -> X509 {
-        self.0
+    /// Consumes the builder and signs the certificate with the configured signing operation.
+    /// All signed fields must be set before this call. The signer may use a digest,
+    /// a digestless algorithm, or configured RSA-PSS parameters.
+    ///
+    /// ```compile_fail
+    /// use btls::x509::X509;
+    /// let builder = X509::builder().unwrap();
+    /// let _ = builder.build(); // An unsigned builder cannot become a certificate.
+    /// ```
+    ///
+    /// # Errors
+    /// The certificate fields cannot be encoded or the native signing operation fails.
+    #[corresponds(X509_sign_ctx)]
+    pub fn sign(self, signer: Signer<'_, OneShot>) -> Result<X509, ErrorStack> {
+        // SAFETY: both owners are live and unique. Native consumes the digest
+        // state and resets it; signer is dropped without further access.
+        unsafe {
+            signer.sign_native(self.0.as_ptr(), ffi::X509_sign_ctx)?;
+        }
+        Ok(self.0)
     }
 }
 
@@ -1451,7 +1458,7 @@ impl X509ReqBuilder {
         X509_REQ_set_version
     );
 
-    /// Set the issuer name.
+    /// Set the subject name.
     #[corresponds(X509_REQ_set_subject_name)]
     pub fn set_subject_name(&mut self, subject_name: &X509NameRef) -> Result<(), ErrorStack> {
         // SAFETY: The owned request and borrowed subject name stay live while BoringSSL copies the latter.
@@ -1517,26 +1524,27 @@ impl X509ReqBuilder {
         }
     }
 
-    /// Sign the request using a private key.
-    #[corresponds(X509_REQ_sign)]
-    pub fn sign<T>(&mut self, key: &PKeyRef<T>, hash: MessageDigest) -> Result<(), ErrorStack>
-    where
-        T: HasPrivate,
-    {
-        // SAFETY: The request, private key and digest handles stay live for the synchronous signature operation.
-        unsafe {
-            cvt(ffi::X509_REQ_sign(
-                self.0.as_ptr(),
-                key.as_ptr(),
-                hash.as_ptr(),
-            ))
+    /// Consumes the builder and signs the request with its subject's private key.
+    /// The configured signer must match the request's public key.
+    /// # Errors
+    /// The subject key is missing or does not match the signer, the request
+    /// cannot be encoded, or native signing fails.
+    #[corresponds(X509_REQ_sign_ctx)]
+    pub fn sign(self, signer: Signer<'_, OneShot>) -> Result<X509Req, ErrorStack> {
+        if !signer.matches_key(&self.0.public_key()?) {
+            return Err(ErrorStack::internal_error_str(
+                "CSR signing key does not match subject public key",
+            ));
         }
-    }
-
-    /// Returns the `X509Req`.
-    #[must_use = "The returned owned value is the result of consuming the original owner."]
-    pub fn build(self) -> X509Req {
-        self.0
+        // SAFETY: both owners are live and unique. Native consumes the digest
+        // state and resets it; signer is dropped without further access.
+        unsafe {
+            cvt(ffi::X509_REQ_sign_ctx(
+                self.0.as_ptr(),
+                signer.native_context(),
+            ))?;
+        }
+        Ok(self.0)
     }
 }
 
