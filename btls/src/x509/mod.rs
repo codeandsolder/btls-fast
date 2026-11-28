@@ -655,6 +655,29 @@ impl X509Ref {
         }
     }
 
+    /// Returns the optional local certificate alias (PKCS #12 friendly name).
+    ///
+    /// The alias is metadata from the archive, not part of the signed X.509
+    /// certificate. It must not be used as evidence of certificate trust.
+    ///
+    /// # Errors
+    /// Native metadata has an invalid length or pointer.
+    #[corresponds(X509_alias_get0)]
+    pub fn alias(&self) -> Result<Option<&[u8]>, ErrorStack> {
+        let mut len = 0;
+        // SAFETY: the published certificate remains shared and immutable;
+        // its native alias is borrowed for the certificate's lifetime.
+        let data = unsafe { ffi::X509_alias_get0(self.as_ptr(), &raw mut len) };
+        let len = usize::try_from(len).map_err(ErrorStack::internal_error)?;
+        if data.is_null() && len == 0 {
+            return Ok(None);
+        }
+        // SAFETY: native returned a certificate-owned alias and its length.
+        unsafe { crate::util::native_input(data, len) }
+            .map(Some)
+            .ok_or_else(|| ErrorStack::internal_error_str("invalid native certificate alias"))
+    }
+
     /// Returns this certificate's subject key id, if it exists.
     #[corresponds(X509_get0_subject_key_id)]
     #[must_use = "Use the returned certificate, component or validity information for inspection or verification."]
