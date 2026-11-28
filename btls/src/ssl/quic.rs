@@ -395,7 +395,7 @@ fn secret_result(ret: c_int) -> c_int {
         // SAFETY: the file name is a static C string.
         unsafe {
             ffi::ERR_put_error(
-                ffi::ERR_LIB_SSL.0.cast_signed(),
+                ffi::ERR_LIB_SSL.as_signed(),
                 0,
                 ffi::SSL_R_QUIC_INTERNAL_ERROR,
                 concat!(file!(), "\0").as_ptr().cast(),

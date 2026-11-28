@@ -220,7 +220,7 @@ impl Error {
     #[track_caller]
     pub fn library_reason(&self, library_code: ErrLib) -> Option<c_int> {
         debug_assert!(library_code.0 < ffi::ERR_NUM_LIBS.0);
-        let native_code = c_int::try_from(library_code.0).ok()?;
+        let native_code = c_int::try_from(library_code.as_unsigned()).ok()?;
         (self.library_code() == native_code).then_some(self.reason_code())
     }
 
@@ -328,7 +328,7 @@ impl Error {
 
     fn new_internal(msg: Data) -> Self {
         Self {
-            code: ffi::ERR_PACK(ffi::ERR_LIB_NONE.0, 0),
+            code: ffi::ERR_PACK(ffi::ERR_LIB_NONE.as_unsigned(), 0),
             file: BORING_INTERNAL.as_ptr(),
             line: 0,
             data: msg,

@@ -27,6 +27,22 @@ pub type BN_ULONG = u64;
 #[expect(non_camel_case_types, reason = "Matches BoringSSL's C typedef.")]
 pub type BN_ULONG = u32;
 
+// Clang uses an unsigned underlying type for the anonymous error-library
+// enum on Unix and a signed type on MSVC. Its C ABI is still a 32-bit integer.
+impl ErrLib {
+    /// Return the native library identifier for C functions taking an int.
+    #[must_use = "The native library identifier is the result."]
+    pub const fn as_signed(self) -> c_int {
+        c_int::from_ne_bytes(self.0.to_ne_bytes())
+    }
+
+    /// Return the library identifier for unsigned packed-error arithmetic.
+    #[must_use = "The unsigned library identifier is the result."]
+    pub const fn as_unsigned(self) -> c_uint {
+        c_uint::from_ne_bytes(self.0.to_ne_bytes())
+    }
+}
+
 /// Pack the library and reason fields exactly as `BoringSSL`'s `ERR_PACK` macro.
 /// `BoringSSL` does not encode a function identifier.
 #[expect(non_snake_case, reason = "Mirrors the C macro name.")]
