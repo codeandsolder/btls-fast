@@ -284,7 +284,7 @@ pub(super) enum NewSessionCallback {
 }
 
 impl NewSessionCallback {
-    fn checked(&self) -> Option<&ClientSessionCallback> {
+    const fn checked(&self) -> Option<&ClientSessionCallback> {
         match self {
             Self::Raw(_) => None,
             Self::Checked(callback) => Some(callback),

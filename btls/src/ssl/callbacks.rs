@@ -10,7 +10,7 @@ use super::{
 use super::{
     AlpnError, CallbackRole, CertificateCompressor, ClientHello, ClientSession,
     GetSessionPendingError, PrivateKeyMethod, PrivateKeyMethodError, SelectCertAction,
-    SelectCertError, SniError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
+    SelectCertError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
     SslInfoCallbackValue, SslRef, SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
 use crate::error::ErrorStack;
@@ -27,7 +27,6 @@ use std::ffi::CStr;
 use std::mem;
 use std::ptr;
 use std::slice;
-use std::str;
 use std::sync::Arc;
 
 /// `BoringSSL` retains the pointer to a private-key callback method table.
