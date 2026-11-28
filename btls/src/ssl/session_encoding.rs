@@ -38,7 +38,7 @@ unsafe impl Sync for SessionEncoding {}
 impl SessionEncoding {
     /// Borrows the encoded secret session data.
     #[must_use = "Protect the returned secret bytes when persisting or importing the session."]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         // SAFETY: the owner was constructed with the exact initialized
         // allocation length, and the allocation lives for this borrow.
         unsafe { slice::from_raw_parts(self.data.as_ptr(), self.len) }
