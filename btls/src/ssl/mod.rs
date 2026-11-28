@@ -483,7 +483,6 @@ enum CallbackRole {
     TicketKey,
     Alpn,
     SelectCert,
-    Compression,
     PrivateKey,
     Status,
     PskClient,
@@ -2063,7 +2062,7 @@ impl SslContextBuilder {
     /// # Errors
     ///
     /// Returns an error if callback storage cannot be allocated or the algorithm cannot be registered.
-    #[corresponds(SSL_CTX_add_cert_compression_alg)]
+    #[corresponds(SSL_CTX_add_cert_compression_alg_with_data)]
     pub fn add_certificate_compression_algorithm<C>(
         &mut self,
         compressor: C,
@@ -2077,39 +2076,7 @@ impl SslContextBuilder {
                 "Either compression or decompression must be supported for algorithm to be registered"
             );
         };
-        let index = SslContext::register_callback::<Option<C>>(CallbackRole::Compression)?;
-        if self.ctx.ex_data(index).is_some_and(Option::is_some) {
-            return Err(ErrorStack::internal_error_str(
-                "compression algorithm already registered",
-            ));
-        }
-        self.set_ex_data(index, None)?;
-        // SAFETY: The native context is exclusively borrowed and receives
-        // static monomorphized callbacks. Callback state is held in its typed slot.
-        let success = unsafe {
-            ffi::SSL_CTX_add_cert_compression_alg(
-                self.as_ptr(),
-                C::ALGORITHM.0,
-                const {
-                    if C::CAN_COMPRESS {
-                        Some(callbacks::raw_ssl_cert_compress::<C>)
-                    } else {
-                        None
-                    }
-                },
-                const {
-                    if C::CAN_DECOMPRESS {
-                        Some(callbacks::raw_ssl_cert_decompress::<C>)
-                    } else {
-                        None
-                    }
-                },
-            ) == 1
-        };
-        if !success {
-            return Err(ErrorStack::get());
-        }
-        self.set_ex_data(index, Some(compressor))
+        callbacks::install_certificate_compressor(self, compressor)
     }
 
     /// Configures a custom private key method on the context.

@@ -1,0 +1,192 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index b361ac72c..97f989809 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -3862,4 +3862,23 @@ OPENSSL_EXPORT int SSL_CTX_add_cert_compression_alg(
+ 
+ 
++// The data-aware callbacks have the same contracts as the callbacks above,
++// with a borrowed pointer to the registered algorithm's application state.
++typedef int (*ssl_cert_compression_with_data_func_t)(
++    SSL *ssl, CBB *out, const uint8_t *in, size_t in_len, void *data);
++typedef int (*ssl_cert_decompression_with_data_func_t)(
++    SSL *ssl, CRYPTO_BUFFER **out, size_t uncompressed_len,
++    const uint8_t *in, size_t in_len, void *data);
++
++// SSL_CTX_add_cert_compression_alg_with_data registers an algorithm and
++// transfers ownership of non-null |data| on success only. |free_data| is
++// called once on context destruction. Like the original API, at least one
++// callback must be non-null and each algorithm ID may only be registered once.
++OPENSSL_EXPORT int SSL_CTX_add_cert_compression_alg_with_data(
++    SSL_CTX *ctx, uint16_t alg_id,
++    ssl_cert_compression_with_data_func_t compress,
++    ssl_cert_decompression_with_data_func_t decompress, void *data,
++    void (*free_data)(void *));
++
++
+ // Next protocol negotiation.
+ //
+diff --git a/ssl/extensions.cc b/ssl/extensions.cc
+index 1c115b859..8b600c316 100644
+--- a/ssl/extensions.cc
++++ b/ssl/extensions.cc
+@@ -3356,5 +3356,5 @@ static bool cert_compression_add_clienthello(const SSL_HANDSHAKE *hs, CBB *out,
+ 
+   for (const auto &alg : hs->ssl->ctx->cert_compression_algs) {
+-    if (alg.decompress == nullptr) {
++    if (!alg.CanDecompress()) {
+       continue;
+     }
+@@ -3424,5 +3424,5 @@ static bool cert_compression_parse_clienthello(SSL_HANDSHAKE *hs,
+     for (size_t i = 0; i < num_algs; i++) {
+       const auto &alg = ctx->cert_compression_algs[i];
+-      if (alg.alg_id == alg_id && alg.compress != nullptr) {
++      if (alg.alg_id == alg_id && alg.CanCompress()) {
+         if (i < best_index) {
+           best_index = i;
+diff --git a/ssl/internal.h b/ssl/internal.h
+index 2137ec35b..0233a2c01 100644
+--- a/ssl/internal.h
++++ b/ssl/internal.h
+@@ -2934,5 +2934,27 @@ struct CertCompressionAlg {
+   ssl_cert_compression_func_t compress = nullptr;
+   ssl_cert_decompression_func_t decompress = nullptr;
++  ssl_cert_compression_with_data_func_t compress_with_data = nullptr;
++  ssl_cert_decompression_with_data_func_t decompress_with_data = nullptr;
++  std::unique_ptr<void, void (*)(void *)> data{nullptr, nullptr};
+   uint16_t alg_id = 0;
++
++  bool CanCompress() const {
++    return compress != nullptr || compress_with_data != nullptr;
++  }
++  bool CanDecompress() const {
++    return decompress != nullptr || decompress_with_data != nullptr;
++  }
++  bool Compress(SSL *ssl, CBB *out, const uint8_t *in, size_t len) const {
++    return compress_with_data != nullptr
++               ? compress_with_data(ssl, out, in, len, data.get()) != 0
++               : compress(ssl, out, in, len) != 0;
++  }
++  bool Decompress(SSL *ssl, CRYPTO_BUFFER **out, size_t uncompressed_len,
++                  const uint8_t *in, size_t len) const {
++    return decompress_with_data != nullptr
++               ? decompress_with_data(ssl, out, uncompressed_len, in, len,
++                                      data.get()) != 0
++               : decompress(ssl, out, uncompressed_len, in, len) != 0;
++  }
+ };
+ 
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 394115665..359dff5a2 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -2622,21 +2622,57 @@ void SSL_set_alps_use_new_codepoint(SSL *ssl, int use_new) {
+ }
+ 
+-int SSL_CTX_add_cert_compression_alg(SSL_CTX *ctx, uint16_t alg_id,
+-                                     ssl_cert_compression_func_t compress,
+-                                     ssl_cert_decompression_func_t decompress) {
+-  assert(compress != nullptr || decompress != nullptr);
+-
+-  auto *ctx_impl = FromOpaque(ctx);
+-  for (const auto &alg : ctx_impl->cert_compression_algs) {
+-    if (alg.alg_id == alg_id) {
+-      return 0;
++static bool add_cert_compression_alg(SSLContext *ctx,
++                                     CertCompressionAlg alg) {
++  if (!alg.CanCompress() && !alg.CanDecompress()) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return false;
++  }
++  size_t decompress_count = 0;
++  for (const auto &existing : ctx->cert_compression_algs) {
++    if (existing.alg_id == alg.alg_id) {
++      OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++      return false;
+     }
++    decompress_count += existing.CanDecompress() ? 1 : 0;
+   }
++  // RFC 8879's algorithm vector has a one-byte length and two-byte IDs.
++  if (alg.CanDecompress() && decompress_count >= 127) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_OVERFLOW);
++    return false;
++  }
++  return ctx->cert_compression_algs.Push(std::move(alg));
++}
+ 
++int SSL_CTX_add_cert_compression_alg(SSL_CTX *ctx, uint16_t alg_id,
++                                     ssl_cert_compression_func_t compress,
++                                     ssl_cert_decompression_func_t decompress) {
+   CertCompressionAlg alg;
+   alg.alg_id = alg_id;
+   alg.compress = compress;
+   alg.decompress = decompress;
+-  return ctx_impl->cert_compression_algs.Push(alg);
++  return add_cert_compression_alg(FromOpaque(ctx), std::move(alg));
++}
++
++int SSL_CTX_add_cert_compression_alg_with_data(
++    SSL_CTX *ctx, uint16_t alg_id,
++    ssl_cert_compression_with_data_func_t compress,
++    ssl_cert_decompression_with_data_func_t decompress, void *data,
++    void (*free_data)(void *)) {
++  if (data == nullptr || free_data == nullptr) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_SHOULD_NOT_HAVE_BEEN_CALLED);
++    return 0;
++  }
++  CertCompressionAlg alg;
++  alg.alg_id = alg_id;
++  alg.compress_with_data = compress;
++  alg.decompress_with_data = decompress;
++  auto *impl = FromOpaque(ctx);
++  if (!add_cert_compression_alg(impl, std::move(alg))) {
++    return 0;
++  }
++  // The insertion succeeded. From this point the native vector owns data.
++  impl->cert_compression_algs.back().data =
++      std::unique_ptr<void, void (*)(void *)>(data, free_data);
++  return 1;
+ }
+ 
+diff --git a/ssl/tls13_both.cc b/ssl/tls13_both.cc
+index 87f6b9c57..929ae6775 100644
+--- a/ssl/tls13_both.cc
++++ b/ssl/tls13_both.cc
+@@ -131,13 +131,13 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
+     }
+ 
+-    ssl_cert_decompression_func_t decompress = nullptr;
++    const CertCompressionAlg *algorithm = nullptr;
+     for (const auto &alg : ssl->ctx->cert_compression_algs) {
+       if (alg.alg_id == alg_id) {
+-        decompress = alg.decompress;
++        algorithm = &alg;
+         break;
+       }
+     }
+ 
+-    if (decompress == nullptr) {
++    if (algorithm == nullptr || !algorithm->CanDecompress()) {
+       ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_ILLEGAL_PARAMETER);
+       OPENSSL_PUT_ERROR(SSL, SSL_R_UNKNOWN_CERT_COMPRESSION_ALG);
+@@ -147,5 +147,5 @@ bool tls13_process_certificate(SSL_HANDSHAKE *hs, const SSLMessage &msg,
+ 
+     CRYPTO_BUFFER *decompressed_ptr = nullptr;
+-    if (!decompress(ssl, &decompressed_ptr, uncompressed_len,
++    if (!algorithm->Decompress(ssl, &decompressed_ptr, uncompressed_len,
+                     CBS_data(&compressed), CBS_len(&compressed))) {
+       ssl_send_alert(ssl, SSL3_AL_FATAL, SSL_AD_DECODE_ERROR);
+@@ -590,5 +590,5 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
+   }
+ 
+-  if (alg == nullptr || alg->compress == nullptr) {
++  if (alg == nullptr || !alg->CanCompress()) {
+     OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
+     return false;
+@@ -617,5 +617,5 @@ bool tls13_add_certificate(SSL_HANDSHAKE *hs) {
+     }
+   } else {
+-    if (!alg->compress(ssl, &compressed, msg.data(), msg.size())) {
++    if (!alg->Compress(ssl, &compressed, msg.data(), msg.size())) {
+       OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
+       return false;
