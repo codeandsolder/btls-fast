@@ -25,6 +25,40 @@ use crate::x509::{X509, X509Name};
 
 use super::CompliancePolicy;
 
+#[test]
+fn singleton_context_callbacks_release_replaced_closures() {
+    let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
+    let token = Arc::new(());
+    // Each registration uses a distinct closure type. All roles must release
+    // the old closure without waiting for context destruction.
+    macro_rules! replace_callback {
+        ($setter:ident, |$($arg:pat_param),*| $result:expr) => {{
+            let captured = Arc::clone(&token);
+            ctx.$setter(move |$($arg),*| { let _keep = &captured; $result }).unwrap();
+            assert_eq!(Arc::strong_count(&token), 2);
+            ctx.$setter(|$($arg),*| $result).unwrap();
+            assert_eq!(Arc::strong_count(&token), 1);
+        }};
+    }
+    replace_callback!(set_servername_callback, |_, _| Ok(()));
+    replace_callback!(set_alpn_select_callback, |_, protocols| Ok(&protocols[..0]));
+    replace_callback!(set_select_certificate_callback, |_| Ok(()));
+    replace_callback!(set_status_callback, |_| Ok(true));
+    replace_callback!(set_psk_client_callback, |_, _, _, _| Ok(0));
+    replace_callback!(set_psk_server_callback, |_, _, _| Ok(0));
+    replace_callback!(set_remove_session_callback, |_, _| ());
+    replace_callback!(set_keylog_callback, |_, _| ());
+    replace_callback!(set_info_callback, |_, _, _| ());
+    // SAFETY: the lookup always returns no session; ticket callback rejects
+    // without claiming to have initialized any cryptographic state.
+    unsafe {
+        replace_callback!(set_get_session_callback, |_, _| Ok(None));
+        replace_callback!(set_ticket_key_callback, |_, _, _, _| {
+            ssl::TicketKeyCallbackResult::Error
+        });
+    }
+}
+
 mod cert_compressor;
 mod cert_verify;
 mod custom_verify;
