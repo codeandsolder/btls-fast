@@ -1,0 +1,46 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 4efb0b4ab..b361ac72c 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -3134,4 +3134,10 @@ OPENSSL_EXPORT void SSL_set_verify(SSL *ssl, int mode,
+                                                    X509_STORE_CTX *store_ctx));
+ 
++// SSL_clear_verify_callback sets the verification mode and removes the
++// per-certificate X.509 callback, including an inherited callback. Unlike
++// SSL_set_verify with a null callback, it does not preserve the old callback.
++// It returns one on success and zero when the configuration is unavailable.
++OPENSSL_EXPORT int SSL_clear_verify_callback(SSL *ssl, int mode);
++
+ enum ssl_verify_result_t BORINGSSL_ENUM_INT {
+   ssl_verify_ok,
+diff --git a/ssl/ssl_lib.cc b/ssl/ssl_lib.cc
+index 55302191b..394115665 100644
+--- a/ssl/ssl_lib.cc
++++ b/ssl/ssl_lib.cc
+@@ -1630,5 +1630,4 @@ int SSL_get_verify_mode(const SSL *ssl) {
+   const auto *ssl_impl = FromOpaque(ssl);
+   if (!ssl_impl->config) {
+-    assert(ssl_impl->config);
+     return -1;
+   }
+diff --git a/ssl/ssl_x509.cc b/ssl/ssl_x509.cc
+index 45f73f3f7..c5aa8f969 100644
+--- a/ssl/ssl_x509.cc
++++ b/ssl/ssl_x509.cc
+@@ -605,4 +605,16 @@ void SSL_set_verify(SSL *ssl, int mode,
+ }
+ 
++int SSL_clear_verify_callback(SSL *ssl, int mode) {
++  auto *impl = FromOpaque(ssl);
++  check_ssl_x509_method(impl);
++  if (!impl->config) {
++    OPENSSL_PUT_ERROR(SSL, ERR_R_INTERNAL_ERROR);
++    return 0;
++  }
++  impl->config->verify_mode = mode;
++  impl->config->verify_callback = nullptr;
++  return 1;
++}
++
+ void SSL_set_verify_depth(SSL *ssl, int depth) {
+   auto *ssl_impl = FromOpaque(ssl);

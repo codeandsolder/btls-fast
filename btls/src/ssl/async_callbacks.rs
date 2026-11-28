@@ -166,6 +166,14 @@ static SELECT_CUSTOM_VERIFY_FUTURE_INDEX: IndexSlot<
     FutureData<Result<BoxCustomVerifyFinish, SslAlert>>,
 > = IndexSlot::new(Ssl::new_ex_index);
 
+pub(super) fn cancel_custom_verify_future(ssl: &mut SslRef) {
+    if let Some(index) = SELECT_CUSTOM_VERIFY_FUTURE_INDEX.get()
+        && let Some(data) = ssl.ex_data_mut(index)
+    {
+        *data.get_mut() = None;
+    }
+}
+
 impl SslContextBuilder {
     /// Sets a callback that is called before most [`ClientHello`] processing
     /// and before the decision whether to resume a session is made. The

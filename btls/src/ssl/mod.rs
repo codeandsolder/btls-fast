@@ -464,10 +464,10 @@ impl NameType {
     /// A host name.
     pub const HOST_NAME: Self = Self(ffi::TLSEXT_NAMETYPE_host_name);
 
-    /// Constructs a `StatusType` from a raw OpenSSL value.
+    /// Constructs a `NameType` from a raw OpenSSL value.
     #[must_use = "Use the wrapper returned for the supplied native representation."]
-    pub const fn from_raw(raw: c_int) -> StatusType {
-        StatusType(raw)
+    pub const fn from_raw(raw: c_int) -> Self {
+        Self(raw)
     }
 
     /// Returns the raw OpenSSL value represented by this type.
@@ -479,9 +479,6 @@ impl NameType {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 enum CallbackRole {
-    CertVerify,
-    Verify,
-    CustomVerify,
     ServerName,
     TicketKey,
     Alpn,
@@ -503,8 +500,25 @@ enum CallbackRole {
 
 static CONTEXT_CALLBACKS: LazyLock<IndexRegistry<SslContext, CallbackRole>> =
     LazyLock::new(IndexRegistry::new);
+#[cfg(not(feature = "fips"))]
 static SSL_CALLBACKS: LazyLock<IndexRegistry<Ssl, CallbackRole>> =
     LazyLock::new(IndexRegistry::new);
+
+// One slot per verification callback, independent of the closure's concrete type.
+// Context callbacks are immutable after publication; connection callbacks may
+// replace themselves, so the trampoline retains its own Arc across invocation.
+type VerifyCallback = Arc<dyn Fn(bool, &mut X509StoreContextRef) -> bool + Send + Sync>;
+type CertVerifyCallback = Arc<dyn Fn(&mut X509StoreContextRef) -> bool + Send + Sync>;
+type CustomVerifyCallback = Arc<dyn Fn(&mut SslRef) -> Result<(), SslVerifyError> + Send + Sync>;
+static CTX_VERIFY_INDEX: IndexSlot<SslContext, Option<VerifyCallback>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static CTX_CERT_VERIFY_INDEX: IndexSlot<SslContext, Option<CertVerifyCallback>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static CTX_CUSTOM_VERIFY_INDEX: IndexSlot<SslContext, Option<CustomVerifyCallback>> =
+    IndexSlot::new(SslContext::new_ex_index);
+static SSL_VERIFY_INDEX: IndexSlot<Ssl, Option<VerifyCallback>> = IndexSlot::new(Ssl::new_ex_index);
+static SSL_CUSTOM_VERIFY_INDEX: IndexSlot<Ssl, Option<CustomVerifyCallback>> =
+    IndexSlot::new(Ssl::new_ex_index);
 
 static SESSION_CTX_INDEX: IndexSlot<Ssl, SslContext> = IndexSlot::new(Ssl::new_ex_index);
 static X509_FLAG_INDEX: IndexSlot<SslContext, bool> = IndexSlot::new(SslContext::new_ex_index);
@@ -1177,9 +1191,6 @@ impl SslContextBuilder {
     /// [`SSL_CTX_set_cert_verify_callback`](https://docs.openssl.org/master/man3/SSL_CTX_set_cert_verify_callback/#notes)
     /// for more information.
     ///
-    // TODO: Add the ability to unset the callback by either adding a new function or wrapping the
-    // callback in an `Option`.
-    ///
     /// # Errors
     /// The context does not support X.509 certificates.
     ///
@@ -1192,37 +1203,57 @@ impl SslContextBuilder {
     {
         self.ctx.check_x509()?;
 
-        self.set_ex_data(
-            SslContext::register_callback::<F>(CallbackRole::CertVerify)?,
-            callback,
-        )?;
-        // SAFETY: the typed native callback slot is initialized.
+        self.set_ex_data(CTX_CERT_VERIFY_INDEX.register()?, Some(Arc::new(callback)))?;
+        // SAFETY: the live context owns the registered callback state.
         unsafe {
             ffi::SSL_CTX_set_cert_verify_callback(
                 self.as_ptr(),
-                Some(raw_cert_verify::<F>),
+                Some(raw_cert_verify),
                 ptr::null_mut(),
             );
         }
         Ok(())
     }
 
-    /// Configures the certificate verification method for new connections.
-    ///
+    /// Removes the whole-chain X.509 verification callback. Any separately
+    /// configured per-certificate or custom TLS verifier remains installed.
+    /// # Errors
+    /// The context does not support X.509 certificates.
+    #[corresponds(SSL_CTX_set_cert_verify_callback)]
+    pub fn clear_cert_verify_callback(&mut self) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
+        // SAFETY: the builder has exclusive native context access.
+        unsafe { ffi::SSL_CTX_set_cert_verify_callback(self.as_ptr(), None, ptr::null_mut()) };
+        self.clear_verifier_slot(&CTX_CERT_VERIFY_INDEX)
+    }
+
+    /// Changes only the certificate verification mode, preserving all callbacks.
     /// # Errors
     /// The context does not support X.509 certificates.
     #[corresponds(SSL_CTX_set_verify)]
-    pub fn set_verify(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+    pub fn set_verify_mode(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
         self.ctx.check_x509()?;
-
-        // SAFETY: The builder exclusively owns a live native context and the verification mode is a scalar bitset.
+        // SAFETY: exclusive X.509 context; preserve the currently installed callback.
         unsafe {
-            ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), None);
-        };
+            let callback = ffi::SSL_CTX_get_verify_callback(self.as_ptr());
+            ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), callback);
+        }
         Ok(())
     }
 
-    /// Returns the verify mode set by [`Self::set_verify`] or one of the verify callbacks.
+    fn clear_verifier_slot<T: 'static + Send + Sync>(
+        &mut self,
+        slot: &IndexSlot<SslContext, Option<T>>,
+    ) -> Result<(), ErrorStack> {
+        if let Some(index) = slot.get()
+            && self.ctx.ex_data(index).is_some()
+        {
+            self.set_ex_data(index, None)?;
+        }
+        Ok(())
+    }
+
+    /// Returns the verify mode set by [`Self::set_verify_mode`] or one of the verify callbacks.
     ///
     /// An explicit [`SslVerifyMode::NONE`] reads the same as the default.
     ///
@@ -1263,19 +1294,24 @@ impl SslContextBuilder {
     {
         self.ctx.check_x509()?;
 
-        // SAFETY: The builder exclusively owns its context; the registered typed callback slot remains live until context teardown.
+        self.set_ex_data(CTX_VERIFY_INDEX.register()?, Some(Arc::new(callback)))?;
+        // SAFETY: the live context owns the registered callback state.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::Verify)?,
-                callback,
-            )?;
-            ffi::SSL_CTX_set_verify(
-                self.as_ptr(),
-                c_int::from(mode.bits()),
-                Some(raw_verify::<F>),
-            );
+            ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), Some(raw_verify));
         }
         Ok(())
+    }
+
+    /// Removes the per-certificate X.509 verification callback and sets the mode.
+    /// The custom TLS and whole-chain X.509 callbacks remain unchanged.
+    /// # Errors
+    /// The context does not support X.509 certificates.
+    #[corresponds(SSL_CTX_set_verify)]
+    pub fn clear_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+        self.ctx.check_x509()?;
+        // SAFETY: exclusive X.509 context; null explicitly clears this callback.
+        unsafe { ffi::SSL_CTX_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
+        self.clear_verifier_slot(&CTX_VERIFY_INDEX)
     }
 
     /// Configures certificate verification.
@@ -1301,19 +1337,30 @@ impl SslContextBuilder {
     where
         F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
-        // SAFETY: The registered custom verifier is owned by context extra data before the native callback pointer is installed.
+        self.set_ex_data(
+            CTX_CUSTOM_VERIFY_INDEX.register()?,
+            Some(Arc::new(callback)),
+        )?;
+        // SAFETY: the live context owns the registered callback state.
         unsafe {
-            self.replace_ex_data(
-                SslContext::register_callback::<F>(CallbackRole::CustomVerify)?,
-                callback,
-            )?;
             ffi::SSL_CTX_set_custom_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
-                Some(raw_custom_verify::<F>),
+                Some(raw_custom_verify),
             );
         }
         Ok(())
+    }
+
+    /// Removes the custom TLS verifier and sets the verification mode. The
+    /// native certificate verifier (including any X.509 callbacks) is used instead.
+    /// # Errors
+    /// Native callback storage cannot be updated.
+    #[corresponds(SSL_CTX_set_custom_verify)]
+    pub fn clear_custom_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+        // SAFETY: exclusive native context; null clears the custom TLS callback.
+        unsafe { ffi::SSL_CTX_set_custom_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
+        self.clear_verifier_slot(&CTX_CUSTOM_VERIFY_INDEX)
     }
 
     /// Configures whether resumed client sessions use the custom verification callback.
@@ -2800,7 +2847,7 @@ impl fmt::Debug for SslContext {
 // Allocate a native index for the exact wrapper and payload type. The native
 // class-specific allocator installs the matching destructor.
 macro_rules! callback_indices {
-    ($native:ident, $allocate:ident, $registry:ident) => {
+    ($native:ident, $allocate:ident, $registry:ident $(, #[$attr:meta])?) => {
         /// Allocates a distinct typed extra-data index.
         ///
         /// # Errors
@@ -2816,6 +2863,7 @@ macro_rules! callback_indices {
             }
         }
 
+        $(#[$attr])?
         fn register_callback<T: 'static + Send + Sync>(
             role: CallbackRole,
         ) -> Result<Index<Self, T>, ErrorStack> {
@@ -3013,9 +3061,9 @@ impl SslContextRef {
         unsafe { ffi::SSL_CTX_sess_get_cache_size(self.as_ptr()) }
     }
 
-    /// Returns the verify mode that was set on this context from [`SslContextBuilder::set_verify`].
+    /// Returns the verify mode that was set on this context from [`SslContextBuilder::set_verify_mode`].
     ///
-    /// [`SslContextBuilder::set_verify`]: struct.SslContextBuilder.html#method.set_verify
+    /// [`SslContextBuilder::set_verify_mode`]: struct.SslContextBuilder.html#method.set_verify_mode
     ///
     /// # Errors
     /// The context does not support X.509 certificates.
@@ -3640,7 +3688,7 @@ impl fmt::Debug for Ssl {
 }
 
 impl Ssl {
-    callback_indices!(SSL_get_ex_new_index, get_new_ssl_idx, SSL_CALLBACKS);
+    callback_indices!(SSL_get_ex_new_index, get_new_ssl_idx, SSL_CALLBACKS, #[cfg(not(feature = "fips"))]);
 
     /// Creates a new [`Ssl`].
     #[corresponds(SSL_new)]
@@ -3880,19 +3928,27 @@ impl SslRef {
         unsafe { ErrorCode::from_raw(ffi::SSL_get_error(self.as_ptr(), ret)) }
     }
 
-    /// Like [`SslContextBuilder::set_verify`].
-    ///
-    /// [`SslContextBuilder::set_verify`]: struct.SslContextBuilder.html#method.set_verify
-    ///
+    /// Changes only the verification mode, preserving all callbacks.
     /// # Errors
-    /// The context does not support X.509 certificates.
+    /// X.509 is unsupported or the connection configuration is unavailable.
     #[corresponds(SSL_set_verify)]
-    pub fn set_verify(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+    pub fn set_verify_mode(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509()?;
-
-        // SAFETY: The uniquely borrowed connection accepts the scalar verify mode
-        // and null callback; no borrowed application state is retained.
+        self.require_verification_config()?;
+        // SAFETY: a live X.509 connection with configuration; native preserves
+        // the existing per-certificate callback when supplied null.
         unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
+        Ok(())
+    }
+
+    fn require_verification_config(&self) -> Result<(), ErrorStack> {
+        // SAFETY: the getter works with any certificate method and returns -1
+        // when the configuration has been discarded.
+        if unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) } < 0 {
+            return Err(ErrorStack::internal_error_str(
+                "TLS verification configuration unavailable",
+            ));
+        }
         Ok(())
     }
 
@@ -3906,6 +3962,7 @@ impl SslRef {
     pub fn set_verify_depth(&mut self, depth: u32) -> Result<(), ErrorStack> {
         let depth = c_int::try_from(depth).map_err(ErrorStack::internal_error)?;
         self.ssl_context().check_x509()?;
+        self.require_verification_config()?;
 
         // SAFETY: the live SSL connection is exclusively borrowed and depth
         // has been checked against the native signed integer range.
@@ -3913,7 +3970,7 @@ impl SslRef {
         Ok(())
     }
 
-    /// Returns the verify mode that was set using `set_verify`.
+    /// Returns the verify mode that was set using `set_verify_mode`.
     ///
     /// # Errors
     /// The context does not support X.509 certificates.
@@ -3925,6 +3982,11 @@ impl SslRef {
         // SAFETY: The live SSL connection returns its native verify
         // bitset; the wrapper preserves any recognized or future bits.
         let mode = unsafe { ffi::SSL_get_verify_mode(self.as_ptr()) };
+        if mode < 0 {
+            return Err(ErrorStack::internal_error_str(
+                "TLS verification configuration unavailable",
+            ));
+        }
         Ok(SslVerifyMode::from_bits_retain(mode))
     }
 
@@ -3957,19 +4019,37 @@ impl SslRef {
     {
         self.ssl_context().check_x509()?;
 
-        // SAFETY: The closure is installed in typed native extra-data as an Arc
-        // before the live SSL connection receives its static trampoline.
+        self.require_verification_config()?;
+        self.set_ex_data(SSL_VERIFY_INDEX.register()?, Some(Arc::new(callback)))?;
+        // SAFETY: the live X.509 connection owns its callback state and config.
         unsafe {
-            // this needs to be in an Arc since the callback can register a new callback!
-            self.replace_ex_data(
-                Ssl::register_callback(CallbackRole::Verify)?,
-                Arc::new(callback),
-            )?;
             ffi::SSL_set_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
-                Some(ssl_raw_verify::<F>),
+                Some(ssl_raw_verify),
             );
+        }
+        Ok(())
+    }
+
+    /// Removes the inherited or connection-specific per-certificate verifier.
+    /// The whole-chain X.509 and custom TLS callbacks remain unchanged.
+    /// # Errors
+    /// X.509 is unsupported or configuration is unavailable.
+    #[corresponds(SSL_clear_verify_callback)]
+    pub fn clear_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+        self.ssl_context().check_x509()?;
+        // SAFETY: exclusive X.509 SSL; native checks config before changing it.
+        unsafe {
+            cvt(ffi::SSL_clear_verify_callback(
+                self.as_ptr(),
+                c_int::from(mode.bits()),
+            ))?;
+        }
+        if let Some(index) = SSL_VERIFY_INDEX.get()
+            && let Some(data) = self.ex_data_mut(index)
+        {
+            *data = None;
         }
         Ok(())
     }
@@ -4004,20 +4084,39 @@ impl SslRef {
     where
         F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
-        // SAFETY: The typed extra-data slot holds an Arc of the callback before
-        // BoringSSL retains the static custom-verification trampoline.
+        self.require_verification_config()?;
+        self.set_ex_data(
+            SSL_CUSTOM_VERIFY_INDEX.register()?,
+            Some(Arc::new(callback)),
+        )?;
+        // SAFETY: the live SSL owns the installed callback state and config.
         unsafe {
-            // this needs to be in an Arc since the callback can register a new callback!
-            self.replace_ex_data(
-                Ssl::register_callback(CallbackRole::CustomVerify)?,
-                Arc::new(callback),
-            )?;
             ffi::SSL_set_custom_verify(
                 self.as_ptr(),
                 c_int::from(mode.bits()),
-                Some(ssl_raw_custom_verify::<F>),
+                Some(ssl_raw_custom_verify),
             );
         }
+        async_callbacks::cancel_custom_verify_future(self);
+        Ok(())
+    }
+
+    /// Removes the inherited or connection-specific custom TLS verifier and
+    /// sets the mode. Native verification, including configured X.509 callbacks,
+    /// is used instead. Any pending asynchronous custom verification is discarded.
+    /// # Errors
+    /// The connection configuration is unavailable.
+    #[corresponds(SSL_set_custom_verify)]
+    pub fn clear_custom_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
+        self.require_verification_config()?;
+        // SAFETY: exclusive live SSL with configuration; null clears the callback.
+        unsafe { ffi::SSL_set_custom_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
+        if let Some(index) = SSL_CUSTOM_VERIFY_INDEX.get()
+            && let Some(data) = self.ex_data_mut(index)
+        {
+            *data = None;
+        }
+        async_callbacks::cancel_custom_verify_future(self);
         Ok(())
     }
 
@@ -4858,6 +4957,7 @@ impl SslRef {
         self.ex_data(slot.get()?)
     }
 
+    #[cfg(not(feature = "fips"))]
     fn callback<T: 'static + Send + Sync>(&self, role: CallbackRole) -> Option<&T> {
         self.ex_data(SSL_CALLBACKS.get(role)?)
     }

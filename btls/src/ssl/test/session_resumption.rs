@@ -306,21 +306,21 @@ fn client_session_resumes_within_scope_and_domain() {
     let unscoped = connector(b"");
     let session = issue(&unscoped, |config| {
         config.set_verify_hostname(false);
-        config.set_verify(SslVerifyMode::NONE).unwrap();
+        config.set_verify_mode(SslVerifyMode::NONE).unwrap();
     });
     assert!(offers(&unscoped, &session, "foobar.com", |config| {
         config.set_verify_hostname(false);
-        config.set_verify(SslVerifyMode::NONE).unwrap();
+        config.set_verify_mode(SslVerifyMode::NONE).unwrap();
     }));
     assert!(!offers(&unscoped, &session, "foobar.com", |config| {
         config.set_verify_hostname(false)
     }));
     assert!(!offers(&unscoped, &session, "foobar.com", |config| {
-        config.set_verify(SslVerifyMode::NONE).unwrap()
+        config.set_verify_mode(SslVerifyMode::NONE).unwrap()
     }));
     assert!(!offers(&connector(b""), &session, "foobar.com", |config| {
         config.set_verify_hostname(false);
-        config.set_verify(SslVerifyMode::NONE).unwrap();
+        config.set_verify_mode(SslVerifyMode::NONE).unwrap();
     }));
 }
 
@@ -512,7 +512,7 @@ fn client_session_is_not_offered_after_its_chain_expires() {
     };
     assert!(!offers(|_| {}));
     assert!(offers(|config| config
-        .set_verify(SslVerifyMode::NONE)
+        .set_verify_mode(SslVerifyMode::NONE)
         .unwrap()));
 }
 

@@ -24,7 +24,7 @@ impl ClientAdapter for Adapter {
 
     fn connector() -> Result<Self::Connector, BoxError> {
         let mut builder = SslConnector::builder(SslMethod::tls())?;
-        builder.set_verify(SslVerifyMode::NONE)?;
+        builder.set_verify_mode(SslVerifyMode::NONE)?;
         builder.set_min_proto_version(Some(SslVersion::TLS1_3))?;
         builder.set_max_proto_version(Some(SslVersion::TLS1_3))?;
         builder.set_tls13_ciphers(&[Tls13Cipher::AES_128_GCM_SHA256])?;

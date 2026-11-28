@@ -92,7 +92,7 @@ fn verify_peer_cert_chain_reverifies_resumed_sessions() {
 fn explicit_peer_verification_is_strict_and_uses_live_native_store() {
     let server = Server::builder().build();
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
-    ctx.set_verify(SslVerifyMode::NONE).unwrap();
+    ctx.set_verify_mode(SslVerifyMode::NONE).unwrap();
     let mut ssl = Ssl::new(&ctx.build()).unwrap();
     assert_eq!(
         ssl.verify_peer_cert_chain(),
