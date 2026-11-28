@@ -305,7 +305,7 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
             move |_, new_session| {
                 let mut session = session.lock().unwrap();
                 if session.is_none() {
-                    *session = Some(new_session.to_der().unwrap());
+                    *session = Some(new_session.to_bytes().unwrap());
                 }
             }
         })
@@ -313,7 +313,8 @@ fn boringssl_patch_no_psk_dhe_ke_omits_psk_on_resumption() {
     let first_stream = first_client.connect();
     assert!(!first_stream.ssl().session_reused());
 
-    let session = SslSession::from_der(
+    let session = SslSession::from_bytes(
+        first_stream.ssl().ssl_context(),
         session
             .lock()
             .unwrap()

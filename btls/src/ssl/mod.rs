@@ -121,6 +121,7 @@ pub use self::ech_grease::{
 pub use self::error::{Error, ErrorCode, HandshakeError};
 pub use self::quic::{QuicEncryptionLevel, QuicMethod, QuicMethodError};
 pub use self::ticket::{TicketKey, TicketKeyProvider, TicketRenewal};
+pub use self::session_encoding::SessionEncoding;
 
 mod async_callbacks;
 mod bio;
@@ -136,6 +137,7 @@ mod ech_grease;
 mod error;
 mod mut_only;
 mod quic;
+mod session_encoding;
 #[cfg(test)]
 mod test;
 mod ticket;
@@ -3200,7 +3202,7 @@ foreign_type_and_impl_send_sync! {
     type CType = ffi::SSL_SESSION;
     fn drop = ffi::SSL_SESSION_free;
 
-    /// An encoded SSL session.
+    /// An owned native SSL session.
     ///
     /// These can be cached to share sessions across connections.
     pub struct SslSession;
@@ -3209,17 +3211,6 @@ foreign_type_and_impl_send_sync! {
 impl Clone for SslSession {
     fn clone(&self) -> Self {
         SslSessionRef::to_owned(self)
-    }
-}
-
-impl SslSession {
-    from_der! {
-        /// Deserializes a DER-encoded session structure.
-        #[corresponds(d2i_SSL_SESSION)]
-        from_der,
-        SslSession,
-        ffi::d2i_SSL_SESSION,
-        ::libc::c_long
     }
 }
 
@@ -3251,25 +3242,6 @@ impl SslSessionRef {
             // empty native IDs may be represented by null pointers.
             native_input(p, usize::try_from(len).unwrap_or(0)).unwrap_or(&[])
         }
-    }
-
-    /// Returns the length of the master key.
-    #[corresponds(SSL_SESSION_get_master_key)]
-    #[must_use = "Use the returned length or capacity to size buffers or validate input."]
-    pub fn master_key_len(&self) -> usize {
-        // SAFETY: The live session may be queried for the key size using a null
-        // output buffer and zero capacity, as required by this native API.
-        unsafe { SSL_SESSION_get_master_key(self.as_ptr(), ptr::null_mut(), 0) }
-    }
-
-    /// Copies the master key into the provided buffer.
-    ///
-    /// Returns the number of bytes written, or the size of the master key if the buffer is empty.
-    #[corresponds(SSL_SESSION_get_master_key)]
-    pub fn master_key(&self, buf: &mut [u8]) -> usize {
-        // SAFETY: The output buffer is writable for its full native length and the
-        // live session borrows it synchronously without retaining it.
-        unsafe { SSL_SESSION_get_master_key(self.as_ptr(), buf.as_mut_ptr(), buf.len()) }
     }
 
     /// Returns the time at which the session was established, in seconds since the Unix epoch.
@@ -3395,13 +3367,6 @@ impl SslSessionRef {
             // pointers with zero length are treated as the empty ID context.
             native_input(p, usize::try_from(len).unwrap_or(0)).unwrap_or(&[])
         }
-    }
-
-    to_der! {
-        /// Serializes the session into a DER-encoded structure.
-        #[corresponds(i2d_SSL_SESSION)]
-        to_der,
-        ffi::i2d_SSL_SESSION
     }
 }
 
@@ -4565,18 +4530,20 @@ impl SslRef {
     ///
     /// The caller must ensure:
     ///
-    /// - the handshake has not started;
     /// - the session authenticates the intended peer under the current verification and client
     ///   authentication policies; and
     /// - the session ID context, protocol, and cipher configuration are compatible.
     ///
     /// [`ConnectConfiguration::set_client_session`] is a checked alternative for sessions from
     /// [`SslConnectorBuilder::set_client_session_callback`].
+    ///
+    /// # Errors
+    /// The handshake has already started or the certificate method is incompatible.
     #[corresponds(SSL_set_session)]
     pub unsafe fn set_session(&mut self, session: &SslSessionRef) -> Result<(), ErrorStack> {
-        // SAFETY: The unsafe caller establishes the session identity
-        // and handshake preconditions; both native handles remain valid
-        // while the connection acquires its session reference.
+        // SAFETY: The unsafe caller establishes the session authentication.
+        // Native code checks handshake state and certificate method before
+        // acquiring a session reference.
         unsafe { cvt(ffi::SSL_set_session(self.as_ptr(), session.as_ptr())) }
     }
 
@@ -6256,7 +6223,7 @@ pub trait CertificateCompressor: Send + Sync + 'static {
     }
 }
 
-use crate::ffi::{SSL_CTX_up_ref, SSL_SESSION_get_master_key, SSL_SESSION_up_ref, SSL_is_server};
+use crate::ffi::{SSL_CTX_up_ref, SSL_SESSION_up_ref, SSL_is_server};
 
 unsafe fn get_new_idx(f: ffi::CRYPTO_EX_free) -> c_int {
     // SAFETY: The native callback is a static function pointer and the
