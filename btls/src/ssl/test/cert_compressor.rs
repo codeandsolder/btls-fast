@@ -191,7 +191,6 @@ fn certificate_compression_advertisement_limit_is_checked_at_registration() {
         ffi,
         ssl::{SslContext, SslMethod},
     };
-    use foreign_types::ForeignTypeRef;
     unsafe extern "C" fn unused_decompress(
         _: *mut ffi::SSL,
         _: *mut *mut ffi::CRYPTO_BUFFER,
