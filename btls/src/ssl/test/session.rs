@@ -37,6 +37,28 @@ fn active_session() {
 }
 
 #[test]
+fn initial_handshake_does_not_expose_a_mutable_session() {
+    use crate::ssl::{SslVerifyError, SslVerifyMode};
+    use std::sync::Arc;
+    let server = Server::builder().build();
+    let called = Arc::new(AtomicBool::new(false));
+    let observed = Arc::clone(&called);
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+            assert!(ssl.session().is_none());
+            assert!(ssl.peer_certificate().is_some());
+            observed.store(true, Ordering::SeqCst);
+            Ok::<(), SslVerifyError>(())
+        })
+        .unwrap();
+    let stream = client.connect();
+    assert!(called.load(Ordering::SeqCst));
+    assert!(stream.ssl().session().is_some());
+}
+
+#[test]
 fn unresumable_session_cannot_be_encoded() {
     let mut server = Server::builder();
     server

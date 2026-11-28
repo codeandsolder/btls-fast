@@ -4453,14 +4453,19 @@ impl SslRef {
         unsafe { X509VerifyError::from_raw(code) }
     }
 
-    /// Returns a shared reference to the SSL session.
-    #[corresponds(SSL_get_session)]
+    /// Returns the last established immutable session, or the offered session
+    /// before the initial handshake.
+    ///
+    /// Returns `None` during the initial handshake. Use connection accessors
+    /// for handshake properties, and session notification callbacks to collect
+    /// resumable sessions, especially TLS 1.3 tickets.
+    #[corresponds(SSL_get0_stable_session)]
     #[must_use = "Use the returned reference or negotiated value to inspect the current connection."]
     pub fn session(&self) -> Option<&SslSessionRef> {
-        // SAFETY: The live SSL connection owns an optional session;
-        // the getter returns a borrowed pointer checked for null.
+        // SAFETY: the native getter exposes only an immutable, retained
+        // session, never the mutable object under handshake construction.
         unsafe {
-            let p = ffi::SSL_get_session(self.as_ptr());
+            let p = ffi::SSL_get0_stable_session(self.as_ptr());
             if p.is_null() {
                 None
             } else {

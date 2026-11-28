@@ -1,0 +1,33 @@
+diff --git a/include/openssl/ssl.h b/include/openssl/ssl.h
+index 8ee51bcb5..c442075a7 100644
+--- a/include/openssl/ssl.h
++++ b/include/openssl/ssl.h
+@@ -6711,2 +6711,8 @@ OPENSSL_EXPORT SSL_SESSION *SSL_get_session(const SSL *ssl);
+ 
++// SSL_get0_stable_session returns the most recently established immutable
++// session, or the offered session before the initial handshake starts.
++// It returns NULL during an initial handshake, rather than exposing the
++// partially constructed session. The caller does not acquire a reference.
++OPENSSL_EXPORT SSL_SESSION *SSL_get0_stable_session(const SSL *ssl);
++
+ // SSL_get0_session is an alias for `SSL_get_session`.
+diff --git a/ssl/ssl_session.cc b/ssl/ssl_session.cc
+index 56926ea2a..5b606a327 100644
+--- a/ssl/ssl_session.cc
++++ b/ssl/ssl_session.cc
+@@ -1112,2 +1112,15 @@ SSL_SESSION *SSL_get_session(const SSL *ssl) {
+ 
++SSL_SESSION *SSL_get0_stable_session(const SSL *ssl) {
++  const auto *impl = FromOpaque(ssl);
++  if (impl->s3->established_session != nullptr) {
++    return impl->s3->established_session.get();
++  }
++  const SSL_HANDSHAKE *hs = impl->s3->hs.get();
++  if (hs != nullptr && hs->state == 0 &&
++      !impl->s3->initial_handshake_complete) {
++    return impl->session.get();
++  }
++  return nullptr;
++}
++
+ SSL_SESSION *SSL_get1_session(SSL *ssl) {
