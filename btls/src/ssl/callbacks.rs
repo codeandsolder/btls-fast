@@ -7,6 +7,10 @@ use super::{
     SelectCertError, SniError, SslAlert, SslContextRef, SslInfoCallbackAlert, SslInfoCallbackMode,
     SslInfoCallbackValue, SslRef, SslSession, SslSessionRef, SslSignatureAlgorithm, SslVerifyError,
 };
+use super::{
+    CTX_CERT_VERIFY_INDEX, CTX_CUSTOM_VERIFY_INDEX, CTX_VERIFY_INDEX, SSL_CUSTOM_VERIFY_INDEX,
+    SSL_VERIFY_INDEX,
+};
 use crate::error::ErrorStack;
 use crate::ffi;
 use crate::hmac::HmacCtxRef;
@@ -43,10 +47,10 @@ impl<M: PrivateKeyMethod, const CREDENTIAL: bool> PrivateKeyMethodDescriptor<M, 
     }
 }
 
-pub extern "C" fn raw_verify<F>(preverify_ok: c_int, x509_ctx: *mut ffi::X509_STORE_CTX) -> c_int
-where
-    F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
-{
+pub(super) extern "C" fn raw_verify(
+    preverify_ok: c_int,
+    x509_ctx: *mut ffi::X509_STORE_CTX,
+) -> c_int {
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
@@ -57,26 +61,27 @@ where
     else {
         return 0;
     };
-    let Some(verify) = ssl_context.callback::<F>(CallbackRole::Verify) else {
+    let Some(verify) = ssl_context
+        .slot_data(&CTX_VERIFY_INDEX)
+        .and_then(Option::as_ref)
+    else {
         return 0;
     };
     catch_native(|| c_int::from(verify(preverify_ok != 0, ctx))).unwrap_or(0)
 }
 
-pub(super) unsafe extern "C" fn raw_custom_verify<F>(
+pub(super) unsafe extern "C" fn raw_custom_verify(
     ssl: *mut ffi::SSL,
     out_alert: *mut u8,
-) -> ffi::ssl_verify_result_t
-where
-    F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
-{
+) -> ffi::ssl_verify_result_t {
     let callback = |ssl: &mut SslRef| {
         let context = ssl
             .session_context()
             .map(ToOwned::to_owned)
             .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
         let callback = context
-            .callback::<F>(CallbackRole::CustomVerify)
+            .slot_data(&CTX_CUSTOM_VERIFY_INDEX)
+            .and_then(Option::as_ref)
             .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
         callback(ssl)
     };
@@ -85,35 +90,33 @@ where
     unsafe { raw_custom_verify_callback(ssl, out_alert, callback) }
 }
 
-pub(super) unsafe extern "C" fn raw_cert_verify<F>(
+pub(super) unsafe extern "C" fn raw_cert_verify(
     x509_ctx: *mut ffi::X509_STORE_CTX,
     _arg: *mut c_void,
-) -> c_int
-where
-    F: Fn(&mut X509StoreContextRef) -> bool + 'static + Sync + Send,
-{
+) -> c_int {
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
     let Some(ssl_context) = ctx.ssl().map(|ssl| ssl.ssl_context().to_owned()) else {
         return 0;
     };
-    let Some(verify) = ssl_context.callback::<F>(CallbackRole::CertVerify) else {
+    let Some(verify) = ssl_context
+        .slot_data(&CTX_CERT_VERIFY_INDEX)
+        .and_then(Option::as_ref)
+    else {
         return 0;
     };
     catch_native(|| c_int::from(verify(ctx))).unwrap_or(0)
 }
 
-pub(super) unsafe extern "C" fn ssl_raw_custom_verify<F>(
+pub(super) unsafe extern "C" fn ssl_raw_custom_verify(
     ssl: *mut ffi::SSL,
     out_alert: *mut u8,
-) -> ffi::ssl_verify_result_t
-where
-    F: Fn(&mut SslRef) -> Result<(), SslVerifyError> + 'static + Sync + Send,
-{
+) -> ffi::ssl_verify_result_t {
     let callback = |ssl: &mut SslRef| {
         let callback = ssl
-            .callback::<Arc<F>>(CallbackRole::CustomVerify)
+            .slot_data(&SSL_CUSTOM_VERIFY_INDEX)
+            .and_then(Option::as_ref)
             .cloned()
             .ok_or(SslVerifyError::Invalid(SslAlert::INTERNAL_ERROR))?;
 
@@ -276,20 +279,18 @@ where
     })
 }
 
-pub(super) unsafe extern "C" fn ssl_raw_verify<F>(
+pub(super) unsafe extern "C" fn ssl_raw_verify(
     preverify_ok: c_int,
     x509_ctx: *mut ffi::X509_STORE_CTX,
-) -> c_int
-where
-    F: Fn(bool, &mut X509StoreContextRef) -> bool + 'static + Sync + Send,
-{
+) -> c_int {
     // SAFETY: btls provides valid inputs.
     let ctx = unsafe { X509StoreContextRef::from_ptr_mut(x509_ctx) };
 
-    let Some(callback) = ctx
-        .ssl()
-        .and_then(|ssl| ssl.callback::<Arc<F>>(CallbackRole::Verify).cloned())
-    else {
+    let Some(callback) = ctx.ssl().and_then(|ssl| {
+        ssl.slot_data(&SSL_VERIFY_INDEX)
+            .and_then(Option::as_ref)
+            .cloned()
+    }) else {
         return 0;
     };
     catch_native(|| c_int::from(callback(preverify_ok != 0, ctx))).unwrap_or(0)

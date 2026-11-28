@@ -72,7 +72,7 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     assert!(!ctx.ctx.has_x509_support());
     assert!(ctx.cert_store().is_err());
     assert!(ctx.cert_store_mut().is_err());
-    assert!(ctx.set_verify(SslVerifyMode::PEER).is_err());
+    assert!(ctx.set_verify_mode(SslVerifyMode::PEER).is_err());
     assert!(ctx.verify_mode().is_err());
     assert!(ctx.set_verify_depth(1).is_err());
     assert!(
@@ -93,7 +93,7 @@ fn non_x509_context_rejects_certificate_operations_without_panicking() {
     let ctx = ctx.build();
     assert!(ctx.cert_store().is_err());
     let mut ssl = Ssl::new(&ctx).unwrap();
-    assert!(ssl.set_verify(SslVerifyMode::PEER).is_err());
+    assert!(ssl.set_verify_mode(SslVerifyMode::PEER).is_err());
     assert!(ssl.verify_mode().is_err());
     assert!(ssl.verify_param_mut().is_err());
     assert!(ssl.peer_certificate().is_none());
@@ -862,7 +862,7 @@ fn refcount_ssl_context() {
 fn default_verify_paths() {
     let mut ctx = SslContext::builder(SslMethod::tls()).unwrap();
     ctx.set_default_verify_paths().unwrap();
-    ctx.set_verify(SslVerifyMode::PEER).unwrap();
+    ctx.set_verify_mode(SslVerifyMode::PEER).unwrap();
     let ctx = ctx.build();
     let s = match TcpStream::connect("google.com:443") {
         Ok(s) => s,
@@ -893,7 +893,7 @@ fn verify_valid_hostname() {
     let server = Server::builder().build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
 
@@ -918,7 +918,7 @@ fn verify_valid_hostname_with_wildcard() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
     client
@@ -943,7 +943,7 @@ fn verify_reject_underscore_hostname_with_wildcard() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
     client
@@ -968,7 +968,7 @@ fn verify_allow_underscore_hostname_with_wildcard() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
 
@@ -995,7 +995,7 @@ fn verify_invalid_hostname() {
     let server = server.build();
     let mut client = server.client_with_root_ca();
 
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
 
     let mut client = client.build().builder();
     client
@@ -1225,7 +1225,7 @@ fn connector_no_hostname_can_disable_verify() {
     let server = Server::builder().build();
 
     let mut connector = SslConnector::builder(SslMethod::tls()).unwrap();
-    connector.set_verify(SslVerifyMode::NONE).unwrap();
+    connector.set_verify_mode(SslVerifyMode::NONE).unwrap();
     let connector = connector.build();
 
     let s = server.connect_tcp();
@@ -1931,7 +1931,7 @@ fn peer_signature_algorithm_mtls_server_sees_client() {
             .unwrap();
         server_builder
             .ctx()
-            .set_verify(SslVerifyMode::PEER)
+            .set_verify_mode(SslVerifyMode::PEER)
             .unwrap();
         let captured_cb = Arc::clone(&captured);
         server_builder
@@ -2021,7 +2021,7 @@ fn signature_algorithm_used_mtls_client() {
             .unwrap();
         server_builder
             .ctx()
-            .set_verify(SslVerifyMode::PEER)
+            .set_verify_mode(SslVerifyMode::PEER)
             .unwrap();
     }
     let server = server_builder.build();

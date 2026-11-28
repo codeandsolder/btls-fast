@@ -24,3 +24,4 @@ always boringssl-loongarch.patch
 underscore-wildcards underscore-wildcards.patch
 relax-cert-validation relax-cert-validation.patch
 always boringssl-resume-verify-mode.patch
+always boringssl-clear-verify-callback.patch

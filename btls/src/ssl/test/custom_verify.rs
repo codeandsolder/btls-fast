@@ -341,6 +341,101 @@ fn replacing_pending_async_verifier_discards_old_result() {
 }
 
 #[test]
+fn clearing_custom_verifiers_restores_native_verification() {
+    use std::sync::Arc;
+    let mut server = Server::builder();
+    server.expected_connections_count(3);
+    server.should_error_when(|attempt| attempt != 0);
+    let server = server.build();
+    let old = Arc::new(());
+    let captured = Arc::clone(&old);
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |_| {
+            let _keep = &captured;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 2);
+    client
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, |_| Ok(()))
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 1);
+    let client = client.build();
+    client.builder().connect();
+    let mut cleared = client.builder();
+    let captured = Arc::clone(&old);
+    cleared
+        .ssl()
+        .set_custom_verify_callback(SslVerifyMode::PEER, move |_| {
+            let _keep = &captured;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 2);
+    cleared
+        .ssl()
+        .clear_custom_verify_callback(SslVerifyMode::PEER)
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 1);
+    cleared.connect_err();
+    let mut cleared = server.client();
+    cleared
+        .ctx()
+        .set_custom_verify_callback(SslVerifyMode::PEER, |_| Ok(()))
+        .unwrap();
+    cleared
+        .ctx()
+        .clear_custom_verify_callback(SslVerifyMode::PEER)
+        .unwrap();
+    cleared.connect_err();
+}
+
+#[test]
+fn clearing_pending_custom_verifier_drops_future_before_handshake_resumes() {
+    use crate::ssl::BoxCustomVerifyFinish;
+    use std::sync::Arc;
+    use std::task::Waker;
+    let mut server = Server::builder();
+    server.should_error();
+    let server = server.build();
+    let token = Arc::new(());
+    let captured = Arc::clone(&token);
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_async_custom_verify_callback(SslVerifyMode::PEER, move |_| {
+            let token = Arc::clone(&captured);
+            Ok(Box::pin(async move {
+                let _keep = token;
+                std::future::pending::<Result<BoxCustomVerifyFinish, SslAlert>>().await
+            }))
+        })
+        .unwrap();
+    let mut client = client.build().builder();
+    client
+        .ssl()
+        .set_task_waker(Some(Waker::noop().clone()))
+        .unwrap();
+    let HandshakeError::WouldBlock(mut handshake) = client.connect_err() else {
+        panic!("expected pending verifier");
+    };
+    assert_eq!(handshake.error().code(), ErrorCode::WANT_CERTIFICATE_VERIFY);
+    assert_eq!(Arc::strong_count(&token), 3);
+    handshake
+        .ssl_mut()
+        .clear_custom_verify_callback(SslVerifyMode::PEER)
+        .unwrap();
+    assert_eq!(Arc::strong_count(&token), 2);
+    assert!(matches!(
+        handshake.handshake(),
+        Err(HandshakeError::Failure(_))
+    ));
+}
+
+#[test]
 fn copied_custom_verifier_survives_context_switch() {
     use crate::ssl::{SslContextBuilder, SslMethod};
     use std::sync::Arc;

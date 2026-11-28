@@ -1000,7 +1000,7 @@ fn ech_firefox_policy_matches_live_client_hello() {
     server.ctx().set_curves_list("P-384").unwrap();
     let server = server.build();
     let mut client = server.client_with_root_ca();
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
     client
         .ctx()
         .set_min_proto_version(Some(SslVersion::TLS1_2))

@@ -13,7 +13,7 @@ fn untrusted() {
     let server = server.build();
 
     let mut client = server.client();
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
 
     client.connect_err();
 }
@@ -35,7 +35,7 @@ fn trusted_with_set_cert() {
     store.add_cert(&x509).unwrap();
 
     let mut client = server.client();
-    client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
     client.ctx().set_verify_cert_store(&store.build()).unwrap();
 
     client.connect();
@@ -155,6 +155,75 @@ fn ssl_callback() {
     assert!(CALLED_BACK.load(Ordering::SeqCst));
 }
 
+#[test]
+fn mode_changes_preserve_verifier_and_explicit_clear_removes_it() {
+    use std::sync::Arc;
+    let mut server = Server::builder();
+    server.expected_connections_count(4);
+    server.should_error_when(|attempt| attempt == 1 || attempt == 3);
+    let server = server.build();
+    let old = Arc::new(());
+    let captured = Arc::clone(&old);
+    let mut client = server.client();
+    client
+        .ctx()
+        .set_verify_callback(SslVerifyMode::PEER, move |_, _| {
+            let _keep = &captured;
+            true
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 2);
+    client
+        .ctx()
+        .set_verify_callback(SslVerifyMode::PEER, |_, _| true)
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 1);
+    client.ctx().set_verify_mode(SslVerifyMode::NONE).unwrap();
+    client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
+    let client = client.build();
+    client.builder().connect();
+    let mut cleared = client.builder();
+    cleared
+        .ssl()
+        .clear_verify_callback(SslVerifyMode::PEER)
+        .unwrap();
+    cleared.connect_err();
+    let mut overridden = client.builder();
+    let captured = Arc::clone(&old);
+    overridden
+        .ssl()
+        .set_verify_callback(SslVerifyMode::PEER, move |_, _| {
+            let _keep = &captured;
+            false
+        })
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 2);
+    overridden
+        .ssl()
+        .set_verify_callback(SslVerifyMode::PEER, |_, _| true)
+        .unwrap();
+    assert_eq!(Arc::strong_count(&old), 1);
+    overridden
+        .ssl()
+        .set_verify_mode(SslVerifyMode::NONE)
+        .unwrap();
+    overridden
+        .ssl()
+        .set_verify_mode(SslVerifyMode::PEER)
+        .unwrap();
+    overridden.connect();
+    let mut cleared = server.client();
+    cleared
+        .ctx()
+        .set_verify_callback(SslVerifyMode::PEER, |_, _| true)
+        .unwrap();
+    cleared
+        .ctx()
+        .clear_verify_callback(SslVerifyMode::PEER)
+        .unwrap();
+    cleared.connect_err();
+}
+
 /// Verifies that an RSA leaf certificate whose keyUsage extension lacks the
 /// bit required by the negotiated cipher suite is rejected when BoringSSL
 /// enforces RSA keyUsage and accepted when enforcement is relaxed.
@@ -192,7 +261,7 @@ fn rsa_key_usage_mismatch() {
 
     let configure_client = |server: &Server| {
         let mut client = server.client();
-        client.ctx().set_verify(SslVerifyMode::PEER).unwrap();
+        client.ctx().set_verify_mode(SslVerifyMode::PEER).unwrap();
         client
             .ctx()
             .set_ca_file("test/rsa-key-usage-relaxed-ca.pem")
