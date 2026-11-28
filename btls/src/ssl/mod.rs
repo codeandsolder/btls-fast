@@ -3842,15 +3842,24 @@ impl SslRef {
 
     /// Changes only the verification mode, preserving all callbacks.
     /// # Errors
-    /// X.509 is unsupported or the connection configuration is unavailable.
+    /// X.509 is unsupported, configuration is unavailable, or a custom verifier is executing.
     #[corresponds(SSL_set_verify)]
     pub fn set_verify_mode(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509()?;
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         // SAFETY: a live X.509 connection with configuration; native preserves
         // the existing per-certificate callback when supplied null.
         unsafe { ffi::SSL_set_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
         Ok(())
+    }
+
+    fn require_verification_idle(&self) -> Result<(), ErrorStack> {
+        if callbacks::custom_verify_active(self) {
+            return Err(ErrorStack::internal_error_str(
+                "cannot change verification mode or callbacks during custom verification",
+            ));
+        }
+        self.require_verification_config()
     }
 
     fn require_verification_config(&self) -> Result<(), ErrorStack> {
@@ -3916,10 +3925,8 @@ impl SslRef {
     /// other operations more straightforwardly.
     ///
     /// # Errors
-    /// The context does not support X.509 certificates.
-    ///
-    ///
-    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    /// The context does not support X.509 certificates, configuration is unavailable,
+    /// a custom verifier is executing, or callback storage cannot be allocated.
     #[corresponds(SSL_set_verify)]
     pub fn set_verify_callback<F>(
         &mut self,
@@ -3931,7 +3938,7 @@ impl SslRef {
     {
         self.ssl_context().check_x509()?;
 
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         self.set_ex_data(SSL_VERIFY_INDEX.register()?, Some(Arc::new(callback)))?;
         // SAFETY: the live X.509 connection owns its callback state and config.
         unsafe {
@@ -3947,10 +3954,11 @@ impl SslRef {
     /// Removes the inherited or connection-specific per-certificate verifier.
     /// The whole-chain X.509 and custom TLS callbacks remain unchanged.
     /// # Errors
-    /// X.509 is unsupported or configuration is unavailable.
+    /// X.509 is unsupported, configuration is unavailable, or a custom verifier is executing.
     #[corresponds(SSL_clear_verify_callback)]
     pub fn clear_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
         self.ssl_context().check_x509()?;
+        self.require_verification_idle()?;
         // SAFETY: exclusive X.509 SSL; native checks config before changing it.
         unsafe {
             cvt(ffi::SSL_clear_verify_callback(
@@ -3984,9 +3992,12 @@ impl SslRef {
 
     /// Like [`SslContextBuilder::set_custom_verify_callback`].
     ///
-    /// # Errors
+    /// May replace a verifier between invocations, including a suspended
+    /// handshake. A verifier cannot replace itself during execution.
     ///
-    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    /// # Errors
+    /// Configuration is unavailable, a custom verifier is executing, or
+    /// native callback storage cannot be allocated.
     #[corresponds(SSL_set_custom_verify)]
     pub fn set_custom_verify_callback<F>(
         &mut self,
@@ -3996,7 +4007,7 @@ impl SslRef {
     where
         F: Fn(&mut Self) -> Result<(), SslVerifyError> + 'static + Sync + Send,
     {
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         self.set_ex_data(
             SSL_CUSTOM_VERIFY_INDEX.register()?,
             Some(Arc::new(callback)),
@@ -4017,10 +4028,10 @@ impl SslRef {
     /// sets the mode. Native verification, including configured X.509 callbacks,
     /// is used instead. Any pending asynchronous custom verification is discarded.
     /// # Errors
-    /// The connection configuration is unavailable.
+    /// Configuration is unavailable or a custom verifier is executing.
     #[corresponds(SSL_set_custom_verify)]
     pub fn clear_custom_verify_callback(&mut self, mode: SslVerifyMode) -> Result<(), ErrorStack> {
-        self.require_verification_config()?;
+        self.require_verification_idle()?;
         // SAFETY: exclusive live SSL with configuration; null clears the callback.
         unsafe { ffi::SSL_set_custom_verify(self.as_ptr(), c_int::from(mode.bits()), None) };
         if let Some(index) = SSL_CUSTOM_VERIFY_INDEX.get()

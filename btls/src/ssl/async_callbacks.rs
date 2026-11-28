@@ -385,10 +385,14 @@ impl SslCredentialBuilder {
 }
 
 impl SslRef {
+    /// Installs an asynchronous verifier on this connection.
+    ///
+    /// A suspended verifier can be replaced between invocations, but not
+    /// while the verifier's callback or completion function is executing.
     ///
     /// # Errors
-    ///
-    /// Returns an error if the native extra-data index or callback storage cannot be allocated.
+    /// Configuration is unavailable, a custom verifier is executing, or
+    /// native callback storage cannot be allocated.
     pub fn set_async_custom_verify_callback<F>(
         &mut self,
         mode: SslVerifyMode,
