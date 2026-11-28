@@ -8,6 +8,7 @@ use std::fmt;
 
 /// An owned pseudorandom key bound to its HKDF digest. Its storage is
 /// cleansed on drop, and its debug representation never exposes key material.
+///
 /// Expansion never accepts a separate digest, so equal-width hash algorithms
 /// cannot be accidentally interchanged.
 ///
@@ -211,10 +212,10 @@ impl HkdfSuite {
 
     /// Imports an externally supplied PRK and explicitly associates it with
     /// this digest. The caller must know the PRK's original algorithm; length
-    /// alone cannot establish that identity. PRKs longer than HashLen are valid.
+    /// alone cannot establish that identity. PRKs longer than `HashLen` are valid.
     ///
     /// # Errors
-    /// The digest width is invalid or the PRK is shorter than HashLen.
+    /// The digest width is invalid or the PRK is shorter than `HashLen`.
     pub fn import_prk(self, bytes: &[u8]) -> Result<HkdfPrkRef<'_>, ErrorStack> {
         let width = self.checked_width()?;
         if bytes.len() < width {
