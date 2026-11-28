@@ -23,7 +23,7 @@ pub const PKCS12_MAX_ITER: c_int = ffi::PKCS12_MAX_ITER;
 
 /// The authenticated contents of one PKCS #12 archive.
 ///
-/// BoringSSL supports at most one private key and preserves certificate order.
+/// `BoringSSL` supports at most one private key and preserves certificate order.
 /// The certificates are not necessarily CAs, trusted, or an ordered chain.
 pub struct ParsedPkcs12 {
     pub private_key: Option<PKey<Private>>,
