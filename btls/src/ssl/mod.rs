@@ -1321,6 +1321,7 @@ impl SslContextBuilder {
     /// Without [`Self::set_custom_verify_callback`] every resumption fails verification; call
     /// [`SslRef::verify_peer_cert_chain`] from it to keep the built-in X.509 checks. Incompatible
     /// with [`SslVerifyMode::NONE`], including a mode set on one connection.
+    /// A resumption with verification disabled fails the handshake without invoking the callback.
     #[corresponds(SSL_CTX_set_reverify_on_resume)]
     pub fn set_reverify_on_resume(&mut self, enabled: bool) {
         // SAFETY: The context is live and exclusively borrowed; the reverify flag is a native scalar setting.

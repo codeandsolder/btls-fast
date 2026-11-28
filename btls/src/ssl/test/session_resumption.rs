@@ -149,6 +149,75 @@ fn client_session_cache_apis() {
     assert_eq!(verify_count.load(Ordering::SeqCst), 2);
 }
 
+#[test]
+fn resume_reverification_rejects_disabled_verification() {
+    for version in [SslVersion::TLS1_2, SslVersion::TLS1_3] {
+        let mut server = Server::builder();
+        server.expected_connections_count(2);
+        server.should_error_when(|attempt| attempt == 1);
+        server.ctx().set_min_proto_version(Some(version)).unwrap();
+        server.ctx().set_max_proto_version(Some(version)).unwrap();
+        let server = server.build();
+
+        let sessions = Arc::new(Mutex::new(Vec::new()));
+        let issued = Arc::clone(&sessions);
+        let calls = Arc::new(AtomicU8::new(0));
+        let observed = Arc::clone(&calls);
+        let mut client = server.client_with_root_ca();
+        client.ctx().set_reverify_on_resume(true);
+        client
+            .ctx()
+            .set_session_cache_mode(SslSessionCacheMode::CLIENT);
+        client
+            .ctx()
+            .set_new_session_callback(move |_, session| {
+                issued.lock().unwrap().push(session);
+            })
+            .unwrap();
+        client
+            .ctx()
+            .set_custom_verify_callback(SslVerifyMode::PEER, move |ssl| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                ssl.verify_peer_cert_chain()
+                    .map_err(|_| SslVerifyError::Invalid(crate::ssl::SslAlert::CERTIFICATE_UNKNOWN))
+            })
+            .unwrap();
+        let client = client.build();
+        let first = client.builder().connect();
+        assert!(!first.ssl().session_reused());
+        let session = sessions.lock().unwrap().pop().unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        let mut resumed = client.builder();
+        // SAFETY: this is an authenticated session from the same client context,
+        // with the same peer and protocol; the new handshake has not started.
+        unsafe { resumed.ssl().set_session(&session).unwrap() };
+        let observed = Arc::clone(&calls);
+        resumed
+            .ssl()
+            .set_custom_verify_callback(SslVerifyMode::NONE, move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .unwrap();
+        let crate::ssl::HandshakeError::Failure(failed) = resumed.connect_err() else {
+            panic!("expected a verification failure");
+        };
+        assert!(
+            failed
+                .error()
+                .ssl_error()
+                .unwrap()
+                .errors()
+                .iter()
+                .any(|error| {
+                    error.library_reason(crate::ffi::ERR_LIB_SSL)
+                        == Some(crate::ffi::SSL_R_CERTIFICATE_VERIFY_FAILED)
+                })
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+}
+
 type Sessions = Arc<Mutex<Vec<ClientSession>>>;
 
 fn collect_sessions(connector: &mut SslConnectorBuilder, sessions: &Sessions) {
